@@ -1,0 +1,11 @@
+BEGIN:VCARD
+VERSION:3.0
+UID:test-vcard-456@example.com
+FN:Jane Smith
+N:Smith;Jane;Marie;;
+EMAIL;TYPE=INTERNET:jane.smith@example.com
+TEL;TYPE=CELL:+1234567890
+ORG:Example Corporation
+TITLE:Senior Developer
+ADR;TYPE=WORK:;;123 Main St;Berlin;;10115;Germany
+END:VCARD
