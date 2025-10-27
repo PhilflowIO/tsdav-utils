@@ -33,3 +33,8 @@ Thumbs.db
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Internal documentation (keep local only)
+CLAUDE.md
+GIT_WORKFLOW.md
+RESEARCH_FINDINGS.md
