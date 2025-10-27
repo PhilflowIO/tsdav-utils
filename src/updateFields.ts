@@ -47,18 +47,28 @@ export function updateFields(
   // 3. Find the actual component to update
   //    VEVENT and VTODO are wrapped in VCALENDAR
   //    VCARD is standalone
-  const actualComponent = component.name === 'VCALENDAR'
-    ? component.getFirstSubcomponent()
-    : component;
+  //    Note: component.name returns lowercase
+  let actualComponent;
 
-  if (!actualComponent) {
-    throw new Error('No component found in iCal data (expected VEVENT, VTODO, or VCARD)');
+  if (component.name === 'vcalendar') {
+    // Try to find VEVENT, VTODO, or other subcomponents
+    actualComponent = component.getFirstSubcomponent('vevent') ||
+                      component.getFirstSubcomponent('vtodo') ||
+                      component.getFirstSubcomponent('vjournal');
+
+    if (!actualComponent) {
+      throw new Error('No VEVENT, VTODO, or VJOURNAL found in VCALENDAR');
+    }
+  } else {
+    // Standalone component (VCARD)
+    actualComponent = component;
   }
 
   // 4. Update properties using field-agnostic loop
   //    updatePropertyWithValue() handles both updates and creates if missing
+  //    ical.js expects lowercase property names
   for (const [key, value] of Object.entries(fields)) {
-    actualComponent.updatePropertyWithValue(key, value);
+    actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
   }
 
   // 5. Serialize back to iCal string
