@@ -5,7 +5,7 @@ yarn.lock
 pnpm-lock.yaml
 
 # Build outputs
-dist/
+# dist/ - committed for GitHub installation compatibility
 *.tsbuildinfo
 
 # Testing
