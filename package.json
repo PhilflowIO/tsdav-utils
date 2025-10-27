@@ -1,0 +1,56 @@
+{
+  "name": "tsdav-utils",
+  "version": "0.1.0",
+  "description": "Field-agnostic utility layer for tsdav CalDAV/CardDAV operations",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": [
+    "caldav",
+    "carddav",
+    "tsdav",
+    "ical",
+    "calendar",
+    "vcard",
+    "vtodo"
+  ],
+  "author": "PhilflowIO <tech@philflow.io>",
+  "license": "MIT",
+  "peerDependencies": {
+    "tsdav": "^2.0.0"
+  },
+  "dependencies": {
+    "ical.js": "^2.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsup": "^8.0.1",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PhilflowIO/tsdav-utils.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PhilflowIO/tsdav-utils/issues"
+  },
+  "homepage": "https://github.com/PhilflowIO/tsdav-utils#readme"
+}
