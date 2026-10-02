@@ -1,6 +1,6 @@
 {
   "name": "tsdav-utils",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Field-agnostic utility layer for tsdav CalDAV/CardDAV operations",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
@@ -33,9 +33,6 @@
   ],
   "author": "PhilflowIO <tech@philflow.io>",
   "license": "MIT",
-  "peerDependencies": {
-    "tsdav": "^2.0.0"
-  },
   "dependencies": {
     "ical.js": "^2.0.1"
   },

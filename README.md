@@ -33,6 +33,8 @@ This is intentional. All intelligence belongs in your application layer or MCP s
 npm install tsdav tsdav-utils
 ```
 
+`tsdav-utils` does not depend on tsdav: it only takes and returns iCal/vCard strings, so it declares no `tsdav` peer dependency. Use it with any tsdav version, including forks and builds with a non-standard version string.
+
 ## Usage
 
 ### Basic Example
