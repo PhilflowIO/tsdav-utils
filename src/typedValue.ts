@@ -615,8 +615,10 @@ function wallClockIn(component: ICAL.Component, t: ICAL.Time, tzid: string): ICA
  *  - to a date (all-day DTSTART): the UNTIL's calendar date in the old
  *    DTSTART's frame — its zone for a TZID DTSTART, else the UNTIL's own;
  *  - from a date to a date-time: the end of that day (UNTIL is inclusive) as
- *    wall clock in the new DTSTART's zone — UTC for a UTC DTSTART, a zoneless
- *    value for a TZID or floating one, which untilTime then converts or keeps;
+ *    wall clock in the zone the new DTSTART's wall clock belongs to, passed
+ *    zoneless for untilTime to convert or keep: the TZID, floating, or for a
+ *    UTC DTSTART under floatingTime "local" the host zone. A UTC DTSTART under
+ *    "keep" has no other zone to go by, so the day ends at 23:59:59 UTC;
  *  - a UTC UNTIL to a floating DTSTART: the wall clock in the old DTSTART's
  *    zone; with no old zone there is no wall clock to give, so it throws;
  *  - everything else as it is, for untilTime to accept, convert or refuse
@@ -627,6 +629,7 @@ function untilInput(
   old: ICAL.Time,
   oldAnchor: Anchor | null,
   newAnchor: Anchor | null,
+  floatingTime: FloatingTime,
 ): string {
   if (newAnchor?.form === 'date') {
     return dateString(isUtcTime(old) && oldAnchor?.form === 'tzid'
@@ -637,7 +640,8 @@ function untilInput(
     if (!newAnchor) {
       return dateString(old);
     }
-    return `${dateString(old)}T23:59:59${newAnchor.form === 'utc' ? 'Z' : ''}`;
+    const utcDay = newAnchor.form === 'utc' && floatingTime === 'keep';
+    return `${dateString(old)}T23:59:59${utcDay ? 'Z' : ''}`;
   }
   if (isUtcTime(old)) {
     if (newAnchor?.form === 'floating') {
@@ -692,7 +696,7 @@ export function realignUntils(
     const upper = property.name.toUpperCase();
     const recur = property.getFirstValue() as ICAL.Recur;
     try {
-      recur.until = untilTime(component, upper, untilInput(component, until, oldAnchor, anchor), floatingTime);
+      recur.until = untilTime(component, upper, untilInput(component, until, oldAnchor, anchor, floatingTime), floatingTime);
     } catch (error) {
       throw new Error(`DTSTART changed, and the existing ${upper} UNTIL=${until.toICALString()} ` +
         `cannot follow it (${(error as Error).message}): give ${upper}, with UNTIL, in the same call`);

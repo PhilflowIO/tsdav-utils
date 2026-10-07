@@ -233,6 +233,34 @@ describe('writing DTSTART carries an existing UNTIL into the new form', () => {
       .toEqual(['DTSTART:20261001T100000Z', 'RRULE:FREQ=DAILY;UNTIL=20261020T235959Z']);
   });
 
+  // ical.js expansion of the written series, counted up to a safe limit
+  const occurrences = (ical: string) => {
+    const event = new ICAL.Event(new ICAL.Component(ICAL.parse(ical)).getFirstSubcomponent('vevent')!);
+    const it = event.iterator();
+    let n = 0;
+    while (it.next() && n < 100) n++;
+    return n;
+  };
+
+  it('all-day -> UTC under "local": the day ends in the host zone, so no occurrence is lost or gained', () => {
+    // 1..20 Oct daily = 20 occurrences. 20:00 host time is a different UTC
+    // day than 20 Oct east or west of UTC; a UTC end of day would cut the
+    // last one (west) or add a 21st (east).
+    const allDay = vevent('DTSTART;VALUE=DATE:20261001', { props: ['RRULE:FREQ=DAILY;UNTIL=20261020'] });
+    const out = updateFields(allDay, { DTSTART: '2026-10-01T20:00:00' }, { floatingTime: 'local' });
+    const endOfDay = new Date(2026, 9, 20, 23, 59, 59).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+    expect(rrule(out)).toEqual([`RRULE:FREQ=DAILY;UNTIL=${endOfDay}`]);
+    expect(occurrences(out)).toBe(20);
+    expect(occurrences(allDay)).toBe(20);
+  });
+
+  it('all-day -> UTC under "keep": with no other zone the day ends at 23:59:59 UTC', () => {
+    const allDay = vevent('DTSTART;VALUE=DATE:20261001', { props: ['RRULE:FREQ=DAILY;UNTIL=20261020'] });
+    const out = updateFields(allDay, { DTSTART: '2026-10-01T20:00:00Z' });
+    expect(rrule(out)).toEqual(['RRULE:FREQ=DAILY;UNTIL=20261020T235959Z']);
+    expect(occurrences(out)).toBe(20);
+  });
+
   it('all-day -> floating: the end of the UNTIL day as floating wall clock', () => {
     const allDay = vevent('DTSTART;VALUE=DATE:20261001', { props: ['RRULE:FREQ=DAILY;UNTIL=20261020'] });
     expect(series(updateFields(allDay, { DTSTART: '2026-10-01T10:00:00' })))

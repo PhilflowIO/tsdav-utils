@@ -341,7 +341,7 @@ function wallClockIn(component, t, tzid) {
   }
   return t.convertToZone(tz);
 }
-function untilInput(component, old, oldAnchor, newAnchor) {
+function untilInput(component, old, oldAnchor, newAnchor, floatingTime) {
   if (newAnchor?.form === "date") {
     return dateString(isUtcTime(old) && oldAnchor?.form === "tzid" ? wallClockIn(component, old, oldAnchor.tzid) : old);
   }
@@ -349,7 +349,8 @@ function untilInput(component, old, oldAnchor, newAnchor) {
     if (!newAnchor) {
       return dateString(old);
     }
-    return `${dateString(old)}T23:59:59${newAnchor.form === "utc" ? "Z" : ""}`;
+    const utcDay = newAnchor.form === "utc" && floatingTime === "keep";
+    return `${dateString(old)}T23:59:59${utcDay ? "Z" : ""}`;
   }
   if (isUtcTime(old)) {
     if (newAnchor?.form === "floating") {
@@ -375,7 +376,7 @@ function realignUntils(component, pending, floatingTime = "keep") {
     const upper = property.name.toUpperCase();
     const recur = property.getFirstValue();
     try {
-      recur.until = untilTime(component, upper, untilInput(component, until, oldAnchor, anchor), floatingTime);
+      recur.until = untilTime(component, upper, untilInput(component, until, oldAnchor, anchor, floatingTime), floatingTime);
     } catch (error) {
       throw new Error(`DTSTART changed, and the existing ${upper} UNTIL=${until.toICALString()} cannot follow it (${error.message}): give ${upper}, with UNTIL, in the same call`);
     }

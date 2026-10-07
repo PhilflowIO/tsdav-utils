@@ -259,8 +259,10 @@ updateFields(event, { RRULE: 'FREQ=DAILY;UNTIL=2026-10-26T14:00:00-04:00' });
     DTSTART's zone (`DTSTART:...T100000Z` + `UNTIL=20261020T100000Z`, then
     `{ DTSTART: '2026-10-01' }` gives `UNTIL=20261020`);
   - from a date to a timed DTSTART: the end of that day (`UNTIL` is inclusive)
-    in the new DTSTART's zone (`UNTIL=20261020` gives `UNTIL=20261020T235959Z`
-    next to a UTC DTSTART), converted as above;
+    in the zone the new DTSTART's wall clock belongs to, converted as above —
+    its `TZID`, floating, or for a UTC DTSTART under `{ floatingTime: 'local' }`
+    the host timezone. A UTC DTSTART under the default has no other zone to go
+    by, so `UNTIL=20261020` becomes `UNTIL=20261020T235959Z`;
   - a UTC `UNTIL` stays UTC next to a UTC or `TZID` DTSTART, and becomes the
     old zone's wall clock next to a new floating DTSTART;
   - where the old `UNTIL` names no definite instant in the new form — a floating
