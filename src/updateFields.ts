@@ -1,6 +1,21 @@
 import ICAL from 'ical.js';
-import type { CalendarObjectInput, FieldUpdates, UpdateFieldsOptions } from './types';
+import type { CalendarObjectInput, ComponentType, FieldUpdates, UpdateFieldsOptions } from './types';
 import { realignUntils, setDateValue, setRecurValue, untilsFollowingDtstart } from './typedValue';
+
+const COMPONENT_TYPES: readonly ComponentType[] = ['vevent', 'vtodo', 'vjournal'];
+
+/**
+ * The component type a caller named, lower-cased, or an error listing the
+ * accepted ones: a misspelt type must not fall back to whatever type the
+ * object happens to hold.
+ */
+function componentType(type: unknown): ComponentType {
+  const name = typeof type === 'string' ? type.toLowerCase() : '';
+  if (!(COMPONENT_TYPES as readonly string[]).includes(name)) {
+    throw new Error(`Invalid type "${String(type)}": use "vevent", "vtodo" or "vjournal"`);
+  }
+  return name as ComponentType;
+}
 
 /**
  * The component a series-level write belongs to.
@@ -24,10 +39,11 @@ import { realignUntils, setDateValue, setRecurValue, untilsFollowingDtstart } fr
  *
  * @param calendar - the parsed VCALENDAR
  * @param type - restrict to one component type ("vevent", "vtodo",
- *   "vjournal"); by default the first type present, in that order
+ *   "vjournal", in either case); by default the first type present, in that
+ *   order. Any other value throws.
  */
 export function seriesMaster(calendar: ICAL.Component, type?: string): ICAL.Component {
-  const types = type ? [type.toLowerCase()] : ['vevent', 'vtodo', 'vjournal'];
+  const types = type === undefined ? COMPONENT_TYPES : [componentType(type)];
   for (const type of types) {
     const all = calendar.getAllSubcomponents(type);
     if (all.length === 0) {
@@ -60,6 +76,9 @@ export function seriesMaster(calendar: ICAL.Component, type?: string): ICAL.Comp
  * @param fields - Key-value pairs of iCal properties to update (e.g., {'SUMMARY': 'New Title'})
  * @param options.floatingTime - how a date-time without a zone is written:
  *   "keep" (floating, the default) or "local" (host timezone, written as UTC)
+ * @param options.type - the component type to write into ("vevent", "vtodo",
+ *   "vjournal"); by default the first type present, in that order. Throws if
+ *   the object holds no component of that type, or is a vCard
  * @returns Updated iCal string ready for tsdav.updateCalendarObject()
  *
  * @example
@@ -89,6 +108,7 @@ export function updateFields(
   if (floatingTime !== 'keep' && floatingTime !== 'local') {
     throw new Error(`Invalid floatingTime "${floatingTime}": use "keep" or "local"`);
   }
+  const type = options.type === undefined ? undefined : componentType(options.type);
 
   // 2. Parse iCal string to Component
   let jcalData: any;
@@ -104,8 +124,14 @@ export function updateFields(
   // 3. Find the component to update: the master of a VCALENDAR (see
   //    seriesMaster), or the VCARD itself, which stands alone.
   //    Note: component.name returns lowercase
+  //    A type names an iCalendar component; on a vCard it can only be a
+  //    caller's mistake, so it is refused rather than ignored.
+  if (type && component.name !== 'vcalendar') {
+    throw new Error(
+      `type "${type}" applies to an iCalendar object, but this is a ${String(component.name).toUpperCase()}`);
+  }
   const actualComponent = component.name === 'vcalendar'
-    ? seriesMaster(component)
+    ? seriesMaster(component, type)
     : component;
 
   // 4. Update properties using field-agnostic loop

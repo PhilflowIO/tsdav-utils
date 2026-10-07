@@ -21,8 +21,17 @@ type CalendarObjectInput = string | {
  * - "local": read in the host timezone and written as UTC
  */
 type FloatingTime = 'keep' | 'local';
+/**
+ * An iCalendar component type a VCALENDAR write can be aimed at.
+ */
+type ComponentType = 'vevent' | 'vtodo' | 'vjournal';
 interface UpdateFieldsOptions {
     floatingTime?: FloatingTime;
+    /**
+     * The component type to write into. Without it the first type present is
+     * taken, VEVENT before VTODO before VJOURNAL (see seriesMaster).
+     */
+    type?: ComponentType;
 }
 
 /**
@@ -47,7 +56,8 @@ interface UpdateFieldsOptions {
  *
  * @param calendar - the parsed VCALENDAR
  * @param type - restrict to one component type ("vevent", "vtodo",
- *   "vjournal"); by default the first type present, in that order
+ *   "vjournal", in either case); by default the first type present, in that
+ *   order. Any other value throws.
  */
 declare function seriesMaster(calendar: ICAL.Component, type?: string): ICAL.Component;
 /**
@@ -62,6 +72,9 @@ declare function seriesMaster(calendar: ICAL.Component, type?: string): ICAL.Com
  * @param fields - Key-value pairs of iCal properties to update (e.g., {'SUMMARY': 'New Title'})
  * @param options.floatingTime - how a date-time without a zone is written:
  *   "keep" (floating, the default) or "local" (host timezone, written as UTC)
+ * @param options.type - the component type to write into ("vevent", "vtodo",
+ *   "vjournal"); by default the first type present, in that order. Throws if
+ *   the object holds no component of that type, or is a vCard
  * @returns Updated iCal string ready for tsdav.updateCalendarObject()
  *
  * @example
@@ -105,4 +118,4 @@ type DateValue = {
  */
 declare function parseDateValue(raw: string): DateValue;
 
-export { type CalendarObjectInput, type DateValue, type FieldUpdates, type FloatingTime, type UpdateFieldsOptions, parseDateValue, seriesMaster, updateFields };
+export { type CalendarObjectInput, type ComponentType, type DateValue, type FieldUpdates, type FloatingTime, type UpdateFieldsOptions, parseDateValue, seriesMaster, updateFields };

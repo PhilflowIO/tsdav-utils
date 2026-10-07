@@ -450,8 +450,16 @@ function setRecurValue(component, name, raw, floatingTime = "keep") {
 }
 
 // src/updateFields.ts
+var COMPONENT_TYPES = ["vevent", "vtodo", "vjournal"];
+function componentType(type) {
+  const name = typeof type === "string" ? type.toLowerCase() : "";
+  if (!COMPONENT_TYPES.includes(name)) {
+    throw new Error(`Invalid type "${String(type)}": use "vevent", "vtodo" or "vjournal"`);
+  }
+  return name;
+}
 function seriesMaster(calendar, type) {
-  const types = type ? [type.toLowerCase()] : ["vevent", "vtodo", "vjournal"];
+  const types = type === void 0 ? COMPONENT_TYPES : [componentType(type)];
   for (const type2 of types) {
     const all = calendar.getAllSubcomponents(type2);
     if (all.length === 0) {
@@ -479,6 +487,7 @@ function updateFields(calendarObject, fields, options = {}) {
   if (floatingTime !== "keep" && floatingTime !== "local") {
     throw new Error(`Invalid floatingTime "${floatingTime}": use "keep" or "local"`);
   }
+  const type = options.type === void 0 ? void 0 : componentType(options.type);
   let jcalData;
   let component;
   try {
@@ -487,7 +496,12 @@ function updateFields(calendarObject, fields, options = {}) {
   } catch (error) {
     throw new Error(`Failed to parse iCal data: ${error.message}`);
   }
-  const actualComponent = component.name === "vcalendar" ? seriesMaster(component) : component;
+  if (type && component.name !== "vcalendar") {
+    throw new Error(
+      `type "${type}" applies to an iCalendar object, but this is a ${String(component.name).toUpperCase()}`
+    );
+  }
+  const actualComponent = component.name === "vcalendar" ? seriesMaster(component, type) : component;
   const entries = Object.entries(fields).sort(
     ([a], [b]) => Number(b.toLowerCase() === "dtstart") - Number(a.toLowerCase() === "dtstart")
   );

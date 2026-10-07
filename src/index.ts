@@ -2,4 +2,4 @@
 export { updateFields, seriesMaster } from './updateFields';
 export { parseDateValue } from './typedValue';
 export type { DateValue } from './typedValue';
-export type { FieldUpdates, CalendarObjectInput, FloatingTime, UpdateFieldsOptions } from './types';
+export type { FieldUpdates, CalendarObjectInput, FloatingTime, UpdateFieldsOptions, ComponentType } from './types';
