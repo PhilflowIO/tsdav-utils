@@ -208,6 +208,31 @@ the same type as DTSTART, an RRULE `UNTIL` matching DTSTART, DUE vs. DURATION �
 is the caller's job. Like every other property, only the first `EXDATE`/`RDATE`
 line is replaced.
 
+## Recurring events and todos
+
+A recurring event or todo can hold, next to its master, override components for
+single instances: same `UID`, plus a `RECURRENCE-ID` (RFC 5545 3.8.4.4). Servers
+store them in any order. `updateFields` always edits the **master**, the
+`VEVENT`/`VTODO`/`VJOURNAL` without `RECURRENCE-ID`, so a series-level change
+(`SUMMARY`, `EXDATE`, `RRULE`, `DTSTART`, ...) reaches the series, and date-times
+follow the master's `DTSTART` (see above).
+
+- **Overrides are not touched.** Each override is an independent instance; a new
+  `SUMMARY` on the master does not rename an instance that was renamed on its own.
+  To change an override as well, edit it with ical.js directly.
+- **An object with only overrides** (a detached instance stored without its
+  master): a single component is edited as it is; with several there is no
+  telling which one is meant, so `updateFields` throws.
+- **Moving a master's `DTSTART` or changing its `RRULE`** does not move the
+  overrides' `RECURRENCE-ID`s yet, so an override can stop matching an occurrence
+  ([#16](https://github.com/PhilflowIO/tsdav-utils/issues/16)).
+- **Reading the same component yourself:** `seriesMaster(calendar, type?)` returns
+  the component `updateFields` edits, for a parsed `ICAL.Component` VCALENDAR —
+  use it to check what was written (e.g. DTEND against DTSTART) instead of
+  `getFirstSubcomponent`.
+- The component type is chosen first (`VEVENT`, then `VTODO`, then `VJOURNAL`),
+  since a CalDAV object holds one type (RFC 4791 4.1).
+
 ## What This Library Does NOT Do
 
 ### ❌ Not a High-Level API

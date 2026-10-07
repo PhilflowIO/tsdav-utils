@@ -181,6 +181,26 @@ function setDateValue(component, name, raw, floatingTime = "keep") {
 }
 
 // src/updateFields.ts
+function seriesMaster(calendar, type) {
+  const types = type ? [type.toLowerCase()] : ["vevent", "vtodo", "vjournal"];
+  for (const type2 of types) {
+    const all = calendar.getAllSubcomponents(type2);
+    if (all.length === 0) {
+      continue;
+    }
+    const master = all.find((c) => !c.hasProperty("recurrence-id"));
+    if (master) {
+      return master;
+    }
+    if (all.length === 1) {
+      return all[0];
+    }
+    throw new Error(
+      `This object holds ${all.length} ${type2.toUpperCase()} instances (each with a RECURRENCE-ID) and no master, so a field update cannot tell which one is meant. Edit the instance by rewriting the whole iCalendar object instead`
+    );
+  }
+  throw new Error(`No ${types.map((t) => t.toUpperCase()).join(", ")} found in VCALENDAR`);
+}
 function updateFields(calendarObject, fields, options = {}) {
   const icalString = typeof calendarObject === "string" ? calendarObject : calendarObject.data;
   if (!icalString) {
@@ -198,15 +218,7 @@ function updateFields(calendarObject, fields, options = {}) {
   } catch (error) {
     throw new Error(`Failed to parse iCal data: ${error.message}`);
   }
-  let actualComponent;
-  if (component.name === "vcalendar") {
-    actualComponent = component.getFirstSubcomponent("vevent") || component.getFirstSubcomponent("vtodo") || component.getFirstSubcomponent("vjournal");
-    if (!actualComponent) {
-      throw new Error("No VEVENT, VTODO, or VJOURNAL found in VCALENDAR");
-    }
-  } else {
-    actualComponent = component;
-  }
+  const actualComponent = component.name === "vcalendar" ? seriesMaster(component) : component;
   const entries = Object.entries(fields).sort(
     ([a], [b]) => Number(b.toLowerCase() === "dtstart") - Number(a.toLowerCase() === "dtstart")
   );
@@ -219,5 +231,6 @@ function updateFields(calendarObject, fields, options = {}) {
 }
 export {
   parseDateValue,
+  seriesMaster,
   updateFields
 };
