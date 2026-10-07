@@ -203,10 +203,73 @@ To validate input before calling `updateFields`, use the same grammar:
 `parseDateValue(value)` returns `{ kind: 'date' | 'utc' | 'floating', jcal }` or
 throws naming the accepted forms.
 
-Apart from following DTSTART, each value is encoded on its own. Keeping related properties consistent — DTEND
-the same type as DTSTART, an RRULE `UNTIL` matching DTSTART, DUE vs. DURATION —
-is the caller's job. Like every other property, only the first `EXDATE`/`RDATE`
-line is replaced.
+Apart from following DTSTART, each value is encoded on its own. Keeping related
+properties consistent — DUE vs. DURATION, say — is the caller's job; an RRULE
+`UNTIL` follows DTSTART (see [Recurrence rules](#recurrence-rules)). Like every other property, only the first
+`EXDATE`/`RDATE` line is replaced.
+
+## Recurrence rules
+
+`RRULE` (and the deprecated `EXRULE`, the other RECUR-typed property) is parsed
+too: written verbatim, ical.js serializes the string character by character
+(`RRULE:0=F;1=R;2=E;...`) and servers reject the object. The rule is checked
+against RFC 5545 3.3.10 and written as a typed value:
+
+```typescript
+updateFields(event, { RRULE: 'FREQ=DAILY;COUNT=5' });          // RRULE:FREQ=DAILY;COUNT=5
+updateFields(event, { RRULE: 'freq=monthly;byday=-1fr' });     // RRULE:FREQ=MONTHLY;BYDAY=-1FR
+updateFields(event, { RRULE: 'FREQ=DAILY;UNTIL=2026-10-26T14:00:00-04:00' });
+                                                                // RRULE:FREQ=DAILY;UNTIL=20261026T180000Z
+```
+
+- `FREQ` is required; only the parts RFC 5545 defines are accepted (`FREQ`,
+  `UNTIL`, `COUNT`, `INTERVAL`, `BYSECOND` ... `BYSETPOS`, `WKST`), each once,
+  with values in range. Names and values are case-insensitive; an empty part
+  (a trailing `;`) is ignored. Give the value only (`FREQ=DAILY`, not
+  `RRULE:FREQ=DAILY`). The RFC 7529 parts `RSCALE` and `SKIP` are refused:
+  ical.js cannot write them without losing them.
+- Combinations the RFC rules out throw: `COUNT` with `UNTIL`, `BYWEEKNO` without
+  `FREQ=YEARLY`, `BYYEARDAY` with `DAILY`/`WEEKLY`/`MONTHLY`, `BYMONTHDAY` with
+  `WEEKLY`, an ordinal `BYDAY` (`1MO`) outside `MONTHLY`/`YEARLY` or with
+  `BYWEEKNO`, `BYSETPOS` without another `BYxxx` part.
+- ical.js itself would silently drop unknown parts, a zero `COUNT` or `INTERVAL`,
+  and accept a rule without `FREQ`; here each of these throws, naming the
+  property and what is wrong.
+- `UNTIL` takes the same input forms as the date properties above
+  (`parseDateValue`) and is written in the form RFC 5545 3.3.10 ties to DTSTART:
+  - all-day DTSTART: a date (`UNTIL=20261026`); a date-time throws;
+  - UTC DTSTART: UTC. A value with `Z` or an offset is converted; one without a
+    zone throws under the default and is read in the host timezone with
+    `{ floatingTime: 'local' }`, as for DTEND;
+  - DTSTART with a `TZID`: UTC. A value without a zone is wall clock in that
+    zone and is converted with the `VTIMEZONE` in the document. **If the
+    document has no `VTIMEZONE` for that `TZID`, it throws and asks for a UTC or
+    offset value** — the zone's offset rules are unknown, and guessing one could
+    end the series hours early or late;
+  - floating DTSTART: floating; a value with a zone throws;
+  - a date next to a timed DTSTART throws;
+  - with no DTSTART, `UNTIL` is written in the form given.
+  DTSTART is written first, so `UNTIL` follows the new DTSTART whatever the key
+  order.
+- Writing DTSTART also carries an existing `UNTIL` (of an RRULE/EXRULE not
+  written in the same call) into the new DTSTART's form, so the object never
+  ends up with an `UNTIL` the RFC forbids — also when DTSTART and the rule are
+  written in separate calls:
+  - to an all-day DTSTART: the `UNTIL`'s calendar date, read in the old
+    DTSTART's zone (`DTSTART:...T100000Z` + `UNTIL=20261020T100000Z`, then
+    `{ DTSTART: '2026-10-01' }` gives `UNTIL=20261020`);
+  - from a date to a timed DTSTART: the end of that day (`UNTIL` is inclusive)
+    in the zone the new DTSTART's wall clock belongs to, converted as above —
+    its `TZID`, floating, or for a UTC DTSTART under `{ floatingTime: 'local' }`
+    the host timezone. A UTC DTSTART under the default has no other zone to go
+    by, so `UNTIL=20261020` becomes `UNTIL=20261020T235959Z`;
+  - a UTC `UNTIL` stays UTC next to a UTC or `TZID` DTSTART, and becomes the
+    old zone's wall clock next to a new floating DTSTART;
+  - where the old `UNTIL` names no definite instant in the new form — a floating
+    `UNTIL` next to a new UTC DTSTART under the default, a UTC one next to a new
+    floating DTSTART with no old zone, a zone with no `VTIMEZONE` — it throws
+    and asks for the rule, with `UNTIL`, in the same call.
+  A `COUNT` rule, or an event without a rule, is left as it is.
 
 ## Recurring events and todos
 
@@ -276,9 +339,9 @@ These limitations are intentional and documented in GitHub issues:
    - Zoned values are written as UTC; named zones (`TZID` + `VTIMEZONE`) are not produced
    - Workaround: build a TZID-based property with ical.js directly
 
-4. **Recurrence rules (RRULE)** ([#5](https://github.com/PhilflowIO/tsdav-utils/issues))
-   - Complex recurrence patterns
-   - Expanding recurring events
+4. **Recurrence expansion**
+   - An `RRULE` is validated and written (see [Recurrence rules](#recurrence-rules)),
+     but occurrences are not expanded
    - Workaround: Use ical.js directly for recurrence logic
 
 ## When Should I Use This?

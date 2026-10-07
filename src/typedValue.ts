@@ -366,3 +366,390 @@ export function setDateValue(
   }
   return true;
 }
+
+/*
+ * Typed writes for recurrence rules (RRULE, and the deprecated EXRULE).
+ *
+ * Written through updatePropertyWithValue, the rule string becomes the jCal
+ * value of a RECUR property, which ical.js serializes character by character
+ * ("RRULE:0=F;1=R;2=E;3=Q;4==;..."); a server rejects that. ICAL.Recur on its
+ * own is no validator either: it drops unknown parts, a second COUNT, a zero
+ * COUNT or INTERVAL without a word, accepts a rule without FREQ, COUNT
+ * together with UNTIL, BYSETPOS=0, BYYEARDAY=0, and reads "UNTIL=2026-10-26"
+ * as 2025-10-31. So the rule is checked against RFC 5545 3.3.10 here, and
+ * ical.js only builds the value from a rule already known to be valid.
+ */
+
+const WEEKDAY = '(?:SU|MO|TU|WE|TH|FR|SA)';
+
+/** One comma-separated list of integers in [min, max], signed or not */
+function intList(min: number, max: number, signed: boolean) {
+  const item = signed ? /^[+-]?\d{1,3}$/ : /^\d{1,2}$/;
+  return (value: string): string | null => {
+    for (const v of value.split(',')) {
+      const n = Math.abs(Number(v));
+      if (!item.test(v) || n < min || n > max) {
+        const range = signed ? `${min} to ${max} or -${max} to -${min}` : `${min} to ${max}`;
+        return `"${v}" is not in ${range}`;
+      }
+    }
+    return null;
+  };
+}
+
+/**
+ * The rule parts RFC 5545 3.3.10 defines, each with a check of its value that
+ * returns what is wrong, or null. UNTIL is checked by parseDateValue.
+ */
+const RULE_PARTS: Record<string, (value: string) => string | null> = {
+  FREQ: (v) => /^(SECONDLY|MINUTELY|HOURLY|DAILY|WEEKLY|MONTHLY|YEARLY)$/.test(v) ? null
+    : `"${v}" is not one of SECONDLY, MINUTELY, HOURLY, DAILY, WEEKLY, MONTHLY, YEARLY`,
+  UNTIL: () => null,
+  COUNT: (v) => /^\d+$/.test(v) && Number(v) >= 1 ? null : `"${v}" is not a positive integer`,
+  INTERVAL: (v) => /^\d+$/.test(v) && Number(v) >= 1 ? null : `"${v}" is not a positive integer`,
+  BYSECOND: intList(0, 60, false),
+  BYMINUTE: intList(0, 59, false),
+  BYHOUR: intList(0, 23, false),
+  BYDAY: (value) => {
+    for (const v of value.split(',')) {
+      const m = new RegExp(`^([+-]?\\d{1,2})?${WEEKDAY}$`).exec(v);
+      const n = m?.[1] === undefined ? 1 : Math.abs(Number(m[1]));
+      if (!m || n < 1 || n > 53) {
+        return `"${v}" is not a weekday (SU, MO, TU, WE, TH, FR, SA), optionally with an ordinal 1 to 53 or -53 to -1 ("1MO", "-1FR")`;
+      }
+    }
+    return null;
+  },
+  BYMONTHDAY: intList(1, 31, true),
+  BYYEARDAY: intList(1, 366, true),
+  BYWEEKNO: intList(1, 53, true),
+  BYMONTH: intList(1, 12, false),
+  BYSETPOS: intList(1, 366, true),
+  WKST: (v) => new RegExp(`^${WEEKDAY}$`).test(v) ? null
+    : `"${v}" is not a weekday (SU, MO, TU, WE, TH, FR, SA)`,
+};
+
+/**
+ * Split a rule into its parts and check each against RFC 5545 3.3.10:
+ * known names, each at most once, FREQ present, values in range, and the
+ * combinations the RFC rules out. Names and values are case-insensitive
+ * (RFC 5545 2), so they come back upper-cased.
+ *
+ * @throws {Error} saying what is wrong, without the property name
+ */
+function parseRuleParts(raw: string): Map<string, string> {
+  const parts = new Map<string, string>();
+  // an empty part (";;", a trailing ";") is a typo, not a part
+  for (const part of raw.trim().split(';').filter((p) => p.trim() !== '')) {
+    const eq = part.indexOf('=');
+    const name = (eq < 0 ? part : part.slice(0, eq)).trim().toUpperCase();
+    const value = eq < 0 ? '' : part.slice(eq + 1).trim().toUpperCase();
+    const check = RULE_PARTS[name];
+    if (!check) {
+      if (name === 'RSCALE' || name === 'SKIP') {
+        throw new Error('RSCALE/SKIP (RFC 7529) are not supported: ical.js cannot write them without losing them');
+      }
+      const colon = name.indexOf(':');
+      if (colon >= 0) {
+        // "RRULE:FREQ=DAILY": the property line, not the value
+        throw new Error(`"${part.trim()}" is not a rule part: drop the "${name.slice(0, colon + 1)}" ` +
+          `prefix and give only the rule, e.g. "${part.trim().slice(colon + 1)}"`);
+      }
+      throw new Error(`"${part.trim()}" is not a rule part. ` +
+        `RFC 5545 defines ${Object.keys(RULE_PARTS).join(', ')} (e.g. "FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10")`);
+    }
+    if (parts.has(name)) {
+      throw new Error(`${name} is given twice; each rule part may occur once`);
+    }
+    if (value === '') {
+      throw new Error(`${name} has no value`);
+    }
+    const wrong = check(value);
+    if (wrong) {
+      throw new Error(`${name}: ${wrong}`);
+    }
+    parts.set(name, value);
+  }
+
+  const freq = parts.get('FREQ');
+  if (!freq) {
+    throw new Error('FREQ is missing; every rule needs one (e.g. "FREQ=DAILY;COUNT=5")');
+  }
+  if (parts.has('COUNT') && parts.has('UNTIL')) {
+    throw new Error('COUNT and UNTIL cannot both be given (RFC 5545 3.3.10); use one of them');
+  }
+  if (parts.has('BYWEEKNO') && freq !== 'YEARLY') {
+    throw new Error('BYWEEKNO is only allowed with FREQ=YEARLY (RFC 5545 3.3.10)');
+  }
+  if (parts.has('BYYEARDAY') && ['DAILY', 'WEEKLY', 'MONTHLY'].includes(freq)) {
+    throw new Error(`BYYEARDAY is not allowed with FREQ=${freq} (RFC 5545 3.3.10)`);
+  }
+  if (parts.has('BYMONTHDAY') && freq === 'WEEKLY') {
+    throw new Error('BYMONTHDAY is not allowed with FREQ=WEEKLY (RFC 5545 3.3.10)');
+  }
+  const ordinalDay = (parts.get('BYDAY') ?? '').split(',').some((d) => /\d/.test(d));
+  if (ordinalDay && (!['MONTHLY', 'YEARLY'].includes(freq) || parts.has('BYWEEKNO'))) {
+    throw new Error('BYDAY with an ordinal ("1MO", "-1FR") is only allowed with FREQ=MONTHLY or ' +
+      'FREQ=YEARLY, and not together with BYWEEKNO (RFC 5545 3.3.10)');
+  }
+  if (parts.has('BYSETPOS') && ![...parts.keys()].some((k) => k.startsWith('BY') && k !== 'BYSETPOS')) {
+    throw new Error('BYSETPOS needs another BYxxx part to select from (RFC 5545 3.3.10)');
+  }
+  return parts;
+}
+
+/**
+ * The VTIMEZONE a TZID refers to, from the document the component is in, or
+ * null. Only the document is consulted: it is what a server and every other
+ * client will read the TZID against.
+ */
+function timezoneOf(component: ICAL.Component, tzid: string): ICAL.Timezone | null {
+  let root = component;
+  while (root.parent) {
+    root = root.parent;
+  }
+  const vtimezone = root.getAllSubcomponents('vtimezone')
+    .find((tz) => tz.getFirstPropertyValue('tzid') === tzid);
+  return vtimezone ? new ICAL.Timezone(vtimezone) : null;
+}
+
+/**
+ * UNTIL in the form RFC 5545 3.3.10 ties to DTSTART: a DATE next to an
+ * all-day DTSTART, local time next to a floating one, and UTC next to a UTC
+ * DTSTART or one with a TZID. The value takes the same input forms as every
+ * date property (parseDateValue) and is moved into that form where the
+ * instant allows it:
+ *
+ *  - a time without a zone next to a TZID DTSTART is wall clock in that zone
+ *    and is converted to UTC with the document's VTIMEZONE. Without one the
+ *    zone's rules are unknown, so it throws and asks for a UTC or offset value
+ *    rather than guess an offset that may be hours off;
+ *  - next to a UTC DTSTART a time without a zone follows floatingTime as for
+ *    DTEND: refused under "keep", host-local converted to UTC under "local";
+ *  - a value with a zone next to a floating DTSTART names an instant that a
+ *    floating series has no fixed place for, so it is refused;
+ *  - a date where a date-time is needed, or the other way round, is refused.
+ *
+ * With nothing to anchor it (no DTSTART) UNTIL is written in the form given,
+ * a zoneless time following floatingTime like any unanchored date-time.
+ */
+function untilTime(
+  component: ICAL.Component,
+  ruleName: string,
+  raw: string,
+  floatingTime: FloatingTime,
+): ICAL.Time {
+  let parsed: DateValue;
+  try {
+    parsed = parseDateValue(raw);
+  } catch (error) {
+    throw new Error(`${ruleName} UNTIL: ${(error as Error).message}`);
+  }
+  const anchor = anchorOf(component, ruleName.toLowerCase());
+  const fail = (why: string) => new Error(`${ruleName} UNTIL ${why}`);
+
+  if (anchor?.form === 'date' && parsed.kind !== 'date') {
+    throw fail('must be a date: DTSTART is a date (all-day), and RFC 5545 3.3.10 requires the same type, e.g. "2026-10-26"');
+  }
+  if (anchor && anchor.form !== 'date' && parsed.kind === 'date') {
+    throw fail('needs a time: DTSTART has one, and RFC 5545 3.3.10 requires the same type');
+  }
+  if (anchor?.form === 'floating' && parsed.kind === 'utc') {
+    throw fail('must be a local time without a zone, like the floating DTSTART (RFC 5545 3.3.10), e.g. "2026-10-26T18:00:00"');
+  }
+
+  if (parsed.kind === 'floating') {
+    if (anchor?.form === 'tzid') {
+      const tz = timezoneOf(component, anchor.tzid);
+      if (!tz) {
+        throw fail(`has no zone, and DTSTART's zone "${anchor.tzid}" has no VTIMEZONE in the document to ` +
+          'convert it to UTC with (RFC 5545 3.3.10 requires UTC here): give it a zone, ' +
+          'e.g. "2026-10-26T18:00:00Z" or "2026-10-26T18:00:00+01:00"');
+      }
+      const wall = ICAL.Time.fromDateTimeString(parsed.jcal);
+      const zoned = ICAL.Time.fromData({
+        year: wall.year, month: wall.month, day: wall.day,
+        hour: wall.hour, minute: wall.minute, second: wall.second,
+      }, tz);
+      return zoned.convertToZone(ICAL.Timezone.utcTimezone);
+    }
+    if (anchor?.form === 'floating') {
+      return ICAL.Time.fromDateTimeString(parsed.jcal);
+    }
+    if (floatingTime === 'local') {
+      return ICAL.Time.fromDateTimeString(toUtcJcal(parsed.local));
+    }
+    if (anchor?.form === 'utc') {
+      throw fail('has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"');
+    }
+    return ICAL.Time.fromDateTimeString(parsed.jcal);
+  }
+  return parsed.kind === 'date'
+    ? ICAL.Time.fromDateString(parsed.jcal)
+    : ICAL.Time.fromDateTimeString(parsed.jcal);
+}
+
+/** Whether a property is RECUR-typed in the component's design set */
+function isRecurProperty(component: ICAL.Component, name: string): boolean {
+  return (designSetFor(component).property as Record<string, any>)[name.toLowerCase()]?.defaultType === 'recur';
+}
+
+const isUtcTime = (t: ICAL.Time) => !t.isDate && t.zone?.tzid === 'UTC';
+const dateString = (t: ICAL.Time) => `${pad(t.year, 4)}-${pad(t.month)}-${pad(t.day)}`;
+const dateTimeString = (t: ICAL.Time) =>
+  `${dateString(t)}T${pad(t.hour)}:${pad(t.minute)}:${pad(t.second)}`;
+
+/** A UTC time as wall clock in a TZID, read with the document's VTIMEZONE */
+function wallClockIn(component: ICAL.Component, t: ICAL.Time, tzid: string): ICAL.Time {
+  const tz = timezoneOf(component, tzid);
+  if (!tz) {
+    throw new Error(`the old DTSTART's zone "${tzid}" has no VTIMEZONE in the document to read it in`);
+  }
+  return t.convertToZone(tz);
+}
+
+/**
+ * An existing UNTIL as the input string untilTime takes, moved into the form
+ * the new DTSTART needs where the instant allows it:
+ *
+ *  - to a date (all-day DTSTART): the UNTIL's calendar date in the old
+ *    DTSTART's frame — its zone for a TZID DTSTART, else the UNTIL's own;
+ *  - from a date to a date-time: the end of that day (UNTIL is inclusive) as
+ *    wall clock in the zone the new DTSTART's wall clock belongs to, passed
+ *    zoneless for untilTime to convert or keep: the TZID, floating, or for a
+ *    UTC DTSTART under floatingTime "local" the host zone. A UTC DTSTART under
+ *    "keep" has no other zone to go by, so the day ends at 23:59:59 UTC;
+ *  - a UTC UNTIL to a floating DTSTART: the wall clock in the old DTSTART's
+ *    zone; with no old zone there is no wall clock to give, so it throws;
+ *  - everything else as it is, for untilTime to accept, convert or refuse
+ *    (a floating UNTIL next to a new UTC DTSTART follows floatingTime).
+ */
+function untilInput(
+  component: ICAL.Component,
+  old: ICAL.Time,
+  oldAnchor: Anchor | null,
+  newAnchor: Anchor | null,
+  floatingTime: FloatingTime,
+): string {
+  if (newAnchor?.form === 'date') {
+    return dateString(isUtcTime(old) && oldAnchor?.form === 'tzid'
+      ? wallClockIn(component, old, oldAnchor.tzid)
+      : old);
+  }
+  if (old.isDate) {
+    if (!newAnchor) {
+      return dateString(old);
+    }
+    const utcDay = newAnchor.form === 'utc' && floatingTime === 'keep';
+    return `${dateString(old)}T23:59:59${utcDay ? 'Z' : ''}`;
+  }
+  if (isUtcTime(old)) {
+    if (newAnchor?.form === 'floating') {
+      if (oldAnchor?.form !== 'tzid') {
+        throw new Error('it is in UTC and the new DTSTART is floating, and without a zone a UTC instant has no wall clock');
+      }
+      return dateTimeString(wallClockIn(component, old, oldAnchor.tzid));
+    }
+    return `${dateTimeString(old)}Z`;
+  }
+  return dateTimeString(old);
+}
+
+/** A RECUR property whose UNTIL has to follow a DTSTART about to be written */
+export interface PendingUntil {
+  property: ICAL.Property;
+  until: ICAL.Time;
+  anchor: Anchor | null;
+}
+
+/**
+ * The RECUR properties (RRULE, EXRULE) with an UNTIL that a DTSTART write is
+ * going to leave behind, captured with the DTSTART form they were written
+ * against. Call before DTSTART is written; properties the same call writes
+ * itself (`written`, lower-case names) are left out, they follow the new
+ * DTSTART on their own.
+ */
+export function untilsFollowingDtstart(component: ICAL.Component, written: Set<string>): PendingUntil[] {
+  const anchor = anchorOf(component, 'rrule');
+  return component.getAllProperties()
+    .filter((p) => isRecurProperty(component, p.name) && !written.has(p.name))
+    .flatMap((property) => {
+      const until = (property.getFirstValue() as ICAL.Recur | null)?.until;
+      return until ? [{ property, until: until.clone(), anchor }] : [];
+    });
+}
+
+/**
+ * Re-derive each captured UNTIL against the DTSTART now in the component,
+ * through the same path a caller's UNTIL takes (untilTime), so updateFields
+ * never leaves an UNTIL that RFC 5545 3.3.10 forbids next to the new DTSTART.
+ * Where the old UNTIL names no definite instant in the new form, it throws
+ * and asks for the rule in the same call.
+ */
+export function realignUntils(
+  component: ICAL.Component,
+  pending: PendingUntil[],
+  floatingTime: FloatingTime = 'keep',
+): void {
+  const anchor = anchorOf(component, 'rrule');
+  for (const { property, until, anchor: oldAnchor } of pending) {
+    const upper = property.name.toUpperCase();
+    const recur = property.getFirstValue() as ICAL.Recur;
+    try {
+      recur.until = untilTime(component, upper, untilInput(component, until, oldAnchor, anchor, floatingTime), floatingTime);
+    } catch (error) {
+      throw new Error(`DTSTART changed, and the existing ${upper} UNTIL=${until.toICALString()} ` +
+        `cannot follow it (${(error as Error).message}): give ${upper}, with UNTIL, in the same call`);
+    }
+    property.setValue(recur);
+  }
+}
+
+/**
+ * Write a recurrence rule property (RECUR-typed in the design set: RRULE,
+ * EXRULE) from a caller-supplied rule string such as "FREQ=DAILY;COUNT=5".
+ *
+ * The rule is checked against RFC 5545 3.3.10 (see parseRuleParts), UNTIL is
+ * brought into the form DTSTART requires (see untilTime), and the result is
+ * written as a typed ICAL.Recur on the first occurrence of the property,
+ * creating it when missing.
+ *
+ * @returns true when the property was handled here, false when it is not
+ *          RECUR-typed and the caller should write it as before
+ * @throws {Error} naming the property and what is wrong with the rule
+ */
+export function setRecurValue(
+  component: ICAL.Component,
+  name: string,
+  raw: string,
+  floatingTime: FloatingTime = 'keep',
+): boolean {
+  const lower = name.toLowerCase();
+  if (!isRecurProperty(component, lower)) {
+    return false;
+  }
+
+  const upper = name.toUpperCase();
+  let parts: Map<string, string>;
+  try {
+    parts = parseRuleParts(raw);
+  } catch (error) {
+    throw new Error(`${upper}: ${(error as Error).message}`);
+  }
+
+  const until = parts.get('UNTIL');
+  parts.delete('UNTIL');
+  const recur = ICAL.Recur.fromString([...parts].map(([k, v]) => `${k}=${v}`).join(';'));
+  if (until !== undefined) {
+    recur.until = untilTime(component, upper, until, floatingTime);
+  }
+
+  let property = component.getFirstProperty(lower);
+  if (!property) {
+    property = new ICAL.Property(lower, component);
+    component.addProperty(property);
+  }
+  property.resetType('recur');
+  property.setValue(recur);
+  return true;
+}
