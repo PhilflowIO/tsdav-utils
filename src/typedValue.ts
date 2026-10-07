@@ -40,20 +40,41 @@ const ACCEPTED_FORMS =
   'Accepted forms: "2026-10-26T18:00:00Z", "2026-10-26T14:00:00-04:00", ' +
   '"20261026T180000Z", "2026-10-26T18:00:00" (no zone), or a date "2026-10-26" / "20261026"';
 
-interface ParsedValue {
-  type: 'date-time' | 'date';
-  /** jCal value: "YYYY-MM-DD", "YYYY-MM-DDTHH:MM:SS" or the same with "Z" */
-  jcal: string;
-  floating: boolean;
-}
+/**
+ * One parsed value. "floating" is a wall-clock time without a zone; what it
+ * becomes on write depends on the property it lands on (see setDateValue).
+ */
+type ParsedValue =
+  | { kind: 'date'; jcal: string }
+  | { kind: 'utc'; jcal: string }
+  | { kind: 'floating'; jcal: string; local: Date };
 
 const DATE_EXTENDED = /^(\d{4})-(\d{2})-(\d{2})$/;
 const DATE_BASIC = /^(\d{4})(\d{2})(\d{2})$/;
-const DATE_TIME_EXTENDED =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/i;
-const DATE_TIME_BASIC = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z)?$/i;
+const ZONE = '(Z|[+-]\\d{2}(?::?\\d{2})?)';
+const DATE_TIME_EXTENDED = new RegExp(
+  `^(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2})(?::(\\d{2})(?:\\.\\d+)?)?${ZONE}?$`, 'i');
+const DATE_TIME_BASIC = new RegExp(
+  `^(\\d{4})(\\d{2})(\\d{2})T(\\d{2})(\\d{2})(\\d{2})${ZONE}?$`, 'i');
 
 const pad = (n: number, width = 2) => String(n).padStart(width, '0');
+
+/**
+ * Milliseconds since the epoch of a UTC wall-clock time. Date.UTC maps years
+ * 0-99 onto 1900-1999, so the year is set separately.
+ */
+function utcMillis(y: number, mo: number, d: number, h = 0, mi = 0, s = 0): number {
+  const t = new Date(Date.UTC(2000, mo - 1, d, h, mi, s));
+  t.setUTCFullYear(y, mo - 1, d);
+  return t.getTime();
+}
+
+/** The same for a wall-clock time in the host timezone. */
+function localDate(y: number, mo: number, d: number, h: number, mi: number, s: number): Date {
+  const t = new Date(2000, mo - 1, d, h, mi, s);
+  t.setFullYear(y, mo - 1, d);
+  return t;
+}
 
 /**
  * Check the fields actually name a calendar date and a wall-clock time.
@@ -62,7 +83,7 @@ const pad = (n: number, width = 2) => String(n).padStart(width, '0');
 function assertRealDateTime(raw: string, y: number, mo: number, d: number, h = 0, mi = 0, s = 0) {
   // seconds are checked on their own: a leap second (60) would roll the
   // probe over into the next day on the last second of a month
-  const t = new Date(Date.UTC(y, mo - 1, d, h, mi, 0));
+  const t = new Date(utcMillis(y, mo, d, h, mi, 0));
   if (
     t.getUTCFullYear() !== y || t.getUTCMonth() !== mo - 1 || t.getUTCDate() !== d ||
     h > 23 || mi > 59 || s > 60
@@ -80,18 +101,17 @@ function toUtcJcal(date: Date): string {
  * Parse one date or date-time value as a caller would write it.
  *
  * A zoned value is converted to UTC: the instant is what matters, and UTC is
- * the only zone that needs no VTIMEZONE. A value without a zone is floating
- * (RFC 5545 3.3.5 form #1) unless floatingTime is "local", in which case it is
- * read in the host timezone and written as UTC.
+ * the only zone that needs no VTIMEZONE. A value without a zone stays a
+ * wall-clock time here; setDateValue decides what it means.
  */
-export function parseDateValue(raw: string, floatingTime: FloatingTime = 'keep'): ParsedValue {
+function parseDateValue(raw: string): ParsedValue {
   const value = raw.trim();
   let m: RegExpExecArray | null;
 
   if ((m = DATE_EXTENDED.exec(value)) || (m = DATE_BASIC.exec(value))) {
     const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
     assertRealDateTime(raw, y, mo, d);
-    return { type: 'date', jcal: `${m[1]}-${m[2]}-${m[3]}`, floating: false };
+    return { kind: 'date', jcal: `${m[1]}-${m[2]}-${m[3]}` };
   }
 
   m = DATE_TIME_EXTENDED.exec(value) || DATE_TIME_BASIC.exec(value);
@@ -105,28 +125,26 @@ export function parseDateValue(raw: string, floatingTime: FloatingTime = 'keep')
   assertRealDateTime(raw, y, mo, d, h, mi, s);
 
   if (zone) {
-    // UTC instant of the wall-clock fields, then shift by the offset. Leap
-    // seconds are clamped the way RFC 5545 3.3.5 allows ("60" -> next second).
-    let ms = Date.UTC(y, mo - 1, d, h, mi, s);
+    // UTC instant of the wall-clock fields, then shift by the offset. A leap
+    // second ("60") rolls over into the next second.
+    let ms = utcMillis(y, mo, d, h, mi, s);
     if (zone.toUpperCase() !== 'Z') {
       const sign = zone[0] === '-' ? -1 : 1;
       const digits = zone.slice(1).replace(':', '');
-      const offsetMinutes = Number(digits.slice(0, 2)) * 60 + Number(digits.slice(2, 4));
-      if (Number(digits.slice(0, 2)) > 23 || Number(digits.slice(2, 4)) > 59) {
+      const hours = Number(digits.slice(0, 2));
+      const minutes = Number(digits.slice(2, 4) || 0);
+      if (hours > 23 || minutes > 59) {
         throw new Error(`"${raw}" has an invalid UTC offset`);
       }
-      ms -= sign * offsetMinutes * 60000;
+      ms -= sign * (hours * 60 + minutes) * 60000;
     }
-    return { type: 'date-time', jcal: toUtcJcal(new Date(ms)), floating: false };
+    return { kind: 'utc', jcal: toUtcJcal(new Date(ms)) };
   }
 
-  if (floatingTime === 'local') {
-    return { type: 'date-time', jcal: toUtcJcal(new Date(y, mo - 1, d, h, mi, s)), floating: false };
-  }
   return {
-    type: 'date-time',
+    kind: 'floating',
     jcal: `${pad(y, 4)}-${pad(mo)}-${pad(d)}T${pad(h)}:${pad(mi)}:${pad(s)}`,
-    floating: true,
+    local: localDate(y, mo, d, h, mi, s),
   };
 }
 
@@ -152,8 +170,16 @@ interface DateProperty {
  * The date shape of a property, or null when the property is not a date
  * property this module handles (TEXT, X-*, DURATION-typed TRIGGER, ...).
  */
-export function dateProperty(component: ICAL.Component, name: string): DateProperty | null {
-  const design = (designSetFor(component).property as Record<string, any>)[name.toLowerCase()];
+function dateProperty(component: ICAL.Component, name: string): DateProperty | null {
+  const lower = name.toLowerCase();
+  // BDAY and ANNIVERSARY are DATE-AND-OR-TIME in vCard 4 and allow partial
+  // dates ("--0501"), which vCard 3 cards carry in practice too; ical.js
+  // types them date-time in 3.0. Both versions write them as given.
+  if (component.name === 'vcard' &&
+      (ICAL.design.vcard.property as Record<string, any>)[lower]?.defaultType === 'date-and-or-time') {
+    return null;
+  }
+  const design = (designSetFor(component).property as Record<string, any>)[lower];
   if (!design || !TYPED.has(design.defaultType)) {
     return null;
   }
@@ -169,8 +195,15 @@ export function dateProperty(component: ICAL.Component, name: string): DatePrope
  *
  * Updates the first occurrence (creating it when missing), which is the same
  * occurrence updatePropertyWithValue would touch, so only the encoding changes
- * and not which line is written. Parameters other than TZID survive: RANGE on
- * RECURRENCE-ID or an X- parameter still means what it meant.
+ * and not which line is written.
+ *
+ * A value without a zone is a wall-clock time, and it is read in the zone the
+ * property already has: on "DTSTART;TZID=Europe/Berlin:..." the value
+ * "2026-10-26T18:00:00" is 18:00 in Berlin, so the TZID stays. Without a TZID
+ * it is floating, or with floatingTime "local" the host's wall clock written
+ * as UTC. Every other value drops the TZID, which RFC 5545 3.2.19 forbids on
+ * a UTC value and which a DATE cannot carry. Other parameters (RANGE on
+ * RECURRENCE-ID, X- parameters) survive.
  *
  * @returns true when the property was handled here, false when it is not a
  *          date property and the caller should write it as before
@@ -186,41 +219,67 @@ export function setDateValue(
     return false;
   }
 
+  const upper = name.toUpperCase();
   const lower = name.toLowerCase();
-  const parts = shape.multiValue ? raw.split(',') : [raw];
-  const parsed = parts.map((part) => parseDateValue(part, floatingTime));
+  let parsed: ParsedValue[];
+  try {
+    // a trailing or doubled comma in a list is a typo, not a value
+    const parts = shape.multiValue ? raw.split(',').filter((part) => part.trim() !== '') : [raw];
+    parsed = (parts.length ? parts : [raw]).map(parseDateValue);
+  } catch (error) {
+    throw new Error(`${upper}: ${(error as Error).message}`);
+  }
 
-  const kinds = new Set(parsed.map((p) => p.type));
-  if (kinds.size > 1) {
-    throw new Error(`${name.toUpperCase()} mixes dates and date-times; all values must be one or the other`);
+  if (new Set(parsed.map((p) => p.kind === 'date')).size > 1) {
+    throw new Error(`${upper} mixes dates and date-times; all values must be one or the other`);
   }
-  let type: string = parsed[0].type;
+  const isDate = parsed[0].kind === 'date';
+  if (isDate && !shape.allowedTypes.includes('date')) {
+    throw new Error(`${upper} needs a date-time, not a date. ${ACCEPTED_FORMS}`);
+  }
 
-  if (type === 'date' && !shape.allowedTypes.includes('date')) {
-    throw new Error(`${name.toUpperCase()} needs a date-time, not a date. ${ACCEPTED_FORMS}`);
+  const existing = component.getFirstProperty(lower);
+  const tzid = existing?.getParameter('tzid');
+  const floating = parsed.some((p) => p.kind === 'floating');
+
+  // Which zone a wall-clock value is read in
+  let keepTzid = false;
+  let values: string[];
+  if (floating && tzid && !UTC_ONLY.has(lower)) {
+    if (parsed.some((p) => p.kind === 'utc')) {
+      throw new Error(`${upper} mixes values with and without a zone; give all of them a zone, or none`);
+    }
+    keepTzid = true;
+    values = parsed.map((p) => p.jcal);
+  } else if (floating && floatingTime === 'local') {
+    values = parsed.map((p) => (p.kind === 'floating' ? toUtcJcal(p.local) : p.jcal));
+  } else if (floating && UTC_ONLY.has(lower)) {
+    throw new Error(`${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"`);
+  } else {
+    values = parsed.map((p) => p.jcal);
   }
-  if (UTC_ONLY.has(lower) && parsed.some((p) => p.floating)) {
-    throw new Error(`${name.toUpperCase()} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"`);
-  }
+
+  let type = isDate ? 'date' : 'date-time';
   // vCard 4 REV is a TIMESTAMP; the parsed date-time is exactly that value.
   if (type === 'date-time' && shape.defaultType === 'timestamp') {
     type = 'timestamp';
   }
 
-  let property = component.getFirstProperty(lower);
+  let property = existing;
   if (!property) {
     property = new ICAL.Property(lower, component);
     component.addProperty(property);
   }
-  // A UTC or floating value carries no TZID (RFC 5545 3.2.19), and a DATE
-  // carries none either. resetType rewrites the jCal type, which is what
-  // decides whether VALUE=DATE is serialized.
-  property.removeParameter('tzid');
+  if (!keepTzid) {
+    property.removeParameter('tzid');
+  }
+  // resetType rewrites the jCal type, which decides whether VALUE=DATE is
+  // serialized; it also clears the old values
   property.resetType(type);
   if (shape.multiValue) {
-    property.setValues(parsed.map((p) => p.jcal));
+    property.setValues(values);
   } else {
-    property.setValue(parsed[0].jcal);
+    property.setValue(values[0]);
   }
   return true;
 }

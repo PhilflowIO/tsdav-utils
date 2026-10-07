@@ -37,6 +37,11 @@ export function updateFields(
     throw new Error('Invalid input: calendarObject must be a string or object with "data" field');
   }
 
+  const floatingTime = options.floatingTime ?? 'keep';
+  if (floatingTime !== 'keep' && floatingTime !== 'local') {
+    throw new Error(`Invalid floatingTime "${floatingTime}": use "keep" or "local"`);
+  }
+
   // 2. Parse iCal string to Component
   let jcalData: any;
   let component: any;
@@ -73,7 +78,7 @@ export function updateFields(
   //    everything else goes through updatePropertyWithValue(), which handles
   //    both updates and creates if missing. ical.js expects lowercase names.
   for (const [key, value] of Object.entries(fields)) {
-    if (!setDateValue(actualComponent, key, value, options.floatingTime)) {
+    if (!setDateValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }

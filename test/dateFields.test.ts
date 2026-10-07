@@ -107,9 +107,23 @@ describe('dates', () => {
 });
 
 describe('date-times without a zone', () => {
-  it('stay floating by default (RFC 5545 3.3.5 form #1)', () => {
-    const out = updateFields(vtodo('DUE;TZID=Europe/Berlin:20260101T100000'), { DUE: '2026-10-26T18:00:00' });
+  it('stay floating when the property has no zone (RFC 5545 3.3.5 form #1)', () => {
+    const out = updateFields(vtodo('DUE:20260101T000000Z'), { DUE: '2026-10-26T18:00:00' });
     expect(lines(out, 'DUE')).toEqual(['DUE:20261026T180000']);
+  });
+
+  it('are read in the zone the property already has, which keeps its TZID', () => {
+    const out = updateFields(vtodo('DUE;TZID=Europe/Berlin:20260101T100000'), { DUE: '2026-10-26T18:00:00' });
+    expect(lines(out, 'DUE')).toEqual(['DUE;TZID=Europe/Berlin:20261026T180000']);
+  });
+
+  it('prefer the existing TZID over floatingTime "local"', () => {
+    const out = updateFields(
+      vevent('RECURRENCE-ID;TZID=Europe/Berlin:20260101T100000'),
+      { 'RECURRENCE-ID': '2026-10-26T18:00:00' },
+      { floatingTime: 'local' },
+    );
+    expect(lines(out, 'RECURRENCE-ID')).toEqual(['RECURRENCE-ID;TZID=Europe/Berlin:20261026T180000']);
   });
 
   it('are read in the host timezone with floatingTime "local"', () => {
@@ -121,6 +135,41 @@ describe('date-times without a zone', () => {
   it.each(['COMPLETED', 'DTSTAMP', 'CREATED', 'LAST-MODIFIED'])('are rejected for %s, which must be UTC', (name) => {
     expect(() => updateFields(vtodo(), { [name]: '2026-10-26T18:00:00' })).toThrow(/must be in UTC/);
   });
+
+  it('are accepted for a UTC-only property with floatingTime "local"', () => {
+    const out = updateFields(vtodo(), { COMPLETED: '2026-10-26T18:00:00' }, { floatingTime: 'local' });
+    expect(lines(out, 'COMPLETED')[0]).toMatch(/^COMPLETED:\d{8}T\d{6}Z$/);
+  });
+
+  it('cannot be mixed with zoned values on a zoned property', () => {
+    expect(() => updateFields(
+      vevent('EXDATE;TZID=Europe/Berlin:20260101T100000'),
+      { EXDATE: '2026-10-26T18:00:00,2026-10-27T18:00:00Z' },
+    )).toThrow(/with and without a zone/);
+  });
+});
+
+describe('input forms', () => {
+  it.each([
+    ['2026-10-26T20:00:00+02', 'DUE:20261026T180000Z'],
+    ['20261026T200000+0200', 'DUE:20261026T180000Z'],
+    ['2026-10-26t18:00:00z', 'DUE:20261026T180000Z'],
+  ])('%s -> %s', (value, expected) => {
+    expect(lines(updateFields(vtodo(), { DUE: value }), 'DUE')).toEqual([expected]);
+  });
+
+  it('handles years before 100, which Date.UTC would move into the 1900s', () => {
+    const out = updateFields(vtodo(), { DUE: '0099-01-01' });
+    expect(lines(out, 'DUE')).toEqual(['DUE;VALUE=DATE:00990101']);
+  });
+
+  it('names the property in a parse error', () => {
+    expect(() => updateFields(vtodo(), { DUE: 'tomorrow' })).toThrow(/^DUE: "tomorrow"/);
+  });
+
+  it('rejects an unknown floatingTime option', () => {
+    expect(() => updateFields(vtodo(), { DUE: '2026-10-26' }, { floatingTime: 'utc' as any })).toThrow(/floatingTime/);
+  });
 });
 
 describe('multi-valued properties', () => {
@@ -130,6 +179,11 @@ describe('multi-valued properties', () => {
       { EXDATE: '2026-10-26T20:00:00+02:00,20261102T180000Z' },
     );
     expect(lines(out, 'EXDATE')).toEqual(['EXDATE:20261026T180000Z,20261102T180000Z']);
+  });
+
+  it('ignores a trailing comma', () => {
+    const out = updateFields(vevent(), { EXDATE: '2026-10-26T18:00:00Z,' });
+    expect(lines(out, 'EXDATE')).toEqual(['EXDATE:20261026T180000Z']);
   });
 
   it('rejects a mix of dates and date-times', () => {
@@ -147,6 +201,13 @@ describe('vCard', () => {
   it('vCard 4 REV (TIMESTAMP) keeps its instant', () => {
     const out = updateFields(vcard('4.0', 'REV:20200101T000000Z'), { REV: '2026-10-26T20:00:00+02:00' });
     expect(lines(out, 'REV')).toEqual(['REV:20261026T180000Z']);
+  });
+
+  // vCard 4 types BDAY as DATE-AND-OR-TIME, which allows "--0501"; vCard 3
+  // cards carry the same in practice, so neither version parses it
+  it.each(['3.0', '4.0'])('vCard %s BDAY keeps a partial date', (version) => {
+    const out = updateFields(vcard(version), { BDAY: '--0501' });
+    expect(lines(out, 'BDAY')).toEqual(['BDAY:--0501']);
   });
 
   it('vCard 3 REV (DATE-TIME) keeps its instant', () => {
