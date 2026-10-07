@@ -180,14 +180,22 @@ updateFields(event, { EXDATE: '2026-10-26T18:00:00Z,2026-11-02T18:00:00Z' });
 - A value without a zone is a wall-clock time. On a property that already has a
   `TZID` it is read in that zone and the `TZID` stays
   (`DTSTART;TZID=Europe/Berlin:...` + `2026-10-26T18:00:00` is 18:00 in Berlin).
-  Otherwise it stays floating, or with `{ floatingTime: 'local' }` as the third
-  argument it is read in the host timezone and written as UTC.
+  The other date-times of an event or todo (DTEND, DUE, EXDATE, RECURRENCE-ID, …)
+  without a `TZID` of their own follow DTSTART: its `TZID`, or floating if DTSTART
+  is floating — an end belongs to the zone of its start, and an EXDATE only
+  matches an occurrence named in that zone. With no zone to go by the value stays
+  floating, or with `{ floatingTime: 'local' }` as the third argument it is read in
+  the host timezone and written as UTC.
 - `COMPLETED`, `CREATED`, `DTSTAMP` and `LAST-MODIFIED` must be UTC (RFC 5545) and
   reject a floating value; properties that only allow a date-time reject a date.
 - Anything else (`tomorrow`, `26.10.2026`) throws, naming the accepted forms.
 - vCard `BDAY`/`ANNIVERSARY` (DATE-AND-OR-TIME in vCard 4, which allows `--0501`) are written as given.
 
-Each value is encoded on its own. Keeping related properties consistent — DTEND
+To validate input before calling `updateFields`, use the same grammar:
+`parseDateValue(value)` returns `{ kind: 'date' | 'utc' | 'floating', jcal }` or
+throws naming the accepted forms.
+
+Apart from following DTSTART's zone, each value is encoded on its own. Keeping related properties consistent — DTEND
 the same type as DTSTART, an RRULE `UNTIL` matching DTSTART, DUE vs. DURATION —
 is the caller's job. Like every other property, only the first `EXDATE`/`RDATE`
 line is replaced.
