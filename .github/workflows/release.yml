@@ -5,7 +5,7 @@ name: release
 #
 #   "tsdav-utils": "npm:@philflow/tsdav-utils@0.4.1"
 #
-# Why the registry and not a git dependency: npm 12 (Node 26) refuses git and
+# Why the registry and not a git dependency: npm 12 refuses git and
 # remote-tarball dependencies by default (`allow-git=none`,
 # `allow-remote=none`), so a consumer pinning `github:...#tag` fails to
 # install (PhilflowIO/dav-mcp#100).
@@ -171,6 +171,8 @@ jobs:
       fail-fast: false
       matrix:
         node-version: [18, 20, 22, 24, 26]
+        # Node 26 still bundles npm 11; the 26 leg runs npm 12, whose
+        # defaults (allow-git=none, allow-remote=none) consumers hit.
 
     steps:
       # No checkout: a consumer has nothing but the package.
@@ -178,6 +180,18 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node-version }}
+
+      - name: Use npm 12
+        if: matrix.node-version == 26
+        run: |
+          npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.0
+          for key in allow-git allow-remote; do
+            value=$(npm config get "$key")
+            if [ "$value" != none ]; then
+              echo "❌ ERROR: npm $(npm --version) has $key=$value, expected none"
+              exit 1
+            fi
+          done
 
       - name: Fetch the tarball
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -237,12 +251,16 @@ jobs:
       VERSION: ${{ needs.build.outputs.version }}
 
     steps:
-      # Trusted publishing needs npm >= 11.5.1; Node 26 ships npm 12.
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 26
+          node-version: 24
           registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing needs npm >= 11.5.1. Pinned, not "whatever the
+      # runner image bundles", because this npm runs with the OIDC token.
+      - name: Use npm 12.2.0
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.0
 
       - name: Fetch the tarball
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
