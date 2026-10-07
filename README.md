@@ -128,7 +128,7 @@ const updated = updateFields(event.data, {
 
 ## API Reference
 
-### `updateFields(calendarObject, fields)`
+### `updateFields(calendarObject, fields, options?)`
 
 Updates arbitrary properties on a calendar/todo/contact object.
 
@@ -141,7 +141,10 @@ Updates arbitrary properties on a calendar/todo/contact object.
 - **fields**: `Record<string, string>`
   - Key-value pairs of iCal properties to update
   - Keys: iCal property names (e.g., `'SUMMARY'`, `'LOCATION'`, `'X-CUSTOM'`)
-  - Values: Property values as strings
+  - Values: Property values as strings; date-typed values are parsed (see [Date and date-time values](#date-and-date-time-values))
+
+- **options.floatingTime**: `'keep' | 'local'` (default `'keep'`)
+  - How a date-time without a zone is written: floating, or host timezone converted to UTC
 
 #### Returns
 
@@ -155,6 +158,31 @@ const updated: string = updateFields(calendarObject, {
   'X-CUSTOM-FIELD': 'custom value',
 });
 ```
+
+## Date and date-time values
+
+Date-typed properties (`DTSTART`, `DTEND`, `DUE`, `COMPLETED`, `RECURRENCE-ID`,
+`EXDATE`, `RDATE`, `LAST-MODIFIED`, `DTSTAMP`, `CREATED`, vCard `REV`, ...) are the
+one place where a plain string is not enough: written verbatim, ical.js drops
+UTC offsets and keeps a stale `TZID` or `VALUE=DATE` from the old value. So
+`updateFields` parses these values and writes them typed:
+
+```typescript
+updateFields(todo, { DUE: '2026-10-26T14:00:00-04:00' }); // DUE:20261026T180000Z
+updateFields(todo, { DUE: '20261026T180000Z' });          // DUE:20261026T180000Z
+updateFields(todo, { DUE: '2026-10-26' });                // DUE;VALUE=DATE:20261026
+updateFields(todo, { DUE: '2026-10-26T18:00:00' });       // DUE:20261026T180000 (floating)
+updateFields(event, { EXDATE: '2026-10-26T18:00:00Z,2026-11-02T18:00:00Z' });
+```
+
+- A value with `Z` or an offset is converted to UTC; any `TZID` on the old value is removed.
+- A date (`YYYY-MM-DD` or `YYYYMMDD`) becomes `VALUE=DATE`, and back again.
+- A value without a zone stays floating. Pass `{ floatingTime: 'local' }` as the
+  third argument to read it in the host timezone and write UTC instead.
+- `COMPLETED`, `CREATED`, `DTSTAMP` and `LAST-MODIFIED` must be UTC (RFC 5545) and
+  reject a floating value; properties that only allow a date-time reject a date.
+- Anything else (`tomorrow`, `26.10.2026`) throws, naming the accepted forms.
+- vCard 4 `BDAY`/`ANNIVERSARY` (DATE-AND-OR-TIME, which allows `--0501`) are written as given.
 
 ## What This Library Does NOT Do
 
@@ -175,23 +203,9 @@ updateFields(event, {
   'SUMMMARY': 'Typo in field name',  // ✅ Accepted (user's responsibility)
 });
 
-// ❌ We don't validate values
+// Date-typed values are the exception: they are parsed (see below)
 updateFields(event, {
-  'DTSTART': 'invalid-date',  // ✅ Accepted (ical.js may throw later)
-});
-```
-
-### ❌ Not a Type Converter
-
-```typescript
-// ❌ We don't convert datetime formats
-updateFields(event, {
-  'DTSTART': '2025-01-28',  // ❌ Wrong format - user must provide iCal format
-});
-
-// ✅ User provides correctly formatted iCal datetime
-updateFields(event, {
-  'DTSTART': '20250128T100000Z',  // ✅ Correct iCal format
+  'DTSTART': 'invalid-date',  // ❌ Throws, naming the accepted forms
 });
 ```
 
@@ -199,27 +213,21 @@ updateFields(event, {
 
 These limitations are intentional and documented in GitHub issues:
 
-1. **Datetime properties** ([#1](https://github.com/PhilflowIO/tsdav-utils/issues))
-   - ical.js validates datetime values
-   - Complex datetime handling requires special consideration
-   - Workaround: Update other properties, handle datetimes separately
-
-2. **Multi-value properties** ([#2](https://github.com/PhilflowIO/tsdav-utils/issues))
+1. **Multi-value properties** ([#2](https://github.com/PhilflowIO/tsdav-utils/issues))
    - `ATTENDEE` with multiple people
    - `CATEGORIES` with multiple values
    - Current: Treats as string (first value only)
 
-3. **Structured properties** ([#3](https://github.com/PhilflowIO/tsdav-utils/issues))
+2. **Structured properties** ([#3](https://github.com/PhilflowIO/tsdav-utils/issues))
    - `VCARD.N` has 5 components (Family;Given;Additional;Prefix;Suffix)
    - `VCARD.ADR` has 7 components
    - Current: May not handle component structure correctly
 
-4. **Timezone handling** ([#4](https://github.com/PhilflowIO/tsdav-utils/issues))
-   - Complex timezone conversions
-   - All-day vs timed events
-   - Workaround: Store in UTC, handle conversion in application layer
+3. **Timezone handling** ([#4](https://github.com/PhilflowIO/tsdav-utils/issues))
+   - Zoned values are written as UTC; named zones (`TZID` + `VTIMEZONE`) are not produced
+   - Workaround: build a TZID-based property with ical.js directly
 
-5. **Recurrence rules (RRULE)** ([#5](https://github.com/PhilflowIO/tsdav-utils/issues))
+4. **Recurrence rules (RRULE)** ([#5](https://github.com/PhilflowIO/tsdav-utils/issues))
    - Complex recurrence patterns
    - Expanding recurring events
    - Workaround: Use ical.js directly for recurrence logic
