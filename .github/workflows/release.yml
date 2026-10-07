@@ -252,6 +252,9 @@ jobs:
       # The registry is asked anonymously over its JSON API, so the answer
       # does not depend on the token setup-node writes into .npmrc.
       - name: Publish with provenance
+        env:
+          npm_config_allow_git: none
+          npm_config_allow_remote: none
         run: |
           LOCAL="sha512-$(openssl dgst -sha512 -binary "release/$ASSET" | base64 -w0)"
           URL="https://registry.npmjs.org/@philflow/tsdav-utils/$VERSION"
@@ -277,7 +280,19 @@ jobs:
               exit 1
               ;;
           esac
-          npm publish "release/$ASSET" --provenance --access public
+          # A bare "release/<file>.tgz" is GitHub shorthand to npm
+          # (github:release/<file>.tgz), and would make npm clone a stranger's
+          # repository in a job holding a publish token. The spec is a ./ path,
+          # npm's own parser has to read it as a file, and git is refused
+          # outright for this step.
+          SPEC="./release/$ASSET"
+          TYPE=$(node -e 'console.log(require(process.argv[1])(process.argv[2]).type)' \
+            "$(npm root --global)/npm/node_modules/npm-package-arg" "$SPEC")
+          if [ "$TYPE" != file ]; then
+            echo "❌ ERROR: npm reads $SPEC as a $TYPE spec, expected file"
+            exit 1
+          fi
+          npm publish "$SPEC" --provenance --access public --ignore-scripts
 
       # The registry answers from a cache that can lag behind the publish;
       # poll until it serves the bytes this run verified.
