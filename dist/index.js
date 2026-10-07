@@ -175,11 +175,12 @@ function setDateValue(component, name, raw, floatingTime = "keep") {
   }
   const existing = component.getFirstProperty(lower);
   const anchor = anchorOf(component, lower);
+  const why = ["exdate", "rdate"].includes(lower) ? "otherwise it names no occurrence of the series" : "RFC 5545 requires the same value type";
   if (anchor?.form === "date" && !isDate) {
-    throw new Error(`${upper} must be a date: DTSTART is a date (all-day), and RFC 5545 requires the same value type`);
+    throw new Error(`${upper} must be a date: DTSTART is a date (all-day), and ${why}`);
   }
   if (anchor && anchor.form !== "date" && isDate) {
-    throw new Error(`${upper} needs a time: DTSTART has one, and RFC 5545 requires the same value type`);
+    throw new Error(`${upper} needs a time: DTSTART has one, and ${why}`);
   }
   const own = existing?.getParameter("tzid");
   const zone = UTC_ONLY.has(lower) ? null : typeof own === "string" && own ? own : anchor?.form === "tzid" ? anchor.tzid : null;

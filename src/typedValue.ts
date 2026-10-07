@@ -296,11 +296,16 @@ export function setDateValue(
 
   const existing = component.getFirstProperty(lower);
   const anchor = anchorOf(component, lower);
+  // RFC 5545 requires it for DTEND, DUE and RECURRENCE-ID; for EXDATE and
+  // RDATE a different type names no occurrence of the series
+  const why = ['exdate', 'rdate'].includes(lower)
+    ? 'otherwise it names no occurrence of the series'
+    : 'RFC 5545 requires the same value type';
   if (anchor?.form === 'date' && !isDate) {
-    throw new Error(`${upper} must be a date: DTSTART is a date (all-day), and RFC 5545 requires the same value type`);
+    throw new Error(`${upper} must be a date: DTSTART is a date (all-day), and ${why}`);
   }
   if (anchor && anchor.form !== 'date' && isDate) {
-    throw new Error(`${upper} needs a time: DTSTART has one, and RFC 5545 requires the same value type`);
+    throw new Error(`${upper} needs a time: DTSTART has one, and ${why}`);
   }
 
   // The zone a wall-clock value is read in: the property's own TZID, else
