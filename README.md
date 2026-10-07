@@ -106,12 +106,12 @@ const updatedEvent = updateFields(event.data, {
   'LOCATION': 'Office',
 });
 
-// Todo/Task (VTODO)
+// Todo/Task (VTODO) — name the type when you know what you are editing
 const updatedTodo = updateFields(todo.data, {
   'SUMMARY': 'Finish documentation',
   'STATUS': 'IN-PROCESS',
   'PRIORITY': '1',
-});
+}, { type: 'vtodo' });
 
 // Contact (VCARD)
 const updatedContact = updateFields(vcard.data, {
@@ -153,6 +153,17 @@ Updates arbitrary properties on a calendar/todo/contact object.
 
 - **options.floatingTime**: `'keep' | 'local'` (default `'keep'`)
   - How a date-time without a zone is written: floating, or host timezone converted to UTC
+
+- **options.type**: `'vevent' | 'vtodo' | 'vjournal'` (optional)
+  - The component type to write into. Without it the first type present is taken
+    (`VEVENT`, then `VTODO`, then `VJOURNAL`, see [Recurring events and todos](#recurring-events-and-todos))
+  - Throws if the object holds no component of that type (the message names the types
+    it does hold), if the value is not one of the three, if the object is a bare
+    component of another type, or if it is a vCard
+  - Name it when you know what you are editing: on an object that holds a `VEVENT`
+    and a `VTODO` (which RFC 4791 4.1 forbids, but servers do store),
+    `updateFields(todo.data, { DUE: '...' }, { type: 'vtodo' })` writes into the todo
+    instead of the event
 
 #### Returns
 
@@ -320,7 +331,8 @@ follow the master's `DTSTART` (see above).
   use it to check what was written (e.g. DTEND against DTSTART) instead of
   `getFirstSubcomponent`.
 - The component type is chosen first (`VEVENT`, then `VTODO`, then `VJOURNAL`),
-  since a CalDAV object holds one type (RFC 4791 4.1).
+  since a CalDAV object holds one type (RFC 4791 4.1). Name it explicitly with
+  `updateFields(obj, fields, { type: 'vtodo' })` or `seriesMaster(calendar, 'vtodo')`.
 
 ## What This Library Does NOT Do
 
@@ -401,8 +413,8 @@ async function updateEvent(eventId: string, updates: Record<string, string>) {
   const event = events.find(e => e.url.includes(eventId));
   if (!event) throw new Error('Event not found');
 
-  // Update with field-agnostic approach
-  const updated = updateFields(event.data, updates);
+  // Update with field-agnostic approach, aimed at the VEVENT
+  const updated = updateFields(event.data, updates, { type: 'vevent' });
 
   await client.updateCalendarObject({
     calendarObject: { ...event, data: updated },

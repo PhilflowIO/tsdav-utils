@@ -1,6 +1,9 @@
 // src/updateFields.ts
 import ICAL3 from "ical.js";
 
+// src/types.ts
+var COMPONENT_TYPES = ["vevent", "vtodo", "vjournal"];
+
 // src/series.ts
 import ICAL2 from "ical.js";
 
@@ -637,8 +640,15 @@ function beginSeriesEdit(calendar, master, written) {
 }
 
 // src/updateFields.ts
+function componentType(type) {
+  const name = typeof type === "string" ? type.toLowerCase() : "";
+  if (!COMPONENT_TYPES.includes(name)) {
+    throw new Error(`Invalid type "${String(type)}": use "vevent", "vtodo" or "vjournal"`);
+  }
+  return name;
+}
 function seriesMaster(calendar, type) {
-  const types = type ? [type.toLowerCase()] : ["vevent", "vtodo", "vjournal"];
+  const types = type === void 0 ? COMPONENT_TYPES : [componentType(type)];
   for (const type2 of types) {
     const all = calendar.getAllSubcomponents(type2);
     if (all.length === 0) {
@@ -655,7 +665,8 @@ function seriesMaster(calendar, type) {
       `This object holds ${all.length} ${type2.toUpperCase()} instances (each with a RECURRENCE-ID) and no master, so a field update cannot tell which one is meant. Edit the instance by rewriting the whole iCalendar object instead`
     );
   }
-  throw new Error(`No ${types.map((t) => t.toUpperCase()).join(", ")} found in VCALENDAR`);
+  const held = [...new Set(calendar.getAllSubcomponents().map((c) => String(c.name).toUpperCase()))];
+  throw new Error(`No ${types.map((t) => t.toUpperCase()).join(", ")} found in VCALENDAR ` + (held.length ? `(it holds: ${held.join(", ")})` : "(it holds no components)"));
 }
 function updateFields(calendarObject, fields2, options = {}) {
   const icalString = typeof calendarObject === "string" ? calendarObject : calendarObject.data;
@@ -666,6 +677,7 @@ function updateFields(calendarObject, fields2, options = {}) {
   if (floatingTime !== "keep" && floatingTime !== "local") {
     throw new Error(`Invalid floatingTime "${floatingTime}": use "keep" or "local"`);
   }
+  const type = options.type === void 0 ? void 0 : componentType(options.type);
   let jcalData;
   let component;
   try {
@@ -674,7 +686,11 @@ function updateFields(calendarObject, fields2, options = {}) {
   } catch (error) {
     throw new Error(`Failed to parse iCal data: ${error.message}`);
   }
-  const actualComponent = component.name === "vcalendar" ? seriesMaster(component) : component;
+  if (type && component.name !== "vcalendar" && component.name !== type) {
+    const name = String(component.name).toUpperCase();
+    throw new Error(component.name === "vcard" ? `type "${type}" applies to an iCalendar object, but this is a VCARD` : `type "${type}" asks for a ${type.toUpperCase()}, but this object is a bare ${name}`);
+  }
+  const actualComponent = component.name === "vcalendar" ? seriesMaster(component, type) : component;
   const entries = Object.entries(fields2).sort(
     ([a], [b]) => Number(b.toLowerCase() === "dtstart") - Number(a.toLowerCase() === "dtstart")
   );
