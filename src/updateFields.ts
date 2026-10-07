@@ -1,8 +1,7 @@
 import ICAL from 'ical.js';
+import { COMPONENT_TYPES } from './types';
 import type { CalendarObjectInput, ComponentType, FieldUpdates, UpdateFieldsOptions } from './types';
 import { realignUntils, setDateValue, setRecurValue, untilsFollowingDtstart } from './typedValue';
-
-const COMPONENT_TYPES: readonly ComponentType[] = ['vevent', 'vtodo', 'vjournal'];
 
 /**
  * The component type a caller named, lower-cased, or an error listing the
@@ -39,11 +38,12 @@ function componentType(type: unknown): ComponentType {
  *
  * @param calendar - the parsed VCALENDAR
  * @param type - restrict to one component type ("vevent", "vtodo",
- *   "vjournal", in either case); by default the first type present, in that
- *   order. Any other value throws.
+ *   "vjournal"); by default the first type present, in that order. Checked
+ *   at runtime as well, for JavaScript callers: upper case is accepted, any
+ *   other value throws.
  */
-export function seriesMaster(calendar: ICAL.Component, type?: string): ICAL.Component {
-  const types = type === undefined ? COMPONENT_TYPES : [componentType(type)];
+export function seriesMaster(calendar: ICAL.Component, type?: ComponentType): ICAL.Component {
+  const types: readonly ComponentType[] = type === undefined ? COMPONENT_TYPES : [componentType(type)];
   for (const type of types) {
     const all = calendar.getAllSubcomponents(type);
     if (all.length === 0) {

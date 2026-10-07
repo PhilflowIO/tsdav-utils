@@ -22,9 +22,14 @@ type CalendarObjectInput = string | {
  */
 type FloatingTime = 'keep' | 'local';
 /**
- * An iCalendar component type a VCALENDAR write can be aimed at.
+ * The iCalendar component types a write can be aimed at, in the order
+ * updateFields tries them when no type is named.
  */
-type ComponentType = 'vevent' | 'vtodo' | 'vjournal';
+declare const COMPONENT_TYPES: readonly ["vevent", "vtodo", "vjournal"];
+/**
+ * An iCalendar component type a write can be aimed at.
+ */
+type ComponentType = typeof COMPONENT_TYPES[number];
 interface UpdateFieldsOptions {
     floatingTime?: FloatingTime;
     /**
@@ -56,10 +61,11 @@ interface UpdateFieldsOptions {
  *
  * @param calendar - the parsed VCALENDAR
  * @param type - restrict to one component type ("vevent", "vtodo",
- *   "vjournal", in either case); by default the first type present, in that
- *   order. Any other value throws.
+ *   "vjournal"); by default the first type present, in that order. Checked
+ *   at runtime as well, for JavaScript callers: upper case is accepted, any
+ *   other value throws.
  */
-declare function seriesMaster(calendar: ICAL.Component, type?: string): ICAL.Component;
+declare function seriesMaster(calendar: ICAL.Component, type?: ComponentType): ICAL.Component;
 /**
  * Update arbitrary fields on a calendar/todo/vcard object
  *

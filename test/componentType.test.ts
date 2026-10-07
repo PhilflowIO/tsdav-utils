@@ -81,10 +81,10 @@ describe('updateFields with a component type', () => {
 
 describe('seriesMaster validates its type', () => {
   it('refuses an unknown type', () => {
-    expect(() => seriesMaster(parse(MIXED), 'VTIMEZONE')).toThrow(/Invalid type "VTIMEZONE"/);
+    expect(() => seriesMaster(parse(MIXED), 'VTIMEZONE' as any)).toThrow(/Invalid type "VTIMEZONE"/);
   });
 
   it('accepts either case', () => {
-    expect(seriesMaster(parse(MIXED), 'VTODO').getFirstPropertyValue('summary')).toBe('Todo');
+    expect(seriesMaster(parse(MIXED), 'VTODO' as any).getFirstPropertyValue('summary')).toBe('Todo');
   });
 });

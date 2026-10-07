@@ -1,6 +1,9 @@
 // src/updateFields.ts
 import ICAL2 from "ical.js";
 
+// src/types.ts
+var COMPONENT_TYPES = ["vevent", "vtodo", "vjournal"];
+
 // src/typedValue.ts
 import ICAL from "ical.js";
 var TYPED = /* @__PURE__ */ new Set(["date-time", "date", "timestamp"]);
@@ -412,7 +415,6 @@ function setRecurValue(component, name, raw, floatingTime = "keep") {
 }
 
 // src/updateFields.ts
-var COMPONENT_TYPES = ["vevent", "vtodo", "vjournal"];
 function componentType(type) {
   const name = typeof type === "string" ? type.toLowerCase() : "";
   if (!COMPONENT_TYPES.includes(name)) {

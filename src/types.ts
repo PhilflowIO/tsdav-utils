@@ -23,9 +23,15 @@ export type CalendarObjectInput = string | {
 export type FloatingTime = 'keep' | 'local';
 
 /**
- * An iCalendar component type a VCALENDAR write can be aimed at.
+ * The iCalendar component types a write can be aimed at, in the order
+ * updateFields tries them when no type is named.
  */
-export type ComponentType = 'vevent' | 'vtodo' | 'vjournal';
+export const COMPONENT_TYPES = ['vevent', 'vtodo', 'vjournal'] as const;
+
+/**
+ * An iCalendar component type a write can be aimed at.
+ */
+export type ComponentType = typeof COMPONENT_TYPES[number];
 
 export interface UpdateFieldsOptions {
   floatingTime?: FloatingTime;

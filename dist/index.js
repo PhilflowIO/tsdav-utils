@@ -39,6 +39,9 @@ module.exports = __toCommonJS(index_exports);
 // src/updateFields.ts
 var import_ical2 = __toESM(require("ical.js"));
 
+// src/types.ts
+var COMPONENT_TYPES = ["vevent", "vtodo", "vjournal"];
+
 // src/typedValue.ts
 var import_ical = __toESM(require("ical.js"));
 var TYPED = /* @__PURE__ */ new Set(["date-time", "date", "timestamp"]);
@@ -450,7 +453,6 @@ function setRecurValue(component, name, raw, floatingTime = "keep") {
 }
 
 // src/updateFields.ts
-var COMPONENT_TYPES = ["vevent", "vtodo", "vjournal"];
 function componentType(type) {
   const name = typeof type === "string" ? type.toLowerCase() : "";
   if (!COMPONENT_TYPES.includes(name)) {
