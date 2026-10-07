@@ -1,14 +1,99 @@
 // src/updateFields.ts
-import ICAL3 from "ical.js";
+import ICAL4 from "ical.js";
 
 // src/types.ts
 var COMPONENT_TYPES = ["vevent", "vtodo", "vjournal"];
 
 // src/series.ts
-import ICAL2 from "ical.js";
+import ICAL3 from "ical.js";
 
 // src/typedValue.ts
+import ICAL2 from "ical.js";
+
+// src/zone.ts
 import ICAL from "ical.js";
+function wallOf(y, mo, d, h = 0, mi = 0, s = 0) {
+  const t = new Date(Date.UTC(2e3, mo - 1, d, h, mi, s));
+  t.setUTCFullYear(y, mo - 1, d);
+  return t.getTime() / 1e3;
+}
+function fieldsOf(wall) {
+  const t = new Date(wall * 1e3);
+  return {
+    year: t.getUTCFullYear(),
+    month: t.getUTCMonth() + 1,
+    day: t.getUTCDate(),
+    hour: t.getUTCHours(),
+    minute: t.getUTCMinutes(),
+    second: t.getUTCSeconds()
+  };
+}
+function timezoneOf(component, tzid) {
+  let root = component;
+  while (root.parent) {
+    root = root.parent;
+  }
+  const vtimezone = root.getAllSubcomponents("vtimezone").find((tz) => tz.getFirstPropertyValue("tzid") === tzid);
+  return vtimezone ? new ICAL.Timezone(vtimezone) : null;
+}
+function vtimezoneZone(tz) {
+  const convert2 = (wall, from, to) => {
+    const t = ICAL.Time.fromData(fieldsOf(wall), from).convertToZone(to);
+    return wallOf(t.year, t.month, t.day, t.hour, t.minute, t.second);
+  };
+  return {
+    toUtc: (wall) => convert2(wall, tz, ICAL.Timezone.utcTimezone),
+    fromUtc: (utc) => convert2(utc, ICAL.Timezone.utcTimezone, tz)
+  };
+}
+function ianaZone(tzid) {
+  let format;
+  try {
+    format = new Intl.DateTimeFormat("en-US", {
+      timeZone: tzid,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "numeric",
+      second: "numeric",
+      era: "short"
+    });
+  } catch {
+    return null;
+  }
+  const fromUtc = (utc) => {
+    const parts = Object.fromEntries(format.formatToParts(new Date(utc * 1e3)).map((p) => [p.type, p.value]));
+    const year = parts.era === "BC" || parts.era === "B" ? 1 - Number(parts.year) : Number(parts.year);
+    return wallOf(
+      year,
+      Number(parts.month),
+      Number(parts.day),
+      Number(parts.hour),
+      Number(parts.minute),
+      Number(parts.second)
+    );
+  };
+  return {
+    fromUtc,
+    // The offset at the wall clock read as UTC, then once more at the guess:
+    // exact outside a DST change, and in a gap or overlap one of its sides
+    toUtc: (wall) => {
+      const guess = wall - (fromUtc(wall) - wall);
+      return wall - (fromUtc(guess) - guess);
+    }
+  };
+}
+function zoneOf(component, tzid) {
+  const tz = timezoneOf(component, tzid);
+  return tz ? vtimezoneZone(tz) : ianaZone(tzid);
+}
+function unknownZone(tzid) {
+  return `the zone "${tzid}" has no VTIMEZONE in the document and is no IANA time zone`;
+}
+
+// src/typedValue.ts
 var TYPED = /* @__PURE__ */ new Set(["date-time", "date", "timestamp"]);
 var UTC_ONLY = /* @__PURE__ */ new Set(["completed", "created", "dtstamp", "last-modified"]);
 var DATE_TIME_FORMS = '"2026-10-26T18:00:00Z", "2026-10-26T14:00:00-04:00", "20261026T180000Z" or "2026-10-26T18:00:00" (no zone; seconds optional)';
@@ -58,13 +143,13 @@ function parseDateValue(raw) {
   }
   const [y, mo, d, h, mi] = [1, 2, 3, 4, 5].map((i) => Number(m[i]));
   const s = Number(m[6] ?? 0);
-  const zone = m[7];
+  const zone2 = m[7];
   assertRealDateTime(raw, y, mo, d, h, mi, s);
-  if (zone) {
+  if (zone2) {
     let ms = utcMillis(y, mo, d, h, mi, s);
-    if (zone.toUpperCase() !== "Z") {
-      const sign = zone[0] === "-" ? -1 : 1;
-      const digits = zone.slice(1).replace(":", "");
+    if (zone2.toUpperCase() !== "Z") {
+      const sign = zone2[0] === "-" ? -1 : 1;
+      const digits = zone2.slice(1).replace(":", "");
       const hours = Number(digits.slice(0, 2));
       const minutes = Number(digits.slice(2, 4) || 0);
       if (hours > 23 || minutes > 59) {
@@ -83,13 +168,13 @@ function parseDateValue(raw) {
 function designSetFor(component) {
   if (component.name === "vcard") {
     const version = String(component.getFirstPropertyValue("version") ?? "").trim();
-    return version === "3.0" ? ICAL.design.vcard3 : ICAL.design.vcard;
+    return version === "3.0" ? ICAL2.design.vcard3 : ICAL2.design.vcard;
   }
-  return ICAL.design.icalendar;
+  return ICAL2.design.icalendar;
 }
 function dateProperty(component, name) {
   const lower = name.toLowerCase();
-  if (component.name === "vcard" && ICAL.design.vcard.property[lower]?.defaultType === "date-and-or-time") {
+  if (component.name === "vcard" && ICAL2.design.vcard.property[lower]?.defaultType === "date-and-or-time") {
     return null;
   }
   const design = designSetFor(component).property[lower];
@@ -155,16 +240,16 @@ function setDateValue(component, name, raw, floatingTime = "keep") {
     throw new Error(`${upper} needs a time: DTSTART has one, and ${why}`);
   }
   const own = existing?.getParameter("tzid");
-  const zone = UTC_ONLY.has(lower) ? null : typeof own === "string" && own ? own : anchor?.form === "tzid" ? anchor.tzid : null;
+  const zone2 = UTC_ONLY.has(lower) ? null : typeof own === "string" && own ? own : anchor?.form === "tzid" ? anchor.tzid : null;
   const floating = parsed.some((p) => p.kind === "floating");
-  const wallClock = !floating ? null : zone ? "tzid" : anchor?.form === "floating" ? "floating" : floatingTime === "local" ? "utc" : anchor?.form === "utc" || UTC_ONLY.has(lower) ? null : "floating";
+  const wallClock = !floating ? null : zone2 ? "tzid" : anchor?.form === "floating" ? "floating" : floatingTime === "local" ? "utc" : anchor?.form === "utc" || UTC_ONLY.has(lower) ? null : "floating";
   if (floating && wallClock === null) {
     throw new Error(UTC_ONLY.has(lower) ? `${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"` : `${upper} has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"`);
   }
   if (floating && wallClock !== "utc" && parsed.some((p) => p.kind === "utc")) {
     throw new Error(`${upper} mixes values with and without a zone; give all of them a zone, or none`);
   }
-  const tzid = wallClock === "tzid" ? zone : null;
+  const tzid = wallClock === "tzid" ? zone2 : null;
   const values = parsed.map((p) => p.kind === "floating" && wallClock === "utc" ? toUtcJcal(p.local) : p.jcal);
   let type = isDate ? "date" : "date-time";
   if (type === "date-time" && shape.defaultType === "timestamp") {
@@ -172,7 +257,7 @@ function setDateValue(component, name, raw, floatingTime = "keep") {
   }
   let property = existing;
   if (!property) {
-    property = new ICAL.Property(lower, component);
+    property = new ICAL2.Property(lower, component);
     component.addProperty(property);
   }
   if (tzid) {
@@ -281,14 +366,6 @@ function parseRuleParts(raw) {
   }
   return parts;
 }
-function timezoneOf(component, tzid) {
-  let root = component;
-  while (root.parent) {
-    root = root.parent;
-  }
-  const vtimezone = root.getAllSubcomponents("vtimezone").find((tz) => tz.getFirstPropertyValue("tzid") === tzid);
-  return vtimezone ? new ICAL.Timezone(vtimezone) : null;
-}
 function untilTime(component, ruleName, raw, floatingTime) {
   let parsed;
   try {
@@ -309,33 +386,26 @@ function untilTime(component, ruleName, raw, floatingTime) {
   }
   if (parsed.kind === "floating") {
     if (anchor?.form === "tzid") {
-      const tz = timezoneOf(component, anchor.tzid);
-      if (!tz) {
-        throw fail(`has no zone, and DTSTART's zone "${anchor.tzid}" has no VTIMEZONE in the document to convert it to UTC with (RFC 5545 3.3.10 requires UTC here): give it a zone, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T18:00:00+01:00"`);
+      const zone2 = zoneOf(component, anchor.tzid);
+      if (!zone2) {
+        throw fail(`has no zone, and DTSTART's zone "${anchor.tzid}" has no VTIMEZONE in the document and is no IANA time zone to convert it to UTC with (RFC 5545 3.3.10 requires UTC here): give it a zone, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T18:00:00+01:00"`);
       }
-      const wall = ICAL.Time.fromDateTimeString(parsed.jcal);
-      const zoned = ICAL.Time.fromData({
-        year: wall.year,
-        month: wall.month,
-        day: wall.day,
-        hour: wall.hour,
-        minute: wall.minute,
-        second: wall.second
-      }, tz);
-      return zoned.convertToZone(ICAL.Timezone.utcTimezone);
+      const wall = ICAL2.Time.fromDateTimeString(parsed.jcal);
+      const utc = fieldsOf(zone2.toUtc(wallOf(wall.year, wall.month, wall.day, wall.hour, wall.minute, wall.second)));
+      return ICAL2.Time.fromData(utc, ICAL2.Timezone.utcTimezone);
     }
     if (anchor?.form === "floating") {
-      return ICAL.Time.fromDateTimeString(parsed.jcal);
+      return ICAL2.Time.fromDateTimeString(parsed.jcal);
     }
     if (floatingTime === "local") {
-      return ICAL.Time.fromDateTimeString(toUtcJcal(parsed.local));
+      return ICAL2.Time.fromDateTimeString(toUtcJcal(parsed.local));
     }
     if (anchor?.form === "utc") {
       throw fail('has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"');
     }
-    return ICAL.Time.fromDateTimeString(parsed.jcal);
+    return ICAL2.Time.fromDateTimeString(parsed.jcal);
   }
-  return parsed.kind === "date" ? ICAL.Time.fromDateString(parsed.jcal) : ICAL.Time.fromDateTimeString(parsed.jcal);
+  return parsed.kind === "date" ? ICAL2.Time.fromDateString(parsed.jcal) : ICAL2.Time.fromDateTimeString(parsed.jcal);
 }
 function isRecurProperty(component, name) {
   return designSetFor(component).property[name.toLowerCase()]?.defaultType === "recur";
@@ -354,13 +424,13 @@ function setRecurValue(component, name, raw, floatingTime = "keep") {
   }
   const until = parts.get("UNTIL");
   parts.delete("UNTIL");
-  const recur = ICAL.Recur.fromString([...parts].map(([k, v]) => `${k}=${v}`).join(";"));
+  const recur = ICAL2.Recur.fromString([...parts].map(([k, v]) => `${k}=${v}`).join(";"));
   if (until !== void 0) {
     recur.until = untilTime(component, upper, until, floatingTime);
   }
   let property = component.getFirstProperty(lower);
   if (!property) {
-    property = new ICAL.Property(lower, component);
+    property = new ICAL2.Property(lower, component);
     component.addProperty(property);
   }
   property.resetType("recur");
@@ -377,7 +447,7 @@ function stampOf(jcal, tzid) {
     throw new Error(`"${jcal}" is not a date or date-time`);
   }
   const [y, mo, d, h, mi, s] = [1, 2, 3, 4, 5, 6].map((i) => Number(m[i] ?? 0));
-  const wall = utcMillis(y, mo, d, h, mi, s) / 1e3;
+  const wall = wallOf(y, mo, d, h, mi, s);
   if (m[4] === void 0) {
     return { wall, kind: "date" };
   }
@@ -386,40 +456,33 @@ function stampOf(jcal, tzid) {
   }
   return typeof tzid === "string" && tzid ? { wall, kind: "tzid", tzid } : { wall, kind: "floating" };
 }
+var inFrame = (wall, frame) => frame.form === "tzid" ? { wall, kind: "tzid", tzid: frame.tzid } : { wall, kind: frame.form };
 var valuesOf = (property) => property.toJSON().slice(3);
-function fields(wall) {
-  const t = new Date(wall * 1e3);
-  return {
-    year: t.getUTCFullYear(),
-    month: t.getUTCMonth() + 1,
-    day: t.getUTCDate(),
-    hour: t.getUTCHours(),
-    minute: t.getUTCMinutes(),
-    second: t.getUTCSeconds()
-  };
-}
+var propertyStamps = (property) => {
+  const tzid = property.getParameter("tzid");
+  return valuesOf(property).map((v) => stampOf(String(Array.isArray(v) ? v[0] : v), tzid));
+};
 var dayOf = (wall) => Math.floor(wall / DAY) * DAY;
 function jcalOf(wall, frame) {
-  const f = fields(wall);
+  const form = typeof frame === "string" ? frame : frame.form;
+  const f = fieldsOf(wall);
   const date = `${pad(f.year, 4)}-${pad(f.month)}-${pad(f.day)}`;
-  if (frame.form === "date") {
+  if (form === "date") {
     return date;
   }
-  return `${date}T${pad(f.hour)}:${pad(f.minute)}:${pad(f.second)}${frame.form === "utc" ? "Z" : ""}`;
+  return `${date}T${pad(f.hour)}:${pad(f.minute)}:${pad(f.second)}${form === "utc" ? "Z" : ""}`;
+}
+var icalForm = (jcal) => jcal.replace(/[-:]/g, "");
+function zone(component, tzid) {
+  const resolved = zoneOf(component, tzid);
+  if (!resolved) {
+    throw new Error(unknownZone(tzid));
+  }
+  return resolved;
 }
 function convert(component, wall, from, to) {
-  const zone = (tzid) => {
-    if (tzid === null) {
-      return ICAL2.Timezone.utcTimezone;
-    }
-    const tz = timezoneOf(component, tzid);
-    if (!tz) {
-      throw new Error(`the zone "${tzid}" has no VTIMEZONE in the document to convert it with`);
-    }
-    return tz;
-  };
-  const t = ICAL2.Time.fromData(fields(wall), zone(from)).convertToZone(zone(to));
-  return utcMillis(t.year, t.month, t.day, t.hour, t.minute, t.second) / 1e3;
+  const utc = from === null ? wall : zone(component, from).toUtc(wall);
+  return to === null ? utc : zone(component, to).fromUtc(utc);
 }
 function wallIn(component, stamp, frame) {
   if (stamp.kind === "date" || stamp.kind === "floating" || frame.form === "date") {
@@ -435,9 +498,13 @@ function wallIn(component, stamp, frame) {
   const target = frame.form === "utc" ? null : frame.tzid;
   return own === target ? stamp.wall : convert(component, stamp.wall, own, target);
 }
+function instantOf(component, stamp) {
+  return stamp.kind === "tzid" ? convert(component, stamp.wall, stamp.tzid, null) : stamp.wall;
+}
+var byDays = (move) => move.from.form === "date" || move.to.form === "date";
 function moved(stamp, move) {
   const wall = wallIn(move.component, stamp, move.from);
-  if (move.from.form === "date" || move.to.form === "date" || stamp.kind === "date") {
+  if (byDays(move) || stamp.kind === "date") {
     const days = (dayOf(wall) - dayOf(move.fromWall)) / DAY;
     return (move.to.form === "date" ? dayOf(move.toWall) : move.toWall) + days * DAY;
   }
@@ -461,21 +528,41 @@ function moveInstants(property, move) {
   if (property.type === "period") {
     throw new Error("it holds periods, which updateFields does not move");
   }
-  const tzid = property.getParameter("tzid");
-  const walls = valuesOf(property).map((v) => moved(stampOf(String(v), tzid), move));
-  writeInstants(property, walls, move.to);
+  writeInstants(property, propertyStamps(property).map((stamp) => moved(stamp, move)), move.to);
+}
+function moveOverrideTimes(override, before, after, move) {
+  const component = move.component;
+  const days = (dayOf(after.wall) - dayOf(before.wall)) / DAY;
+  const distance = instantOf(component, after) - instantOf(component, before);
+  for (const name of ["dtstart", "dtend", "due"]) {
+    for (const property of override.getAllProperties(name)) {
+      const [stamp] = propertyStamps(property);
+      let wall;
+      if (stamp.kind === "date" || byDays(move)) {
+        wall = stamp.wall + days * DAY;
+      } else if (stamp.kind === "tzid") {
+        wall = convert(component, convert(component, stamp.wall, stamp.tzid, null) + distance, null, stamp.tzid);
+      } else {
+        wall = stamp.wall + distance;
+      }
+      const type = property.type;
+      property.resetType(type);
+      property.setValue(jcalOf(wall, stamp.kind));
+    }
+  }
 }
 function moveUntil(property, move) {
   const recur = property.getFirstValue();
-  const wall = moved(stampOf(recur.until.toString()), move);
+  const until = stampOf(recur.until.toString());
+  const wall = move.from.form !== "date" && move.to.form === "date" ? dayOf(move.toWall) + Math.floor((wallIn(move.component, until, move.from) - move.fromWall) / DAY) * DAY : moved(until, move);
   if (move.to.form === "date") {
-    recur.until = ICAL2.Time.fromDateString(jcalOf(wall, move.to));
+    recur.until = ICAL3.Time.fromDateString(jcalOf(wall, move.to));
   } else if (move.to.form === "tzid") {
-    recur.until = ICAL2.Time.fromDateTimeString(
-      jcalOf(convert(move.component, wall, move.to.tzid, null), { form: "utc" })
+    recur.until = ICAL3.Time.fromDateTimeString(
+      jcalOf(convert(move.component, wall, move.to.tzid, null), "utc")
     );
   } else {
-    recur.until = ICAL2.Time.fromDateTimeString(jcalOf(wall, move.to));
+    recur.until = ICAL3.Time.fromDateTimeString(jcalOf(wall, move.to));
   }
   property.setValue(recur);
 }
@@ -487,114 +574,138 @@ function startOf(master) {
   }
   return { frame, wall: stampOf(String(valuesOf(dtstart)[0])).wall, text: dtstart.toICALString() };
 }
-var EXPANSION_LIMIT = 1e5;
-function occurrences(master, stamps) {
+var EXPANSION_LIMIT = 1e3;
+function expand(master, until = Infinity) {
   const start = startOf(master);
   if (!start) {
-    return stamps.map(() => void 0);
+    return null;
   }
   const { frame } = start;
   const day = frame.form === "date";
-  const timeOf = (wall) => day ? ICAL2.Time.fromDateString(jcalOf(wall, frame)) : ICAL2.Time.fromDateTimeString(jcalOf(wall, { form: "floating" }));
-  const wallOf = (t) => utcMillis(t.year, t.month, t.day, t.hour, t.minute, t.second) / 1e3;
   const norm = (wall) => day ? dayOf(wall) : wall;
-  const targets = stamps.map((stamp) => {
-    try {
-      return norm(wallIn(master, stamp, frame));
-    } catch {
-      return void 0;
-    }
-  });
-  const result = targets.map((t) => t === void 0 ? void 0 : t === norm(start.wall));
-  const known = (wall) => targets.forEach((t, i) => {
-    if (t === wall) {
-      result[i] = true;
-    }
-  });
+  const timeOf = (wall) => day ? ICAL3.Time.fromDateString(jcalOf(wall, frame)) : ICAL3.Time.fromDateTimeString(jcalOf(wall, "floating"));
+  const walls = /* @__PURE__ */ new Set([norm(start.wall)]);
+  let horizon = Infinity;
   try {
     for (const rdate of master.getAllProperties("rdate")) {
-      const tzid = rdate.getParameter("tzid");
-      for (const value of valuesOf(rdate)) {
-        const first = Array.isArray(value) ? value[0] : value;
-        known(norm(wallIn(master, stampOf(String(first), tzid), frame)));
+      for (const stamp of propertyStamps(rdate)) {
+        walls.add(norm(wallIn(master, stamp, frame)));
       }
     }
-  } catch {
-    return result.map((r) => r || void 0);
-  }
-  const latest = Math.max(...targets.filter((t) => t !== void 0));
-  for (const property of master.getAllProperties("rrule")) {
-    const recur = property.getFirstValue().clone();
-    try {
+    for (const property of master.getAllProperties("rrule")) {
+      const recur = property.getFirstValue().clone();
       if (recur.until) {
         recur.until = timeOf(norm(wallIn(master, stampOf(recur.until.toString()), frame)));
       }
-    } catch {
-      return result.map((r) => r || void 0);
-    }
-    const iterator = recur.iterator(timeOf(start.wall));
-    let reached = false;
-    for (let i = 0; i < EXPANSION_LIMIT; i++) {
-      const next = iterator.next();
-      if (!next) {
-        reached = true;
-        break;
+      const iterator = recur.iterator(timeOf(start.wall));
+      for (let i = 0; ; i++) {
+        const next = iterator.next();
+        if (!next) {
+          break;
+        }
+        const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
+        walls.add(wall);
+        if (wall >= until) {
+          break;
+        }
+        if (i >= EXPANSION_LIMIT) {
+          horizon = Math.min(horizon, wall);
+          break;
+        }
       }
-      const wall = norm(wallOf(next));
-      known(wall);
-      if (wall >= latest) {
-        reached = true;
-        break;
-      }
     }
-    if (!reached) {
-      return result.map((r) => r || void 0);
-    }
+  } catch {
+    return null;
   }
-  return result;
+  return { frame, walls: [...walls].sort((a, b) => a - b), horizon };
 }
-var icalForm = (jcal) => jcal.replace(/[-:]/g, "");
-function referenceStamp(ref) {
-  return stampOf(String(valuesOf(ref.property)[ref.index]), ref.property.getParameter("tzid"));
-}
-function checkable(refs, master) {
-  const stamps = refs.map((ref) => {
+function occurrences(master, stamps) {
+  const frame = frameOf(master);
+  if (!frame) {
+    return stamps.map(() => void 0);
+  }
+  const targets = stamps.map((stamp) => {
+    if (!stamp) {
+      return void 0;
+    }
     try {
-      return referenceStamp(ref);
+      const wall = wallIn(master, stamp, frame);
+      return frame.form === "date" ? dayOf(wall) : wall;
     } catch {
       return void 0;
     }
   });
-  const present = stamps.filter((s) => s !== void 0);
-  const found = present.length ? occurrences(master, present) : [];
-  let k = 0;
-  return stamps.map((s) => s === void 0 ? void 0 : found[k++]);
+  const known = targets.filter((t) => t !== void 0);
+  const expansion = known.length ? expand(master, Math.max(...known)) : null;
+  if (!expansion) {
+    return stamps.map(() => void 0);
+  }
+  const walls = new Set(expansion.walls);
+  return targets.map((t) => t === void 0 ? void 0 : walls.has(t) ? true : t > expansion.horizon ? void 0 : false);
+}
+function referenceStamps(refs) {
+  return refs.map((ref) => {
+    try {
+      return propertyStamps(ref.property)[ref.index];
+    } catch {
+      return void 0;
+    }
+  });
+}
+function suggestedRule(rule, start, timed) {
+  const f = fieldsOf(start);
+  const weekday = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"][new Date(start * 1e3).getUTCDay()];
+  const values = {
+    BYDAY: weekday,
+    BYMONTHDAY: String(f.day),
+    BYMONTH: String(f.month),
+    ...timed ? { BYHOUR: String(f.hour), BYMINUTE: String(f.minute) } : {}
+  };
+  let changed = false;
+  const parts = rule.toString().split(";").map((part) => {
+    const [name, value] = part.split("=");
+    if (values[name] && /^[A-Z]{2}$|^\d+$/.test(value) && value !== values[name]) {
+      changed = true;
+      return `${name}=${values[name]}`;
+    }
+    return part;
+  });
+  return changed ? parts.join(";") : null;
 }
 var SHAPING = ["dtstart", "rrule", "rdate"];
+var NO_SERIES = { finish() {
+} };
 function beginSeriesEdit(calendar, master, written) {
-  if (written.has("recurrence-id") && !master.hasProperty("recurrence-id")) {
+  if (!["vevent", "vtodo", "vjournal"].includes(master.name) || master.hasProperty("recurrence-id")) {
+    return NO_SERIES;
+  }
+  if (written.has("recurrence-id")) {
     throw new Error("RECURRENCE-ID cannot be written on the series master: it would turn the master into an override of a single instance (RFC 5545 3.8.4.4). updateFields edits the series; to change one instance, add or edit an override component (same UID, with RECURRENCE-ID) by rewriting the whole iCalendar object");
   }
   const replaced = new Set([...written].map((name) => master.getFirstProperty(name)).filter(Boolean));
   const own = (name) => master.getAllProperties(name).filter((p) => !replaced.has(p));
   const uid = master.getFirstPropertyValue("uid");
-  const overrides = master.hasProperty("recurrence-id") ? [] : calendar.getAllSubcomponents(master.name).filter((c) => c !== master && c.hasProperty("recurrence-id") && c.getFirstPropertyValue("uid") === uid);
-  const rids = overrides.map((c) => c.getFirstProperty("recurrence-id"));
+  const overrides = (calendar?.getAllSubcomponents(master.name) ?? []).filter((c) => c !== master && c.hasProperty("recurrence-id") && c.getFirstPropertyValue("uid") === uid);
   const exdates = own("exdate");
   const rdates = own("rdate");
   const rules = master.getAllProperties().filter((p) => isRecurProperty(master, p.name) && !replaced.has(p) && p.getFirstValue()?.until);
   const references = [
-    ...rids.map((property) => ({ property, index: 0, label: `the override for ${property.toICALString()}` })),
-    ...exdates.flatMap((property) => valuesOf(property).map((_, index) => ({
+    ...overrides.map((c) => {
+      const property = c.getFirstProperty("recurrence-id");
+      return { property, index: 0, label: `the override for ${property.toICALString()}` };
+    }),
+    ...exdates.flatMap((property) => valuesOf(property).map((v, index) => ({
       property,
       index,
-      label: `EXDATE ${icalForm(String(valuesOf(property)[index]))}`
+      label: `EXDATE ${icalForm(String(v))}`
     })))
   ];
   const shaping = SHAPING.filter((name) => written.has(name));
-  const before = shaping.length && references.length ? checkable(references, master) : [];
+  const before = shaping.length && references.length ? occurrences(master, referenceStamps(references)) : [];
   const watched = references.filter((_, i) => before[i] === true);
   const start = written.has("dtstart") ? startOf(master) : null;
+  const keepsRule = !["rrule", "exrule", "rdate"].some((name) => written.has(name));
+  const expansion = start && keepsRule ? expand(master) : null;
   return {
     finish() {
       const now = start && startOf(master);
@@ -617,26 +728,58 @@ function beginSeriesEdit(calendar, master, written) {
             throw new Error(`DTSTART changed, and the existing ${line} cannot follow it (${error.message}): give ${property.name.toUpperCase()} in the same call`);
           }
         }
-        for (const property of rids) {
-          const line = property.toICALString();
+        for (const override of overrides) {
+          const rid = override.getFirstProperty("recurrence-id");
+          const line = rid.toICALString();
           try {
-            moveInstants(property, move);
+            const [old] = propertyStamps(rid);
+            moveInstants(rid, move);
+            moveOverrideTimes(override, old, propertyStamps(rid)[0], move);
           } catch (error) {
-            throw new Error(`DTSTART changed, and the override for ${line} cannot follow it (${error.message}): move the override by rewriting the whole iCalendar object, since updateFields edits only the master`);
+            throw new Error(`DTSTART changed, and the override for ${line} cannot follow it (${error.message}): rewrite the whole iCalendar object with the override moved`);
           }
+        }
+        if (expansion) {
+          checkMovedSeries(master, expansion, move, start.text, now.text);
         }
       }
       if (!watched.length) {
         return;
       }
-      const after = checkable(watched, master);
+      const after = occurrences(master, referenceStamps(watched));
       const lost = watched.filter((_, i) => after[i] === false);
       if (lost.length) {
         const what = shaping.map((n) => n.toUpperCase()).join(" and ");
-        throw new Error(`The new ${what} leaves ${lost.map((ref) => ref.label).join(", ")} naming no occurrence of the series, so ${lost.length > 1 ? "they" : "it"} would silently stop applying (RFC 5545 3.8.4.4, 3.8.5.1). Keep a series these instances belong to, give EXDATE in the same call with the exclusions the new series should have, or move or remove an override by rewriting the whole iCalendar object (updateFields edits only the master)`);
+        throw new Error(`The new ${what} leaves ${lost.map((ref) => ref.label).join(", ")} naming no occurrence of the series, so ${lost.length > 1 ? "they" : "it"} would silently stop applying (RFC 5545 3.8.4.4, 3.8.5.1). Give RRULE (or RDATE) in the same call so the series still has ${lost.length > 1 ? "these occurrences" : "this occurrence"}, and EXDATE in the same call with the exclusions the new series should have; or rewrite the whole iCalendar object to move or remove the override`);
       }
     }
   };
+}
+function checkMovedSeries(master, before, move, from, to) {
+  const day = move.to.form === "date";
+  const expected = [...new Set(before.walls.map((wall) => {
+    const w = moved(inFrame(wall, before.frame), move);
+    return day ? dayOf(w) : w;
+  }))].sort((a, b) => a - b);
+  const expectedHorizon = before.horizon === Infinity ? Infinity : moved(inFrame(before.horizon, before.frame), move);
+  const after = expand(master, expectedHorizon);
+  if (!after) {
+    return;
+  }
+  const horizon = Math.min(expectedHorizon, after.horizon);
+  const want = expected.filter((w) => w <= horizon);
+  const have = after.walls.filter((w) => w <= horizon);
+  const i = want.findIndex((w, k) => w !== have[k]);
+  const at = i >= 0 ? i : want.length < have.length ? want.length : -1;
+  if (at < 0) {
+    return;
+  }
+  const show = (wall) => icalForm(jcalOf(wall, move.to));
+  const lost = want[at] !== void 0 && (have[at] === void 0 || want[at] < have[at]);
+  const difference = lost ? `would lose the occurrence on ${show(want[at])}` : `would gain one on ${show(have[at])}`;
+  const rule = master.getFirstProperty("rrule");
+  const suggestion = rule ? suggestedRule(rule.getFirstValue(), move.toWall, move.to.form !== "date") : null;
+  throw new Error(`Moving DTSTART (${from} to ${to}) does not move the whole series: ${rule ? rule.toICALString() : "its rule"} keeps it on its old days or times, so the series ${difference}. Give RRULE in the same call to fit the new start${suggestion ? ` (e.g. RRULE "${suggestion}")` : ""}; to start the series later without moving it, give RRULE, UNTIL and EXDATE explicitly, or rewrite the whole iCalendar object`);
 }
 
 // src/updateFields.ts
@@ -668,7 +811,7 @@ function seriesMaster(calendar, type) {
   const held = [...new Set(calendar.getAllSubcomponents().map((c) => String(c.name).toUpperCase()))];
   throw new Error(`No ${types.map((t) => t.toUpperCase()).join(", ")} found in VCALENDAR ` + (held.length ? `(it holds: ${held.join(", ")})` : "(it holds no components)"));
 }
-function updateFields(calendarObject, fields2, options = {}) {
+function updateFields(calendarObject, fields, options = {}) {
   const icalString = typeof calendarObject === "string" ? calendarObject : calendarObject.data;
   if (!icalString) {
     throw new Error('Invalid input: calendarObject must be a string or object with "data" field');
@@ -681,8 +824,8 @@ function updateFields(calendarObject, fields2, options = {}) {
   let jcalData;
   let component;
   try {
-    jcalData = ICAL3.parse(icalString);
-    component = new ICAL3.Component(jcalData);
+    jcalData = ICAL4.parse(icalString);
+    component = new ICAL4.Component(jcalData);
   } catch (error) {
     throw new Error(`Failed to parse iCal data: ${error.message}`);
   }
@@ -691,17 +834,17 @@ function updateFields(calendarObject, fields2, options = {}) {
     throw new Error(component.name === "vcard" ? `type "${type}" applies to an iCalendar object, but this is a VCARD` : `type "${type}" asks for a ${type.toUpperCase()}, but this object is a bare ${name}`);
   }
   const actualComponent = component.name === "vcalendar" ? seriesMaster(component, type) : component;
-  const entries = Object.entries(fields2).sort(
+  const entries = Object.entries(fields).sort(
     ([a], [b]) => Number(b.toLowerCase() === "dtstart") - Number(a.toLowerCase() === "dtstart")
   );
   const written = new Set(entries.map(([key]) => key.toLowerCase()));
-  const series = component.name === "vcalendar" ? beginSeriesEdit(component, actualComponent, written) : null;
+  const series = beginSeriesEdit(component.name === "vcalendar" ? component : null, actualComponent, written);
   for (const [key, value] of entries) {
     if (!setDateValue(actualComponent, key, value, floatingTime) && !setRecurValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }
-  series?.finish();
+  series.finish();
   return component.toString();
 }
 export {

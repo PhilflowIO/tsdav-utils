@@ -1,5 +1,6 @@
 import ICAL from 'ical.js';
 import type { FloatingTime } from './types';
+import { fieldsOf, wallOf, zoneOf } from './zone';
 
 /**
  * Typed writes for date and date-time properties.
@@ -506,20 +507,6 @@ function parseRuleParts(raw: string): Map<string, string> {
   return parts;
 }
 
-/**
- * The VTIMEZONE a TZID refers to, from the document the component is in, or
- * null. Only the document is consulted: it is what a server and every other
- * client will read the TZID against.
- */
-export function timezoneOf(component: ICAL.Component, tzid: string): ICAL.Timezone | null {
-  let root = component;
-  while (root.parent) {
-    root = root.parent;
-  }
-  const vtimezone = root.getAllSubcomponents('vtimezone')
-    .find((tz) => tz.getFirstPropertyValue('tzid') === tzid);
-  return vtimezone ? new ICAL.Timezone(vtimezone) : null;
-}
 
 /**
  * UNTIL in the form RFC 5545 3.3.10 ties to DTSTART: a DATE next to an
@@ -529,9 +516,10 @@ export function timezoneOf(component: ICAL.Component, tzid: string): ICAL.Timezo
  * instant allows it:
  *
  *  - a time without a zone next to a TZID DTSTART is wall clock in that zone
- *    and is converted to UTC with the document's VTIMEZONE. Without one the
- *    zone's rules are unknown, so it throws and asks for a UTC or offset value
- *    rather than guess an offset that may be hours off;
+ *    and is converted to UTC with the zone's rules (see zoneOf). For a zone
+ *    with neither a VTIMEZONE nor an IANA name the rules are unknown, so it
+ *    throws and asks for a UTC or offset value rather than guess an offset
+ *    that may be hours off;
  *  - next to a UTC DTSTART a time without a zone follows floatingTime as for
  *    DTEND: refused under "keep", host-local converted to UTC under "local";
  *  - a value with a zone next to a floating DTSTART names an instant that a
@@ -568,18 +556,15 @@ function untilTime(
 
   if (parsed.kind === 'floating') {
     if (anchor?.form === 'tzid') {
-      const tz = timezoneOf(component, anchor.tzid);
-      if (!tz) {
-        throw fail(`has no zone, and DTSTART's zone "${anchor.tzid}" has no VTIMEZONE in the document to ` +
-          'convert it to UTC with (RFC 5545 3.3.10 requires UTC here): give it a zone, ' +
+      const zone = zoneOf(component, anchor.tzid);
+      if (!zone) {
+        throw fail(`has no zone, and DTSTART's zone "${anchor.tzid}" has no VTIMEZONE in the document and is no ` +
+          'IANA time zone to convert it to UTC with (RFC 5545 3.3.10 requires UTC here): give it a zone, ' +
           'e.g. "2026-10-26T18:00:00Z" or "2026-10-26T18:00:00+01:00"');
       }
       const wall = ICAL.Time.fromDateTimeString(parsed.jcal);
-      const zoned = ICAL.Time.fromData({
-        year: wall.year, month: wall.month, day: wall.day,
-        hour: wall.hour, minute: wall.minute, second: wall.second,
-      }, tz);
-      return zoned.convertToZone(ICAL.Timezone.utcTimezone);
+      const utc = fieldsOf(zone.toUtc(wallOf(wall.year, wall.month, wall.day, wall.hour, wall.minute, wall.second)));
+      return ICAL.Time.fromData(utc, ICAL.Timezone.utcTimezone);
     }
     if (anchor?.form === 'floating') {
       return ICAL.Time.fromDateTimeString(parsed.jcal);

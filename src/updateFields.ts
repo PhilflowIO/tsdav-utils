@@ -25,8 +25,8 @@ function componentType(type: unknown): ComponentType {
  * 3.8.4.4) — in any order. A write without a named instance (SUMMARY, EXDATE,
  * RRULE, DTSTART ...) belongs to the master, the one without RECURRENCE-ID;
  * DTSTART-anchored date-times are anchored to the master's DTSTART for the
- * same reason. Overrides are independent instances; only their RECURRENCE-ID
- * moves when the master's DTSTART does (see beginSeriesEdit).
+ * same reason. Overrides are independent instances; they move only when the
+ * master's DTSTART moves the whole series (see beginSeriesEdit).
  *
  * The type is chosen first, VEVENT before VTODO before VJOURNAL: a CalDAV
  * object holds one component type (RFC 4791 4.1). Within it, the first
@@ -151,21 +151,21 @@ export function updateFields(
   //    DTSTART goes first: the other date-times and RRULE's UNTIL take their
   //    zone and value type from it, so they must see the new one, whatever
   //    the key order.
-  //    A series moves as a whole: when DTSTART moves, the overrides'
-  //    RECURRENCE-IDs, EXDATE, RDATE and UNTIL the call does not write itself
-  //    move with it, and a new RRULE that would orphan an override or EXDATE
-  //    is refused (see beginSeriesEdit).
+  //    A DTSTART write moves the whole series — overrides, EXDATE, RDATE and
+  //    UNTIL the call does not write itself — and a write that would change
+  //    the series otherwise, or orphan an override or EXDATE, is refused (see
+  //    beginSeriesEdit).
   const entries = Object.entries(fields).sort(
     ([a], [b]) => Number(b.toLowerCase() === 'dtstart') - Number(a.toLowerCase() === 'dtstart'));
   const written = new Set(entries.map(([key]) => key.toLowerCase()));
-  const series = component.name === 'vcalendar' ? beginSeriesEdit(component, actualComponent, written) : null;
+  const series = beginSeriesEdit(component.name === 'vcalendar' ? component : null, actualComponent, written);
   for (const [key, value] of entries) {
     if (!setDateValue(actualComponent, key, value, floatingTime) &&
         !setRecurValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }
-  series?.finish();
+  series.finish();
 
   // 5. Serialize back to iCal string
   //    All unmodified properties are automatically preserved by ical.js
