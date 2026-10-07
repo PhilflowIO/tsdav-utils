@@ -1,6 +1,20 @@
 import ICAL from 'ical.js';
-import type { CalendarObjectInput, FieldUpdates, UpdateFieldsOptions } from './types';
+import { COMPONENT_TYPES } from './types';
+import type { CalendarObjectInput, ComponentType, FieldUpdates, UpdateFieldsOptions } from './types';
 import { realignUntils, setDateValue, setRecurValue, untilsFollowingDtstart } from './typedValue';
+
+/**
+ * The component type a caller named, lower-cased, or an error listing the
+ * accepted ones: a misspelt type must not fall back to whatever type the
+ * object happens to hold.
+ */
+function componentType(type: unknown): ComponentType {
+  const name = typeof type === 'string' ? type.toLowerCase() : '';
+  if (!(COMPONENT_TYPES as readonly string[]).includes(name)) {
+    throw new Error(`Invalid type "${String(type)}": use "vevent", "vtodo" or "vjournal"`);
+  }
+  return name as ComponentType;
+}
 
 /**
  * The component a series-level write belongs to.
@@ -24,10 +38,12 @@ import { realignUntils, setDateValue, setRecurValue, untilsFollowingDtstart } fr
  *
  * @param calendar - the parsed VCALENDAR
  * @param type - restrict to one component type ("vevent", "vtodo",
- *   "vjournal"); by default the first type present, in that order
+ *   "vjournal"); by default the first type present, in that order. Checked
+ *   at runtime as well, for JavaScript callers: upper case is accepted, any
+ *   other value throws.
  */
-export function seriesMaster(calendar: ICAL.Component, type?: string): ICAL.Component {
-  const types = type ? [type.toLowerCase()] : ['vevent', 'vtodo', 'vjournal'];
+export function seriesMaster(calendar: ICAL.Component, type?: ComponentType): ICAL.Component {
+  const types: readonly ComponentType[] = type === undefined ? COMPONENT_TYPES : [componentType(type)];
   for (const type of types) {
     const all = calendar.getAllSubcomponents(type);
     if (all.length === 0) {
@@ -45,7 +61,11 @@ export function seriesMaster(calendar: ICAL.Component, type?: string): ICAL.Comp
       'RECURRENCE-ID) and no master, so a field update cannot tell which one is meant. ' +
       'Edit the instance by rewriting the whole iCalendar object instead');
   }
-  throw new Error(`No ${types.map((t) => t.toUpperCase()).join(', ')} found in VCALENDAR`);
+  // Name what the object does hold, so a caller (an LLM tool call, say)
+  // can correct the type it asked for.
+  const held = [...new Set(calendar.getAllSubcomponents().map((c) => String(c.name).toUpperCase()))];
+  throw new Error(`No ${types.map((t) => t.toUpperCase()).join(', ')} found in VCALENDAR ` +
+    (held.length ? `(it holds: ${held.join(', ')})` : '(it holds no components)'));
 }
 
 /**
@@ -60,6 +80,9 @@ export function seriesMaster(calendar: ICAL.Component, type?: string): ICAL.Comp
  * @param fields - Key-value pairs of iCal properties to update (e.g., {'SUMMARY': 'New Title'})
  * @param options.floatingTime - how a date-time without a zone is written:
  *   "keep" (floating, the default) or "local" (host timezone, written as UTC)
+ * @param options.type - the component type to write into ("vevent", "vtodo",
+ *   "vjournal"); by default the first type present, in that order. Throws if
+ *   the object holds no component of that type, or is a vCard
  * @returns Updated iCal string ready for tsdav.updateCalendarObject()
  *
  * @example
@@ -89,6 +112,7 @@ export function updateFields(
   if (floatingTime !== 'keep' && floatingTime !== 'local') {
     throw new Error(`Invalid floatingTime "${floatingTime}": use "keep" or "local"`);
   }
+  const type = options.type === undefined ? undefined : componentType(options.type);
 
   // 2. Parse iCal string to Component
   let jcalData: any;
@@ -102,10 +126,19 @@ export function updateFields(
   }
 
   // 3. Find the component to update: the master of a VCALENDAR (see
-  //    seriesMaster), or the VCARD itself, which stands alone.
+  //    seriesMaster), or a component that stands alone (a VCARD, or a bare
+  //    VEVENT/VTODO/VJOURNAL without its VCALENDAR wrapper).
   //    Note: component.name returns lowercase
+  //    A named type must match a bare component; a mismatch, or a type on a
+  //    vCard, can only be a caller's mistake, so it is refused, not ignored.
+  if (type && component.name !== 'vcalendar' && component.name !== type) {
+    const name = String(component.name).toUpperCase();
+    throw new Error(component.name === 'vcard'
+      ? `type "${type}" applies to an iCalendar object, but this is a VCARD`
+      : `type "${type}" asks for a ${type.toUpperCase()}, but this object is a bare ${name}`);
+  }
   const actualComponent = component.name === 'vcalendar'
-    ? seriesMaster(component)
+    ? seriesMaster(component, type)
     : component;
 
   // 4. Update properties using field-agnostic loop
