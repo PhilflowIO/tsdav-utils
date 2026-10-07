@@ -204,8 +204,8 @@ To validate input before calling `updateFields`, use the same grammar:
 throws naming the accepted forms.
 
 Apart from following DTSTART, each value is encoded on its own. Keeping related
-properties consistent — DUE vs. DURATION, an existing RRULE `UNTIL` when only
-DTSTART moves — is the caller's job. Like every other property, only the first
+properties consistent — DUE vs. DURATION, say — is the caller's job; an RRULE
+`UNTIL` follows DTSTART (see [Recurrence rules](#recurrence-rules)). Like every other property, only the first
 `EXDATE`/`RDATE` line is replaced.
 
 ## Recurrence rules
@@ -249,6 +249,23 @@ updateFields(event, { RRULE: 'FREQ=DAILY;UNTIL=2026-10-26T14:00:00-04:00' });
   - with no DTSTART, `UNTIL` is written in the form given.
   DTSTART is written first, so `UNTIL` follows the new DTSTART whatever the key
   order.
+- Writing DTSTART also carries an existing `UNTIL` (of an RRULE/EXRULE not
+  written in the same call) into the new DTSTART's form, so the object never
+  ends up with an `UNTIL` the RFC forbids — also when DTSTART and the rule are
+  written in separate calls:
+  - to an all-day DTSTART: the `UNTIL`'s calendar date, read in the old
+    DTSTART's zone (`DTSTART:...T100000Z` + `UNTIL=20261020T100000Z`, then
+    `{ DTSTART: '2026-10-01' }` gives `UNTIL=20261020`);
+  - from a date to a timed DTSTART: the end of that day (`UNTIL` is inclusive)
+    in the new DTSTART's zone (`UNTIL=20261020` gives `UNTIL=20261020T235959Z`
+    next to a UTC DTSTART), converted as above;
+  - a UTC `UNTIL` stays UTC next to a UTC or `TZID` DTSTART, and becomes the
+    old zone's wall clock next to a new floating DTSTART;
+  - where the old `UNTIL` names no definite instant in the new form — a floating
+    `UNTIL` next to a new UTC DTSTART under the default, a UTC one next to a new
+    floating DTSTART with no old zone, a zone with no `VTIMEZONE` — it throws
+    and asks for the rule, with `UNTIL`, in the same call.
+  A `COUNT` rule, or an event without a rule, is left as it is.
 
 ## Recurring events and todos
 
@@ -320,8 +337,7 @@ These limitations are intentional and documented in GitHub issues:
 
 4. **Recurrence expansion**
    - An `RRULE` is validated and written (see [Recurrence rules](#recurrence-rules)),
-     but occurrences are not expanded, and an existing `UNTIL` is not adjusted
-     when only DTSTART moves
+     but occurrences are not expanded
    - Workaround: Use ical.js directly for recurrence logic
 
 ## When Should I Use This?

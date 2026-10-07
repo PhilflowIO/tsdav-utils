@@ -1,6 +1,6 @@
 import ICAL from 'ical.js';
 import type { CalendarObjectInput, FieldUpdates, UpdateFieldsOptions } from './types';
-import { setDateValue, setRecurValue } from './typedValue';
+import { realignUntils, setDateValue, setRecurValue, untilsFollowingDtstart } from './typedValue';
 
 /**
  * The component a series-level write belongs to.
@@ -116,14 +116,20 @@ export function updateFields(
   //    DTSTART goes first: the other date-times and RRULE's UNTIL take their
   //    zone and value type from it, so they must see the new one, whatever
   //    the key order.
+  //    An RRULE/EXRULE UNTIL the call does not write itself is re-derived
+  //    against the new DTSTART afterwards (see realignUntils), so a DTSTART
+  //    write never leaves an UNTIL of the old form behind.
   const entries = Object.entries(fields).sort(
     ([a], [b]) => Number(b.toLowerCase() === 'dtstart') - Number(a.toLowerCase() === 'dtstart'));
+  const written = new Set(entries.map(([key]) => key.toLowerCase()));
+  const untils = written.has('dtstart') ? untilsFollowingDtstart(actualComponent, written) : [];
   for (const [key, value] of entries) {
     if (!setDateValue(actualComponent, key, value, floatingTime) &&
         !setRecurValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }
+  realignUntils(actualComponent, untils, floatingTime);
 
   // 5. Serialize back to iCal string
   //    All unmodified properties are automatically preserved by ical.js

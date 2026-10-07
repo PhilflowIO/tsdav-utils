@@ -321,10 +321,63 @@ function untilTime(component, ruleName, raw, floatingTime) {
   }
   return parsed.kind === "date" ? ICAL.Time.fromDateString(parsed.jcal) : ICAL.Time.fromDateTimeString(parsed.jcal);
 }
+function isRecurProperty(component, name) {
+  return designSetFor(component).property[name.toLowerCase()]?.defaultType === "recur";
+}
+var isUtcTime = (t) => !t.isDate && t.zone?.tzid === "UTC";
+var dateString = (t) => `${pad(t.year, 4)}-${pad(t.month)}-${pad(t.day)}`;
+var dateTimeString = (t) => `${dateString(t)}T${pad(t.hour)}:${pad(t.minute)}:${pad(t.second)}`;
+function wallClockIn(component, t, tzid) {
+  const tz = timezoneOf(component, tzid);
+  if (!tz) {
+    throw new Error(`the old DTSTART's zone "${tzid}" has no VTIMEZONE in the document to read it in`);
+  }
+  return t.convertToZone(tz);
+}
+function untilInput(component, old, oldAnchor, newAnchor) {
+  if (newAnchor?.form === "date") {
+    return dateString(isUtcTime(old) && oldAnchor?.form === "tzid" ? wallClockIn(component, old, oldAnchor.tzid) : old);
+  }
+  if (old.isDate) {
+    if (!newAnchor) {
+      return dateString(old);
+    }
+    return `${dateString(old)}T23:59:59${newAnchor.form === "utc" ? "Z" : ""}`;
+  }
+  if (isUtcTime(old)) {
+    if (newAnchor?.form === "floating") {
+      if (oldAnchor?.form !== "tzid") {
+        throw new Error("it is in UTC and the new DTSTART is floating, and without a zone a UTC instant has no wall clock");
+      }
+      return dateTimeString(wallClockIn(component, old, oldAnchor.tzid));
+    }
+    return `${dateTimeString(old)}Z`;
+  }
+  return dateTimeString(old);
+}
+function untilsFollowingDtstart(component, written) {
+  const anchor = anchorOf(component, "rrule");
+  return component.getAllProperties().filter((p) => isRecurProperty(component, p.name) && !written.has(p.name)).flatMap((property) => {
+    const until = property.getFirstValue()?.until;
+    return until ? [{ property, until: until.clone(), anchor }] : [];
+  });
+}
+function realignUntils(component, pending, floatingTime = "keep") {
+  const anchor = anchorOf(component, "rrule");
+  for (const { property, until, anchor: oldAnchor } of pending) {
+    const upper = property.name.toUpperCase();
+    const recur = property.getFirstValue();
+    try {
+      recur.until = untilTime(component, upper, untilInput(component, until, oldAnchor, anchor), floatingTime);
+    } catch (error) {
+      throw new Error(`DTSTART changed, and the existing ${upper} UNTIL=${until.toICALString()} cannot follow it (${error.message}): give ${upper}, with UNTIL, in the same call`);
+    }
+    property.setValue(recur);
+  }
+}
 function setRecurValue(component, name, raw, floatingTime = "keep") {
   const lower = name.toLowerCase();
-  const design = designSetFor(component).property[lower];
-  if (design?.defaultType !== "recur") {
+  if (!isRecurProperty(component, lower)) {
     return false;
   }
   const upper = name.toUpperCase();
@@ -392,11 +445,14 @@ function updateFields(calendarObject, fields, options = {}) {
   const entries = Object.entries(fields).sort(
     ([a], [b]) => Number(b.toLowerCase() === "dtstart") - Number(a.toLowerCase() === "dtstart")
   );
+  const written = new Set(entries.map(([key]) => key.toLowerCase()));
+  const untils = written.has("dtstart") ? untilsFollowingDtstart(actualComponent, written) : [];
   for (const [key, value] of entries) {
     if (!setDateValue(actualComponent, key, value, floatingTime) && !setRecurValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }
+  realignUntils(actualComponent, untils, floatingTime);
   return component.toString();
 }
 export {
