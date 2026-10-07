@@ -17,8 +17,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 26 ships npm 12, which refuses git and remote-tarball dependencies
-        # by default: the reason this package is published to npm.
+        # The 26 leg runs npm 12, which refuses git and remote-tarball
+        # dependencies by default: the reason this package is published to
+        # npm. Node 26 itself still bundles npm 11.
         node-version: [18, 20, 22, 24, 26]
 
     steps:
@@ -31,6 +32,18 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node-version }}
+
+      - name: Use npm 12
+        if: matrix.node-version == 26
+        run: |
+          npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.0
+          for key in allow-git allow-remote; do
+            value=$(npm config get "$key")
+            if [ "$value" != none ]; then
+              echo "❌ ERROR: npm $(npm --version) has $key=$value, expected none"
+              exit 1
+            fi
+          done
 
       - name: Install dependencies
         run: |
