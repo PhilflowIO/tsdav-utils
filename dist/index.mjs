@@ -226,6 +226,13 @@ function parseRuleParts(raw) {
     const value = eq < 0 ? "" : part.slice(eq + 1).trim().toUpperCase();
     const check = RULE_PARTS[name];
     if (!check) {
+      if (name === "RSCALE" || name === "SKIP") {
+        throw new Error("RSCALE/SKIP (RFC 7529) are not supported: ical.js cannot write them without losing them");
+      }
+      const colon = name.indexOf(":");
+      if (colon >= 0) {
+        throw new Error(`"${part.trim()}" is not a rule part: drop the "${name.slice(0, colon + 1)}" prefix and give only the rule, e.g. "${part.trim().slice(colon + 1)}"`);
+      }
       throw new Error(`"${part.trim()}" is not a rule part. RFC 5545 defines ${Object.keys(RULE_PARTS).join(", ")} (e.g. "FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10")`);
     }
     if (parts.has(name)) {

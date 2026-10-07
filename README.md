@@ -225,7 +225,9 @@ updateFields(event, { RRULE: 'FREQ=DAILY;UNTIL=2026-10-26T14:00:00-04:00' });
 - `FREQ` is required; only the parts RFC 5545 defines are accepted (`FREQ`,
   `UNTIL`, `COUNT`, `INTERVAL`, `BYSECOND` ... `BYSETPOS`, `WKST`), each once,
   with values in range. Names and values are case-insensitive; an empty part
-  (a trailing `;`) is ignored.
+  (a trailing `;`) is ignored. Give the value only (`FREQ=DAILY`, not
+  `RRULE:FREQ=DAILY`). The RFC 7529 parts `RSCALE` and `SKIP` are refused:
+  ical.js cannot write them without losing them.
 - Combinations the RFC rules out throw: `COUNT` with `UNTIL`, `BYWEEKNO` without
   `FREQ=YEARLY`, `BYYEARDAY` with `DAILY`/`WEEKLY`/`MONTHLY`, `BYMONTHDAY` with
   `WEEKLY`, an ordinal `BYDAY` (`1MO`) outside `MONTHLY`/`YEARLY` or with
