@@ -134,24 +134,23 @@ function dateProperty(component, name) {
   };
 }
 var ANCHORED = /* @__PURE__ */ new Set(["vevent", "vtodo", "vjournal"]);
-function referenceZone(component, name, existing) {
-  const own = existing?.getParameter("tzid");
-  if (typeof own === "string" && own) {
-    return { tzid: own };
-  }
-  if (name === "dtstart" || !ANCHORED.has(component.name)) {
+function anchorOf(component, name) {
+  if (name === "dtstart" || UTC_ONLY.has(name) || !ANCHORED.has(component.name)) {
     return null;
   }
   const dtstart = component.getFirstProperty("dtstart");
-  if (!dtstart || dtstart.type !== "date-time") {
+  if (!dtstart) {
     return null;
+  }
+  if (dtstart.type === "date") {
+    return { form: "date" };
   }
   const tzid = dtstart.getParameter("tzid");
   if (typeof tzid === "string" && tzid) {
-    return { tzid };
+    return { form: "tzid", tzid };
   }
   const value = dtstart.toJSON()[3];
-  return typeof value === "string" && !/Z$/i.test(value) ? { tzid: null } : null;
+  return typeof value === "string" && /Z$/i.test(value) ? { form: "utc" } : { form: "floating" };
 }
 function setDateValue(component, name, raw, floatingTime = "keep") {
   const shape = dateProperty(component, name);
@@ -175,24 +174,25 @@ function setDateValue(component, name, raw, floatingTime = "keep") {
     throw new Error(`${upper} needs a date-time, not a date. Accepted forms: ${DATE_TIME_FORMS}`);
   }
   const existing = component.getFirstProperty(lower);
+  const anchor = anchorOf(component, lower);
+  if (anchor?.form === "date" && !isDate) {
+    throw new Error(`${upper} must be a date: DTSTART is a date (all-day), and RFC 5545 requires the same value type`);
+  }
+  if (anchor && anchor.form !== "date" && isDate) {
+    throw new Error(`${upper} needs a time: DTSTART has one, and RFC 5545 requires the same value type`);
+  }
+  const own = existing?.getParameter("tzid");
+  const zone = UTC_ONLY.has(lower) ? null : typeof own === "string" && own ? own : anchor?.form === "tzid" ? anchor.tzid : null;
   const floating = parsed.some((p) => p.kind === "floating");
-  const reference = floating && !UTC_ONLY.has(lower) ? referenceZone(component, lower, existing) : null;
-  const staysWallClock = Boolean(reference) || floatingTime === "keep";
-  if (floating && parsed.some((p) => p.kind === "utc") && staysWallClock) {
+  const wallClock = !floating ? null : zone ? "tzid" : anchor?.form === "floating" ? "floating" : floatingTime === "local" ? "utc" : anchor?.form === "utc" || UTC_ONLY.has(lower) ? null : "floating";
+  if (floating && wallClock === null) {
+    throw new Error(UTC_ONLY.has(lower) ? `${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"` : `${upper} has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"`);
+  }
+  if (floating && wallClock !== "utc" && parsed.some((p) => p.kind === "utc")) {
     throw new Error(`${upper} mixes values with and without a zone; give all of them a zone, or none`);
   }
-  let tzid = null;
-  let values;
-  if (reference) {
-    tzid = reference.tzid;
-    values = parsed.map((p) => p.jcal);
-  } else if (floating && floatingTime === "local") {
-    values = parsed.map((p) => p.kind === "floating" ? toUtcJcal(p.local) : p.jcal);
-  } else if (floating && UTC_ONLY.has(lower)) {
-    throw new Error(`${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"`);
-  } else {
-    values = parsed.map((p) => p.jcal);
-  }
+  const tzid = wallClock === "tzid" ? zone : null;
+  const values = parsed.map((p) => p.kind === "floating" && wallClock === "utc" ? toUtcJcal(p.local) : p.jcal);
   let type = isDate ? "date" : "date-time";
   if (type === "date-time" && shape.defaultType === "timestamp") {
     type = "timestamp";
@@ -243,7 +243,10 @@ function updateFields(calendarObject, fields, options = {}) {
   } else {
     actualComponent = component;
   }
-  for (const [key, value] of Object.entries(fields)) {
+  const entries = Object.entries(fields).sort(
+    ([a], [b]) => Number(b.toLowerCase() === "dtstart") - Number(a.toLowerCase() === "dtstart")
+  );
+  for (const [key, value] of entries) {
     if (!setDateValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }

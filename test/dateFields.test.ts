@@ -144,7 +144,7 @@ describe('date-times without a zone', () => {
   });
 
   it('cannot be mixed with UTC values when they stay floating', () => {
-    expect(() => updateFields(vevent(), { EXDATE: '2026-10-26T18:00:00,2026-10-27T18:00:00Z' }))
+    expect(() => updateFields(vtodo(), { EXDATE: '2026-10-26T18:00:00,2026-10-27T18:00:00Z' }))
       .toThrow(/with and without a zone/);
   });
 
@@ -201,9 +201,45 @@ describe('DTSTART anchors the zone of the other date-times', () => {
     expect(lines(out, 'EXDATE')).toEqual(['EXDATE:20260102T100000']);
   });
 
-  it('a UTC DTSTART anchors nothing: the floatingTime policy decides', () => {
-    const out = updateFields(vevent(), { EXDATE: '2026-01-02T10:00:00' });
-    expect(lines(out, 'EXDATE')).toEqual(['EXDATE:20260102T100000']);
+  it('next to a UTC DTSTART a value without a zone is refused under "keep": floating would match nothing', () => {
+    expect(() => updateFields(vevent(), { EXDATE: '2026-01-02T10:00:00' })).toThrow(/DTSTART is in UTC/);
+    expect(() => updateFields(vevent(), { DTEND: '2026-01-01T11:00:00' })).toThrow(/DTSTART is in UTC/);
+  });
+
+  it('next to a UTC DTSTART a value without a zone is host-local UTC under "local"', () => {
+    const out = updateFields(vevent(), { DTEND: '2026-01-01T11:00:00' }, { floatingTime: 'local' });
+    const utc = new Date(2026, 0, 1, 11, 0, 0).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+    expect(lines(out, 'DTEND')).toEqual([`DTEND:${utc}`]);
+  });
+
+  it('the key order does not matter: DTSTART is written first', () => {
+    const stored = tokyo('DTEND:20260520T010000Z');
+    const a = updateFields(stored, { DTEND: '2026-05-25T11:00:00', DTSTART: '2026-05-25T01:00:00Z' }, { floatingTime: 'local' });
+    const b = updateFields(stored, { DTSTART: '2026-05-25T01:00:00Z', DTEND: '2026-05-25T11:00:00' }, { floatingTime: 'local' });
+    expect(a).toBe(b);
+    expect(lines(a, 'DTSTART')).toEqual(['DTSTART:20260525T010000Z']);
+  });
+
+  it('an all-day DTSTART takes dates only', () => {
+    const allDay = vevent().replace('DTSTART:20260101T100000Z', 'DTSTART;VALUE=DATE:20260101')
+      .replace('DTEND:20260101T110000Z', 'DTEND;VALUE=DATE:20260102');
+    expect(() => updateFields(allDay, { EXDATE: '2026-01-05T00:00:00' })).toThrow(/must be a date: DTSTART is a date/);
+    expect(lines(updateFields(allDay, { EXDATE: '2026-01-05' }), 'EXDATE')).toEqual(['EXDATE;VALUE=DATE:20260105']);
+  });
+
+  it('a timed DTSTART takes date-times only', () => {
+    expect(() => updateFields(vevent(), { DTEND: '2026-01-02' })).toThrow(/needs a time: DTSTART has one/);
+  });
+
+  it('moving DTSTART and DTEND to all-day together works in either key order', () => {
+    const out = updateFields(vevent(), { DTEND: '2026-01-03', DTSTART: '2026-01-02' });
+    expect(lines(out, 'DTSTART')).toEqual(['DTSTART;VALUE=DATE:20260102']);
+    expect(lines(out, 'DTEND')).toEqual(['DTEND;VALUE=DATE:20260103']);
+  });
+
+  it('a todo without DTSTART is not anchored', () => {
+    const out = updateFields(vtodo(), { DUE: '2026-10-26' });
+    expect(lines(out, 'DUE')).toEqual(['DUE;VALUE=DATE:20261026']);
   });
 
   it('UTC-only properties are never anchored', () => {

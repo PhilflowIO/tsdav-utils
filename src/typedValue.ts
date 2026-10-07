@@ -201,43 +201,42 @@ function dateProperty(component: ICAL.Component, name: string): DateProperty | n
 /** Components whose date-times are anchored by DTSTART */
 const ANCHORED = new Set(['vevent', 'vtodo', 'vjournal']);
 
+/** How a DTSTART is written, which the other date-times have to follow */
+type Anchor =
+  | { form: 'date' }
+  | { form: 'utc' }
+  | { form: 'floating' }
+  | { form: 'tzid'; tzid: string };
+
 /**
- * The zone a wall-clock value written to `name` is read in, or null when no
- * zone applies and the floatingTime policy decides.
+ * The form DTSTART gives the other date-times of an event, todo or journal
+ * (DTEND, DUE, EXDATE, RDATE, RECURRENCE-ID, ...), or null when nothing
+ * anchors the property: DTSTART itself, a UTC-only property, a vCard, or a
+ * component without a DTSTART.
  *
- *  1. The property's own TZID: "18:00" on DTEND;TZID=Europe/Berlin is 18:00
- *     in Berlin.
- *  2. Otherwise DTSTART's form, for the other date-times of an event, todo or
- *     journal (DTEND, DUE, EXDATE, RDATE, RECURRENCE-ID, ...). Those are
- *     instants of the same schedule: an end is read in the zone of its start,
- *     and an EXDATE only matches an occurrence if it names it in that zone.
- *     A TZID on DTSTART means wall clock in that zone; a floating DTSTART
- *     means the value stays floating.
- *
- * A UTC DTSTART, or none, anchors nothing.
+ * Those properties name instants of the same schedule. RFC 5545 requires
+ * DTEND, DUE and RECURRENCE-ID to have DTSTART's value type (3.8.2.2,
+ * 3.8.2.3, 3.8.4.4), and an EXDATE only removes an occurrence it names in
+ * the series' own form. So an end is read in the zone of its start, and a
+ * time without a zone means the same wall clock DTSTART uses.
  */
-function referenceZone(
-  component: ICAL.Component,
-  name: string,
-  existing: ICAL.Property | null,
-): { tzid: string | null } | null {
-  const own = existing?.getParameter('tzid');
-  if (typeof own === 'string' && own) {
-    return { tzid: own };
-  }
-  if (name === 'dtstart' || !ANCHORED.has(component.name)) {
+function anchorOf(component: ICAL.Component, name: string): Anchor | null {
+  if (name === 'dtstart' || UTC_ONLY.has(name) || !ANCHORED.has(component.name)) {
     return null;
   }
   const dtstart = component.getFirstProperty('dtstart');
-  if (!dtstart || dtstart.type !== 'date-time') {
+  if (!dtstart) {
     return null;
+  }
+  if (dtstart.type === 'date') {
+    return { form: 'date' };
   }
   const tzid = dtstart.getParameter('tzid');
   if (typeof tzid === 'string' && tzid) {
-    return { tzid };
+    return { form: 'tzid', tzid };
   }
   const value = (dtstart.toJSON() as unknown[])[3];
-  return typeof value === 'string' && !/Z$/i.test(value) ? { tzid: null } : null;
+  return typeof value === 'string' && /Z$/i.test(value) ? { form: 'utc' } : { form: 'floating' };
 }
 
 /**
@@ -247,14 +246,20 @@ function referenceZone(
  * occurrence updatePropertyWithValue would touch, so only the encoding changes
  * and not which line is written.
  *
- * A value without a zone is a wall-clock time, read in the zone referenceZone
- * finds: the property's own TZID, else DTSTART's. "2026-10-26T18:00:00" on
- * "DTSTART;TZID=Europe/Berlin:..." is 18:00 in Berlin, so the TZID stays, and
- * a DTEND of the same event is read in Berlin too. With no zone to read it in
- * it is floating, or with floatingTime "local" the host's wall clock written
- * as UTC. Every other value drops the TZID, which RFC 5545 3.2.19 forbids on
- * a UTC value and which a DATE cannot carry. Other parameters (RANGE on
- * RECURRENCE-ID, X- parameters) survive.
+ * A value without a zone is a wall-clock time. It is read in the property's
+ * own TZID if it has one ("18:00" on DTEND;TZID=Europe/Berlin is 18:00 in
+ * Berlin, and the TZID stays); otherwise in the form DTSTART anchors (see
+ * anchorOf): DTSTART's TZID, floating next to a floating DTSTART, and next to
+ * a UTC DTSTART only with floatingTime "local" — under "keep" there is no
+ * zone to read it in, and a floating value there would match nothing, so it
+ * throws. With no anchor at all it stays floating, or with "local" the host's
+ * wall clock is written as UTC. A value that names its zone is written as UTC
+ * and drops the TZID, which RFC 5545 3.2.19 forbids on a UTC value and which
+ * a DATE cannot carry. Other parameters (RANGE on RECURRENCE-ID, X-
+ * parameters) survive.
+ *
+ * An anchored property also takes DTSTART's value type: a date next to an
+ * all-day DTSTART, a date-time next to a timed one.
  *
  * @returns true when the property was handled here, false when it is not a
  *          date property and the caller should write it as before
@@ -290,27 +295,45 @@ export function setDateValue(
   }
 
   const existing = component.getFirstProperty(lower);
-  const floating = parsed.some((p) => p.kind === 'floating');
-  const reference = floating && !UTC_ONLY.has(lower) ? referenceZone(component, lower, existing) : null;
+  const anchor = anchorOf(component, lower);
+  if (anchor?.form === 'date' && !isDate) {
+    throw new Error(`${upper} must be a date: DTSTART is a date (all-day), and RFC 5545 requires the same value type`);
+  }
+  if (anchor && anchor.form !== 'date' && isDate) {
+    throw new Error(`${upper} needs a time: DTSTART has one, and RFC 5545 requires the same value type`);
+  }
 
+  // The zone a wall-clock value is read in: the property's own TZID, else
+  // DTSTART's. UTC-only properties never take one.
+  const own = existing?.getParameter('tzid');
+  const zone = UTC_ONLY.has(lower) ? null
+    : typeof own === 'string' && own ? own
+    : anchor?.form === 'tzid' ? anchor.tzid
+    : null;
+
+  const floating = parsed.some((p) => p.kind === 'floating');
+  // Where a wall-clock value ends up: in a TZID, floating, or converted to UTC
+  const wallClock: 'tzid' | 'floating' | 'utc' | null = !floating ? null
+    : zone ? 'tzid'
+    : anchor?.form === 'floating' ? 'floating'
+    : floatingTime === 'local' ? 'utc'
+    : anchor?.form === 'utc' || UTC_ONLY.has(lower) ? null
+    : 'floating';
+
+  if (floating && wallClock === null) {
+    throw new Error(UTC_ONLY.has(lower)
+      ? `${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"`
+      : `${upper} has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"`);
+  }
   // One line has one zone: wall-clock values that stay wall-clock (in a
   // TZID, or floating) cannot share it with UTC values
-  const staysWallClock = Boolean(reference) || floatingTime === 'keep';
-  if (floating && parsed.some((p) => p.kind === 'utc') && staysWallClock) {
+  if (floating && wallClock !== 'utc' && parsed.some((p) => p.kind === 'utc')) {
     throw new Error(`${upper} mixes values with and without a zone; give all of them a zone, or none`);
   }
-  let tzid: string | null = null;
-  let values: string[];
-  if (reference) {
-    tzid = reference.tzid;
-    values = parsed.map((p) => p.jcal);
-  } else if (floating && floatingTime === 'local') {
-    values = parsed.map((p) => (p.kind === 'floating' ? toUtcJcal(p.local) : p.jcal));
-  } else if (floating && UTC_ONLY.has(lower)) {
-    throw new Error(`${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"`);
-  } else {
-    values = parsed.map((p) => p.jcal);
-  }
+
+  const tzid = wallClock === 'tzid' ? zone : null;
+  const values = parsed.map((p) =>
+    p.kind === 'floating' && wallClock === 'utc' ? toUtcJcal(p.local) : p.jcal);
 
   let type = isDate ? 'date' : 'date-time';
   // vCard 4 REV is a TIMESTAMP; the parsed date-time is exactly that value.
