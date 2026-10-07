@@ -1,16 +1,22 @@
 {
-  "name": "tsdav-utils",
-  "version": "0.4.0",
+  "name": "@philflow/tsdav-utils",
+  "version": "0.4.1",
   "description": "Field-agnostic utility layer for tsdav CalDAV/CardDAV operations",
-  "main": "dist/index.cjs",
-  "module": "dist/index.js",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs",
-      "types": "./dist/index.d.ts"
-    }
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist"
@@ -46,10 +52,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/PhilflowIO/tsdav-utils.git"
+    "url": "git+https://github.com/PhilflowIO/tsdav-utils.git"
   },
   "bugs": {
     "url": "https://github.com/PhilflowIO/tsdav-utils/issues"
   },
-  "homepage": "https://github.com/PhilflowIO/tsdav-utils#readme"
+  "homepage": "https://github.com/PhilflowIO/tsdav-utils#readme",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
 }

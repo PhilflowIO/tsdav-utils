@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build, test and install the package (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # The 26 leg runs npm 12, which refuses git and remote-tarball
+        # dependencies by default: the reason this package is published to
+        # npm. Node 26 itself still bundles npm 11.
+        node-version: [18, 20, 22, 24, 26]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Use npm 12
+        if: matrix.node-version == 26
+        run: |
+          npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.0
+          for key in allow-git allow-remote; do
+            value=$(npm config get "$key")
+            if [ "$value" != none ]; then
+              echo "❌ ERROR: npm $(npm --version) has $key=$value, expected none"
+              exit 1
+            fi
+          done
+
+      - name: Install dependencies
+        run: |
+          node --version && npm --version
+          npm ci --no-audit --no-fund
+
+      - name: Build
+        run: npm run build
+
+      # dist is committed; it has to be what src builds to.
+      - name: Verify dist is up-to-date
+        run: |
+          DRIFT=$(git status --porcelain -- dist/)
+          if [ -n "$DRIFT" ]; then
+            echo "❌ ERROR: dist does not match a fresh build from src!"
+            echo "$DRIFT"
+            echo "Run 'npm run build' and commit dist."
+            exit 1
+          fi
+          echo "✅ dist matches a fresh build from src"
+
+      # Integration tests skip themselves without server credentials.
+      - name: Test
+        run: npm test
+
+      # Installed under the name `tsdav-utils`, the way consumers alias
+      # @philflow/tsdav-utils, and imported both ways the exports map offers.
+      - name: Install the packed tarball and import it
+        run: |
+          TARBALL="$GITHUB_WORKSPACE/$(npm pack --ignore-scripts | tail -1)"
+          CONSUMER=$(mktemp -d)
+          cd "$CONSUMER"
+          echo '{ "name": "consumer", "version": "0.0.0", "private": true }' > package.json
+          npm install --no-audit --no-fund "tsdav-utils@file:$TARBALL"
+          node --input-type=module -e "
+            const m = await import('tsdav-utils');
+            if (typeof m.updateFields !== 'function' || typeof m.seriesMaster !== 'function') process.exit(1);
+            console.log('✅ ESM import');"
+          node -e "
+            const m = require('tsdav-utils');
+            if (typeof m.updateFields !== 'function' || typeof m.seriesMaster !== 'function') process.exit(1);
+            console.log('✅ CJS require');"
