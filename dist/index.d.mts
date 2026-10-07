@@ -28,6 +28,8 @@ interface UpdateFieldsOptions {
  *
  * This function uses a field-agnostic approach - it accepts any iCal property name
  * (standard or custom) and updates it without validation or semantic understanding.
+ * In a recurring event or todo it edits the master, never an override (see
+ * "Recurring events and todos" in the README).
  *
  * @param calendarObject - iCal string or tsdav DAVCalendarObject with 'data' field
  * @param fields - Key-value pairs of iCal properties to update (e.g., {'SUMMARY': 'New Title'})
