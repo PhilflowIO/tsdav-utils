@@ -30,8 +30,16 @@ This is intentional. All intelligence belongs in your application layer or MCP s
 ## Installation
 
 ```bash
-npm install tsdav tsdav-utils
+npm install @philflow/tsdav-utils
 ```
+
+Code that imports `tsdav-utils` keeps its imports and installs the package under an alias:
+
+```bash
+npm install tsdav-utils@npm:@philflow/tsdav-utils
+```
+
+Releases are published to npm from this repository's release workflow, with a provenance attestation. Installing from git (`github:PhilflowIO/tsdav-utils#<tag>`) is not supported: npm 12 refuses git dependencies by default.
 
 `tsdav-utils` does not depend on tsdav: it only takes and returns iCal/vCard strings, so it declares no `tsdav` peer dependency. Use it with any tsdav version, including forks and builds with a non-standard version string.
 
@@ -431,7 +439,7 @@ MIT
 ## Links
 
 - [GitHub Repository](https://github.com/PhilflowIO/tsdav-utils)
-- [npm Package](https://www.npmjs.com/package/tsdav-utils)
+- [npm Package](https://www.npmjs.com/package/@philflow/tsdav-utils)
 - [tsdav](https://github.com/natelindev/tsdav)
 - [ical.js](https://github.com/kewisch/ical.js)
 - [RFC 5545 (iCalendar)](https://datatracker.ietf.org/doc/html/rfc5545)
