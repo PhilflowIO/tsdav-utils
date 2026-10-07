@@ -154,6 +154,16 @@ Updates arbitrary properties on a calendar/todo/contact object.
 - **options.floatingTime**: `'keep' | 'local'` (default `'keep'`)
   - How a date-time without a zone is written: floating, or host timezone converted to UTC
 
+- **options.type**: `'vevent' | 'vtodo' | 'vjournal'` (optional)
+  - The component type to write into. Without it the first type present is taken
+    (`VEVENT`, then `VTODO`, then `VJOURNAL`, see [Recurring events and todos](#recurring-events-and-todos))
+  - Throws if the object holds no component of that type, if the value is not one of
+    the three, or if the object is a vCard
+  - Name it when you know what you are editing: on an object that holds a `VEVENT`
+    and a `VTODO` (which RFC 4791 4.1 forbids, but servers do store),
+    `updateFields(todo.data, { DUE: '...' }, { type: 'vtodo' })` writes into the todo
+    instead of the event
+
 #### Returns
 
 - `string`: Updated iCal string ready for `tsdav.updateCalendarObject()`
@@ -302,7 +312,8 @@ follow the master's `DTSTART` (see above).
   use it to check what was written (e.g. DTEND against DTSTART) instead of
   `getFirstSubcomponent`.
 - The component type is chosen first (`VEVENT`, then `VTODO`, then `VJOURNAL`),
-  since a CalDAV object holds one type (RFC 4791 4.1).
+  since a CalDAV object holds one type (RFC 4791 4.1); `{ type }` names it
+  explicitly, for `updateFields` and `seriesMaster` alike.
 
 ## What This Library Does NOT Do
 
