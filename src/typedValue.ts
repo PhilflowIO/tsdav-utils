@@ -243,13 +243,14 @@ export function setDateValue(
   const floating = parsed.some((p) => p.kind === 'floating');
 
   // Which zone a wall-clock value is read in
-  let keepTzid = false;
+  const keepTzid = Boolean(floating && tzid && !UTC_ONLY.has(lower));
+  // One line has one zone: wall-clock values that stay wall-clock (in the
+  // property's TZID, or floating) cannot share it with UTC values
+  if (floating && parsed.some((p) => p.kind === 'utc') && (keepTzid || floatingTime === 'keep')) {
+    throw new Error(`${upper} mixes values with and without a zone; give all of them a zone, or none`);
+  }
   let values: string[];
-  if (floating && tzid && !UTC_ONLY.has(lower)) {
-    if (parsed.some((p) => p.kind === 'utc')) {
-      throw new Error(`${upper} mixes values with and without a zone; give all of them a zone, or none`);
-    }
-    keepTzid = true;
+  if (keepTzid) {
     values = parsed.map((p) => p.jcal);
   } else if (floating && floatingTime === 'local') {
     values = parsed.map((p) => (p.kind === 'floating' ? toUtcJcal(p.local) : p.jcal));

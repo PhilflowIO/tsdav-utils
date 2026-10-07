@@ -141,6 +141,16 @@ describe('date-times without a zone', () => {
     expect(lines(out, 'COMPLETED')[0]).toMatch(/^COMPLETED:\d{8}T\d{6}Z$/);
   });
 
+  it('cannot be mixed with UTC values when they stay floating', () => {
+    expect(() => updateFields(vevent(), { EXDATE: '2026-10-26T18:00:00,2026-10-27T18:00:00Z' }))
+      .toThrow(/with and without a zone/);
+  });
+
+  it('can be mixed with UTC values when "local" turns them into UTC too', () => {
+    const out = updateFields(vevent(), { EXDATE: '2026-10-26T18:00:00,2026-10-27T18:00:00Z' }, { floatingTime: 'local' });
+    expect(lines(out, 'EXDATE')[0]).toMatch(/^EXDATE:\d{8}T\d{6}Z,20261027T180000Z$/);
+  });
+
   it('cannot be mixed with zoned values on a zoned property', () => {
     expect(() => updateFields(
       vevent('EXDATE;TZID=Europe/Berlin:20260101T100000'),
