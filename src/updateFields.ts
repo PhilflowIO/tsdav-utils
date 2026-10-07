@@ -17,9 +17,18 @@ import { setDateValue } from './typedValue';
  * component without RECURRENCE-ID wins. A server may store a detached
  * instance with no master; a single such component is edited as it is, but
  * between several there is nothing to tell which one is meant, so it throws.
+ *
+ * Exported so a caller that reads or edits the object itself (to check
+ * DTEND against DTSTART, say) looks at the same component updateFields
+ * wrote, instead of re-deriving the rule.
+ *
+ * @param calendar - the parsed VCALENDAR
+ * @param type - restrict to one component type ("vevent", "vtodo",
+ *   "vjournal"); by default the first type present, in that order
  */
-function seriesMaster(calendar: ICAL.Component): ICAL.Component {
-  for (const type of ['vevent', 'vtodo', 'vjournal']) {
+export function seriesMaster(calendar: ICAL.Component, type?: string): ICAL.Component {
+  const types = type ? [type.toLowerCase()] : ['vevent', 'vtodo', 'vjournal'];
+  for (const type of types) {
     const all = calendar.getAllSubcomponents(type);
     if (all.length === 0) {
       continue;
@@ -33,9 +42,10 @@ function seriesMaster(calendar: ICAL.Component): ICAL.Component {
     }
     throw new Error(
       `This object holds ${all.length} ${type.toUpperCase()} instances (each with a ` +
-      'RECURRENCE-ID) and no master, so there is no telling which one to edit');
+      'RECURRENCE-ID) and no master, so a field update cannot tell which one is meant. ' +
+      'Edit the instance by rewriting the whole iCalendar object instead');
   }
-  throw new Error('No VEVENT, VTODO, or VJOURNAL found in VCALENDAR');
+  throw new Error(`No ${types.map((t) => t.toUpperCase()).join(', ')} found in VCALENDAR`);
 }
 
 /**

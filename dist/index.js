@@ -31,6 +31,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var index_exports = {};
 __export(index_exports, {
   parseDateValue: () => parseDateValue,
+  seriesMaster: () => seriesMaster,
   updateFields: () => updateFields
 });
 module.exports = __toCommonJS(index_exports);
@@ -218,9 +219,10 @@ function setDateValue(component, name, raw, floatingTime = "keep") {
 }
 
 // src/updateFields.ts
-function seriesMaster(calendar) {
-  for (const type of ["vevent", "vtodo", "vjournal"]) {
-    const all = calendar.getAllSubcomponents(type);
+function seriesMaster(calendar, type) {
+  const types = type ? [type.toLowerCase()] : ["vevent", "vtodo", "vjournal"];
+  for (const type2 of types) {
+    const all = calendar.getAllSubcomponents(type2);
     if (all.length === 0) {
       continue;
     }
@@ -232,10 +234,10 @@ function seriesMaster(calendar) {
       return all[0];
     }
     throw new Error(
-      `This object holds ${all.length} ${type.toUpperCase()} instances (each with a RECURRENCE-ID) and no master, so there is no telling which one to edit`
+      `This object holds ${all.length} ${type2.toUpperCase()} instances (each with a RECURRENCE-ID) and no master, so a field update cannot tell which one is meant. Edit the instance by rewriting the whole iCalendar object instead`
     );
   }
-  throw new Error("No VEVENT, VTODO, or VJOURNAL found in VCALENDAR");
+  throw new Error(`No ${types.map((t) => t.toUpperCase()).join(", ")} found in VCALENDAR`);
 }
 function updateFields(calendarObject, fields, options = {}) {
   const icalString = typeof calendarObject === "string" ? calendarObject : calendarObject.data;
@@ -268,5 +270,6 @@ function updateFields(calendarObject, fields, options = {}) {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   parseDateValue,
+  seriesMaster,
   updateFields
 });

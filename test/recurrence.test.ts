@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { updateFields } from '../src/updateFields';
+import ICAL from 'ical.js';
+import { updateFields, seriesMaster } from '../src/updateFields';
 
 // A recurring event or todo may hold its master and override components (with
 // RECURRENCE-ID, RFC 5545 3.8.4.4) in any order. A series-level write belongs to
@@ -104,5 +105,31 @@ describe('updateFields edits the master of a recurring object', () => {
     const card = ['BEGIN:VCARD', 'VERSION:4.0', 'UID:card-1', 'FN:Old', 'END:VCARD', ''].join('\r\n');
     const out = updateFields(card, { FN: 'New' });
     expect(out.split(/\r?\n/).filter((l) => l.startsWith('FN:'))).toEqual(['FN:New']);
+  });
+});
+
+describe('seriesMaster', () => {
+  const doc = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//EN',
+    'BEGIN:VTODO', 'UID:t', 'RECURRENCE-ID:20261012T090000Z', 'SUMMARY:override', 'END:VTODO',
+    'BEGIN:VTODO', 'UID:t', 'DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY', 'SUMMARY:master', 'END:VTODO',
+    'END:VCALENDAR', '',
+  ].join('\r\n');
+  const calendar = () => new ICAL.Component(ICAL.parse(doc));
+
+  it('returns the master for a caller that checks what updateFields wrote', () => {
+    expect(seriesMaster(calendar()).getFirstPropertyValue('summary')).toBe('master');
+    expect(seriesMaster(calendar(), 'VTODO').getFirstPropertyValue('summary')).toBe('master');
+  });
+
+  it('names the missing type when restricted to one that is absent', () => {
+    expect(() => seriesMaster(calendar(), 'vevent')).toThrow(/No VEVENT found/);
+  });
+
+  it('tells the caller how to proceed when there is no master', () => {
+    const instances = doc.replace(/BEGIN:VTODO\r\nUID:t\r\nDTSTART[^]*?END:VTODO\r\n/, [
+      'BEGIN:VTODO', 'UID:t', 'RECURRENCE-ID:20261019T090000Z', 'SUMMARY:o2', 'END:VTODO', '',
+    ].join('\r\n'));
+    expect(() => updateFields(instances, { SUMMARY: 'x' })).toThrow(/rewriting the whole iCalendar object/);
   });
 });

@@ -1,3 +1,5 @@
+import ICAL from 'ical.js';
+
 /**
  * Generic field update map
  * Any iCal property name → any string value
@@ -23,6 +25,31 @@ interface UpdateFieldsOptions {
     floatingTime?: FloatingTime;
 }
 
+/**
+ * The component a series-level write belongs to.
+ *
+ * A recurring event or todo may carry, next to its master, override
+ * components for single instances — same UID, plus a RECURRENCE-ID (RFC 5545
+ * 3.8.4.4) — in any order. A write without a named instance (SUMMARY, EXDATE,
+ * RRULE, DTSTART ...) belongs to the master, the one without RECURRENCE-ID;
+ * DTSTART-anchored date-times are anchored to the master's DTSTART for the
+ * same reason. Overrides are independent instances and are left untouched.
+ *
+ * The type is chosen first, VEVENT before VTODO before VJOURNAL: a CalDAV
+ * object holds one component type (RFC 4791 4.1). Within it, the first
+ * component without RECURRENCE-ID wins. A server may store a detached
+ * instance with no master; a single such component is edited as it is, but
+ * between several there is nothing to tell which one is meant, so it throws.
+ *
+ * Exported so a caller that reads or edits the object itself (to check
+ * DTEND against DTSTART, say) looks at the same component updateFields
+ * wrote, instead of re-deriving the rule.
+ *
+ * @param calendar - the parsed VCALENDAR
+ * @param type - restrict to one component type ("vevent", "vtodo",
+ *   "vjournal"); by default the first type present, in that order
+ */
+declare function seriesMaster(calendar: ICAL.Component, type?: string): ICAL.Component;
 /**
  * Update arbitrary fields on a calendar/todo/vcard object
  *
@@ -78,4 +105,4 @@ type DateValue = {
  */
 declare function parseDateValue(raw: string): DateValue;
 
-export { type CalendarObjectInput, type DateValue, type FieldUpdates, type FloatingTime, type UpdateFieldsOptions, parseDateValue, updateFields };
+export { type CalendarObjectInput, type DateValue, type FieldUpdates, type FloatingTime, type UpdateFieldsOptions, parseDateValue, seriesMaster, updateFields };

@@ -223,6 +223,13 @@ follow the master's `DTSTART` (see above).
 - **An object with only overrides** (a detached instance stored without its
   master): a single component is edited as it is; with several there is no
   telling which one is meant, so `updateFields` throws.
+- **Moving a master's `DTSTART` or changing its `RRULE`** does not move the
+  overrides' `RECURRENCE-ID`s yet, so an override can stop matching an occurrence
+  ([#16](https://github.com/PhilflowIO/tsdav-utils/issues/16)).
+- **Reading the same component yourself:** `seriesMaster(calendar, type?)` returns
+  the component `updateFields` edits, for a parsed `ICAL.Component` VCALENDAR —
+  use it to check what was written (e.g. DTEND against DTSTART) instead of
+  `getFirstSubcomponent`.
 - The component type is chosen first (`VEVENT`, then `VTODO`, then `VJOURNAL`),
   since a CalDAV object holds one type (RFC 4791 4.1).
 
