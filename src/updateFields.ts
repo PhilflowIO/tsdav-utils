@@ -1,6 +1,6 @@
 import ICAL from 'ical.js';
 import type { CalendarObjectInput, FieldUpdates, UpdateFieldsOptions } from './types';
-import { setDateValue } from './typedValue';
+import { setDateValue, setRecurValue } from './typedValue';
 
 /**
  * Update arbitrary fields on a calendar/todo/vcard object
@@ -74,15 +74,18 @@ export function updateFields(
   }
 
   // 4. Update properties using field-agnostic loop
-  //    Date and date-time properties are parsed and re-typed (see typedValue);
-  //    everything else goes through updatePropertyWithValue(), which handles
-  //    both updates and creates if missing. ical.js expects lowercase names.
-  //    DTSTART goes first: the other date-times take their zone and value
-  //    type from it, so they must see the new one, whatever the key order.
+  //    Date and date-time properties and recurrence rules are parsed and
+  //    written typed (see typedValue); everything else goes through
+  //    updatePropertyWithValue(), which handles both updates and creates if
+  //    missing. ical.js expects lowercase names.
+  //    DTSTART goes first: the other date-times and RRULE's UNTIL take their
+  //    zone and value type from it, so they must see the new one, whatever
+  //    the key order.
   const entries = Object.entries(fields).sort(
     ([a], [b]) => Number(b.toLowerCase() === 'dtstart') - Number(a.toLowerCase() === 'dtstart'));
   for (const [key, value] of entries) {
-    if (!setDateValue(actualComponent, key, value, floatingTime)) {
+    if (!setDateValue(actualComponent, key, value, floatingTime) &&
+        !setRecurValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }

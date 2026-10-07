@@ -179,6 +179,176 @@ function setDateValue(component, name, raw, floatingTime = "keep") {
   }
   return true;
 }
+var WEEKDAY = "(?:SU|MO|TU|WE|TH|FR|SA)";
+function intList(min, max, signed) {
+  const item = signed ? /^[+-]?\d{1,3}$/ : /^\d{1,2}$/;
+  return (value) => {
+    for (const v of value.split(",")) {
+      const n = Math.abs(Number(v));
+      if (!item.test(v) || n < min || n > max) {
+        const range = signed ? `${min} to ${max} or -${max} to -${min}` : `${min} to ${max}`;
+        return `"${v}" is not in ${range}`;
+      }
+    }
+    return null;
+  };
+}
+var RULE_PARTS = {
+  FREQ: (v) => /^(SECONDLY|MINUTELY|HOURLY|DAILY|WEEKLY|MONTHLY|YEARLY)$/.test(v) ? null : `"${v}" is not one of SECONDLY, MINUTELY, HOURLY, DAILY, WEEKLY, MONTHLY, YEARLY`,
+  UNTIL: () => null,
+  COUNT: (v) => /^\d+$/.test(v) && Number(v) >= 1 ? null : `"${v}" is not a positive integer`,
+  INTERVAL: (v) => /^\d+$/.test(v) && Number(v) >= 1 ? null : `"${v}" is not a positive integer`,
+  BYSECOND: intList(0, 60, false),
+  BYMINUTE: intList(0, 59, false),
+  BYHOUR: intList(0, 23, false),
+  BYDAY: (value) => {
+    for (const v of value.split(",")) {
+      const m = new RegExp(`^([+-]?\\d{1,2})?${WEEKDAY}$`).exec(v);
+      const n = m?.[1] === void 0 ? 1 : Math.abs(Number(m[1]));
+      if (!m || n < 1 || n > 53) {
+        return `"${v}" is not a weekday (SU, MO, TU, WE, TH, FR, SA), optionally with an ordinal 1 to 53 or -53 to -1 ("1MO", "-1FR")`;
+      }
+    }
+    return null;
+  },
+  BYMONTHDAY: intList(1, 31, true),
+  BYYEARDAY: intList(1, 366, true),
+  BYWEEKNO: intList(1, 53, true),
+  BYMONTH: intList(1, 12, false),
+  BYSETPOS: intList(1, 366, true),
+  WKST: (v) => new RegExp(`^${WEEKDAY}$`).test(v) ? null : `"${v}" is not a weekday (SU, MO, TU, WE, TH, FR, SA)`
+};
+function parseRuleParts(raw) {
+  const parts = /* @__PURE__ */ new Map();
+  for (const part of raw.trim().split(";").filter((p) => p.trim() !== "")) {
+    const eq = part.indexOf("=");
+    const name = (eq < 0 ? part : part.slice(0, eq)).trim().toUpperCase();
+    const value = eq < 0 ? "" : part.slice(eq + 1).trim().toUpperCase();
+    const check = RULE_PARTS[name];
+    if (!check) {
+      throw new Error(`"${part.trim()}" is not a rule part. RFC 5545 defines ${Object.keys(RULE_PARTS).join(", ")} (e.g. "FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10")`);
+    }
+    if (parts.has(name)) {
+      throw new Error(`${name} is given twice; each rule part may occur once`);
+    }
+    if (value === "") {
+      throw new Error(`${name} has no value`);
+    }
+    const wrong = check(value);
+    if (wrong) {
+      throw new Error(`${name}: ${wrong}`);
+    }
+    parts.set(name, value);
+  }
+  const freq = parts.get("FREQ");
+  if (!freq) {
+    throw new Error('FREQ is missing; every rule needs one (e.g. "FREQ=DAILY;COUNT=5")');
+  }
+  if (parts.has("COUNT") && parts.has("UNTIL")) {
+    throw new Error("COUNT and UNTIL cannot both be given (RFC 5545 3.3.10); use one of them");
+  }
+  if (parts.has("BYWEEKNO") && freq !== "YEARLY") {
+    throw new Error("BYWEEKNO is only allowed with FREQ=YEARLY (RFC 5545 3.3.10)");
+  }
+  if (parts.has("BYYEARDAY") && ["DAILY", "WEEKLY", "MONTHLY"].includes(freq)) {
+    throw new Error(`BYYEARDAY is not allowed with FREQ=${freq} (RFC 5545 3.3.10)`);
+  }
+  if (parts.has("BYMONTHDAY") && freq === "WEEKLY") {
+    throw new Error("BYMONTHDAY is not allowed with FREQ=WEEKLY (RFC 5545 3.3.10)");
+  }
+  const ordinalDay = (parts.get("BYDAY") ?? "").split(",").some((d) => /\d/.test(d));
+  if (ordinalDay && (!["MONTHLY", "YEARLY"].includes(freq) || parts.has("BYWEEKNO"))) {
+    throw new Error('BYDAY with an ordinal ("1MO", "-1FR") is only allowed with FREQ=MONTHLY or FREQ=YEARLY, and not together with BYWEEKNO (RFC 5545 3.3.10)');
+  }
+  if (parts.has("BYSETPOS") && ![...parts.keys()].some((k) => k.startsWith("BY") && k !== "BYSETPOS")) {
+    throw new Error("BYSETPOS needs another BYxxx part to select from (RFC 5545 3.3.10)");
+  }
+  return parts;
+}
+function timezoneOf(component, tzid) {
+  let root = component;
+  while (root.parent) {
+    root = root.parent;
+  }
+  const vtimezone = root.getAllSubcomponents("vtimezone").find((tz) => tz.getFirstPropertyValue("tzid") === tzid);
+  return vtimezone ? new ICAL.Timezone(vtimezone) : null;
+}
+function untilTime(component, ruleName, raw, floatingTime) {
+  let parsed;
+  try {
+    parsed = parseDateValue(raw);
+  } catch (error) {
+    throw new Error(`${ruleName} UNTIL: ${error.message}`);
+  }
+  const anchor = anchorOf(component, ruleName.toLowerCase());
+  const fail = (why) => new Error(`${ruleName} UNTIL ${why}`);
+  if (anchor?.form === "date" && parsed.kind !== "date") {
+    throw fail('must be a date: DTSTART is a date (all-day), and RFC 5545 3.3.10 requires the same type, e.g. "2026-10-26"');
+  }
+  if (anchor && anchor.form !== "date" && parsed.kind === "date") {
+    throw fail("needs a time: DTSTART has one, and RFC 5545 3.3.10 requires the same type");
+  }
+  if (anchor?.form === "floating" && parsed.kind === "utc") {
+    throw fail('must be a local time without a zone, like the floating DTSTART (RFC 5545 3.3.10), e.g. "2026-10-26T18:00:00"');
+  }
+  if (parsed.kind === "floating") {
+    if (anchor?.form === "tzid") {
+      const tz = timezoneOf(component, anchor.tzid);
+      if (!tz) {
+        throw fail(`has no zone, and DTSTART's zone "${anchor.tzid}" has no VTIMEZONE in the document to convert it to UTC with (RFC 5545 3.3.10 requires UTC here): give it a zone, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T18:00:00+01:00"`);
+      }
+      const wall = ICAL.Time.fromDateTimeString(parsed.jcal);
+      const zoned = ICAL.Time.fromData({
+        year: wall.year,
+        month: wall.month,
+        day: wall.day,
+        hour: wall.hour,
+        minute: wall.minute,
+        second: wall.second
+      }, tz);
+      return zoned.convertToZone(ICAL.Timezone.utcTimezone);
+    }
+    if (anchor?.form === "floating") {
+      return ICAL.Time.fromDateTimeString(parsed.jcal);
+    }
+    if (floatingTime === "local") {
+      return ICAL.Time.fromDateTimeString(toUtcJcal(parsed.local));
+    }
+    if (anchor?.form === "utc") {
+      throw fail('has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"');
+    }
+    return ICAL.Time.fromDateTimeString(parsed.jcal);
+  }
+  return parsed.kind === "date" ? ICAL.Time.fromDateString(parsed.jcal) : ICAL.Time.fromDateTimeString(parsed.jcal);
+}
+function setRecurValue(component, name, raw, floatingTime = "keep") {
+  const lower = name.toLowerCase();
+  const design = designSetFor(component).property[lower];
+  if (design?.defaultType !== "recur") {
+    return false;
+  }
+  const upper = name.toUpperCase();
+  let parts;
+  try {
+    parts = parseRuleParts(raw);
+  } catch (error) {
+    throw new Error(`${upper}: ${error.message}`);
+  }
+  const until = parts.get("UNTIL");
+  parts.delete("UNTIL");
+  const recur = ICAL.Recur.fromString([...parts].map(([k, v]) => `${k}=${v}`).join(";"));
+  if (until !== void 0) {
+    recur.until = untilTime(component, upper, until, floatingTime);
+  }
+  let property = component.getFirstProperty(lower);
+  if (!property) {
+    property = new ICAL.Property(lower, component);
+    component.addProperty(property);
+  }
+  property.resetType("recur");
+  property.setValue(recur);
+  return true;
+}
 
 // src/updateFields.ts
 function updateFields(calendarObject, fields, options = {}) {
@@ -211,7 +381,7 @@ function updateFields(calendarObject, fields, options = {}) {
     ([a], [b]) => Number(b.toLowerCase() === "dtstart") - Number(a.toLowerCase() === "dtstart")
   );
   for (const [key, value] of entries) {
-    if (!setDateValue(actualComponent, key, value, floatingTime)) {
+    if (!setDateValue(actualComponent, key, value, floatingTime) && !setRecurValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }
