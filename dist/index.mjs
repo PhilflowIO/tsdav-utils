@@ -5,7 +5,8 @@ import ICAL2 from "ical.js";
 import ICAL from "ical.js";
 var TYPED = /* @__PURE__ */ new Set(["date-time", "date", "timestamp"]);
 var UTC_ONLY = /* @__PURE__ */ new Set(["completed", "created", "dtstamp", "last-modified"]);
-var ACCEPTED_FORMS = 'Accepted forms: "2026-10-26T18:00:00Z", "2026-10-26T14:00:00-04:00", "20261026T180000Z", "2026-10-26T18:00:00" (no zone), or a date "2026-10-26" / "20261026"';
+var DATE_TIME_FORMS = '"2026-10-26T18:00:00Z", "2026-10-26T14:00:00-04:00", "20261026T180000Z" or "2026-10-26T18:00:00" (no zone; seconds optional)';
+var ACCEPTED_FORMS = `Accepted forms: ${DATE_TIME_FORMS}, or a date "2026-10-26" / "20261026"`;
 var DATE_EXTENDED = /^(\d{4})-(\d{2})-(\d{2})$/;
 var DATE_BASIC = /^(\d{4})(\d{2})(\d{2})$/;
 var ZONE = "(Z|[+-]\\d{2}(?::?\\d{2})?)";
@@ -95,6 +96,25 @@ function dateProperty(component, name) {
     multiValue: Boolean(design.multiValue)
   };
 }
+var ANCHORED = /* @__PURE__ */ new Set(["vevent", "vtodo", "vjournal"]);
+function anchorOf(component, name) {
+  if (name === "dtstart" || UTC_ONLY.has(name) || !ANCHORED.has(component.name)) {
+    return null;
+  }
+  const dtstart = component.getFirstProperty("dtstart");
+  if (!dtstart) {
+    return null;
+  }
+  if (dtstart.type === "date") {
+    return { form: "date" };
+  }
+  const tzid = dtstart.getParameter("tzid");
+  if (typeof tzid === "string" && tzid) {
+    return { form: "tzid", tzid };
+  }
+  const value = dtstart.toJSON()[3];
+  return typeof value === "string" && /Z$/i.test(value) ? { form: "utc" } : { form: "floating" };
+}
 function setDateValue(component, name, raw, floatingTime = "keep") {
   const shape = dateProperty(component, name);
   if (!shape) {
@@ -114,25 +134,29 @@ function setDateValue(component, name, raw, floatingTime = "keep") {
   }
   const isDate = parsed[0].kind === "date";
   if (isDate && !shape.allowedTypes.includes("date")) {
-    throw new Error(`${upper} needs a date-time, not a date. ${ACCEPTED_FORMS}`);
+    throw new Error(`${upper} needs a date-time, not a date. Accepted forms: ${DATE_TIME_FORMS}`);
   }
   const existing = component.getFirstProperty(lower);
-  const tzid = existing?.getParameter("tzid");
+  const anchor = anchorOf(component, lower);
+  const why = ["exdate", "rdate"].includes(lower) ? "otherwise it names no occurrence of the series" : "RFC 5545 requires the same value type";
+  if (anchor?.form === "date" && !isDate) {
+    throw new Error(`${upper} must be a date: DTSTART is a date (all-day), and ${why}`);
+  }
+  if (anchor && anchor.form !== "date" && isDate) {
+    throw new Error(`${upper} needs a time: DTSTART has one, and ${why}`);
+  }
+  const own = existing?.getParameter("tzid");
+  const zone = UTC_ONLY.has(lower) ? null : typeof own === "string" && own ? own : anchor?.form === "tzid" ? anchor.tzid : null;
   const floating = parsed.some((p) => p.kind === "floating");
-  const keepTzid = Boolean(floating && tzid && !UTC_ONLY.has(lower));
-  if (floating && parsed.some((p) => p.kind === "utc") && (keepTzid || floatingTime === "keep")) {
+  const wallClock = !floating ? null : zone ? "tzid" : anchor?.form === "floating" ? "floating" : floatingTime === "local" ? "utc" : anchor?.form === "utc" || UTC_ONLY.has(lower) ? null : "floating";
+  if (floating && wallClock === null) {
+    throw new Error(UTC_ONLY.has(lower) ? `${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"` : `${upper} has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"`);
+  }
+  if (floating && wallClock !== "utc" && parsed.some((p) => p.kind === "utc")) {
     throw new Error(`${upper} mixes values with and without a zone; give all of them a zone, or none`);
   }
-  let values;
-  if (keepTzid) {
-    values = parsed.map((p) => p.jcal);
-  } else if (floating && floatingTime === "local") {
-    values = parsed.map((p) => p.kind === "floating" ? toUtcJcal(p.local) : p.jcal);
-  } else if (floating && UTC_ONLY.has(lower)) {
-    throw new Error(`${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"`);
-  } else {
-    values = parsed.map((p) => p.jcal);
-  }
+  const tzid = wallClock === "tzid" ? zone : null;
+  const values = parsed.map((p) => p.kind === "floating" && wallClock === "utc" ? toUtcJcal(p.local) : p.jcal);
   let type = isDate ? "date" : "date-time";
   if (type === "date-time" && shape.defaultType === "timestamp") {
     type = "timestamp";
@@ -142,7 +166,9 @@ function setDateValue(component, name, raw, floatingTime = "keep") {
     property = new ICAL.Property(lower, component);
     component.addProperty(property);
   }
-  if (!keepTzid) {
+  if (tzid) {
+    property.setParameter("tzid", tzid);
+  } else {
     property.removeParameter("tzid");
   }
   property.resetType(type);
@@ -181,7 +207,10 @@ function updateFields(calendarObject, fields, options = {}) {
   } else {
     actualComponent = component;
   }
-  for (const [key, value] of Object.entries(fields)) {
+  const entries = Object.entries(fields).sort(
+    ([a], [b]) => Number(b.toLowerCase() === "dtstart") - Number(a.toLowerCase() === "dtstart")
+  );
+  for (const [key, value] of entries) {
     if (!setDateValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
@@ -189,5 +218,6 @@ function updateFields(calendarObject, fields, options = {}) {
   return component.toString();
 }
 export {
+  parseDateValue,
   updateFields
 };

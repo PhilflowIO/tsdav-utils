@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { updateFields } from '../src/updateFields';
+import { parseDateValue } from '../src/typedValue';
 
 // The assertions look at the serialized lines on purpose: the defects these
 // tests pin down (a lost offset, a stale TZID, a stale VALUE=DATE) are only
@@ -96,8 +97,9 @@ describe('dates', () => {
     expect(lines(back, 'DTSTART')).toEqual(['DTSTART:20261026T090000Z']);
   });
 
-  it('rejects a date where only a date-time is allowed', () => {
+  it('rejects a date where only a date-time is allowed, without offering dates', () => {
     expect(() => updateFields(vtodo(), { COMPLETED: '2026-10-26' })).toThrow(/COMPLETED needs a date-time/);
+    expect(() => updateFields(vtodo(), { COMPLETED: '2026-10-26' })).not.toThrow(/or a date/);
   });
 
   it('rejects a date that does not exist instead of rolling it over', () => {
@@ -142,7 +144,7 @@ describe('date-times without a zone', () => {
   });
 
   it('cannot be mixed with UTC values when they stay floating', () => {
-    expect(() => updateFields(vevent(), { EXDATE: '2026-10-26T18:00:00,2026-10-27T18:00:00Z' }))
+    expect(() => updateFields(vtodo(), { EXDATE: '2026-10-26T18:00:00,2026-10-27T18:00:00Z' }))
       .toThrow(/with and without a zone/);
   });
 
@@ -156,6 +158,110 @@ describe('date-times without a zone', () => {
       vevent('EXDATE;TZID=Europe/Berlin:20260101T100000'),
       { EXDATE: '2026-10-26T18:00:00,2026-10-27T18:00:00Z' },
     )).toThrow(/with and without a zone/);
+  });
+});
+
+describe('DTSTART anchors the zone of the other date-times', () => {
+  const tokyo = (...props: string[]) => [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//tsdav-utils//Test//EN',
+    'BEGIN:VEVENT', 'UID:event-2', 'DTSTAMP:20260101T000000Z',
+    'DTSTART;TZID=Asia/Tokyo:20260520T090000', ...props,
+    'END:VEVENT', 'END:VCALENDAR', '',
+  ].join('\r\n');
+
+  it('a DTEND without a TZID is read in DTSTART\'s zone, so the length stays right', () => {
+    const out = updateFields(tokyo('DURATION:PT1H'), {
+      DTSTART: '2026-05-25T10:00:00', DTEND: '2026-05-25T11:00:00',
+    }, { floatingTime: 'local' });
+    expect(lines(out, 'DTSTART')).toEqual(['DTSTART;TZID=Asia/Tokyo:20260525T100000']);
+    expect(lines(out, 'DTEND')).toEqual(['DTEND;TZID=Asia/Tokyo:20260525T110000']);
+  });
+
+  it('an EXDATE is written in the zone of the series it excludes from', () => {
+    const out = updateFields(tokyo('RRULE:FREQ=DAILY'), { EXDATE: '2026-05-27T09:00:00' }, { floatingTime: 'local' });
+    expect(lines(out, 'EXDATE')).toEqual(['EXDATE;TZID=Asia/Tokyo:20260527T090000']);
+  });
+
+  it('a value with a zone is still converted to UTC', () => {
+    const out = updateFields(tokyo('RRULE:FREQ=DAILY'), { EXDATE: '2026-05-27T00:00:00Z' });
+    expect(lines(out, 'EXDATE')).toEqual(['EXDATE:20260527T000000Z']);
+  });
+
+  it('the property\'s own TZID wins over DTSTART\'s', () => {
+    const out = updateFields(tokyo('DTEND;TZID=Europe/Berlin:20260520T030000'), { DTEND: '2026-05-25T04:00:00' });
+    expect(lines(out, 'DTEND')).toEqual(['DTEND;TZID=Europe/Berlin:20260525T040000']);
+  });
+
+  it('a floating DTSTART keeps the other date-times floating, even with "local"', () => {
+    const out = updateFields(
+      vevent().replace('DTSTART:20260101T100000Z', 'DTSTART:20260101T100000'),
+      { EXDATE: '2026-01-02T10:00:00' },
+      { floatingTime: 'local' },
+    );
+    expect(lines(out, 'EXDATE')).toEqual(['EXDATE:20260102T100000']);
+  });
+
+  it('next to a UTC DTSTART a value without a zone is refused under "keep": floating would match nothing', () => {
+    expect(() => updateFields(vevent(), { EXDATE: '2026-01-02T10:00:00' })).toThrow(/DTSTART is in UTC/);
+    expect(() => updateFields(vevent(), { DTEND: '2026-01-01T11:00:00' })).toThrow(/DTSTART is in UTC/);
+  });
+
+  it('next to a UTC DTSTART a value without a zone is host-local UTC under "local"', () => {
+    const out = updateFields(vevent(), { DTEND: '2026-01-01T11:00:00' }, { floatingTime: 'local' });
+    const utc = new Date(2026, 0, 1, 11, 0, 0).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+    expect(lines(out, 'DTEND')).toEqual([`DTEND:${utc}`]);
+  });
+
+  it('the key order does not matter: DTSTART is written first', () => {
+    const stored = tokyo('DTEND:20260520T010000Z');
+    const a = updateFields(stored, { DTEND: '2026-05-25T11:00:00', DTSTART: '2026-05-25T01:00:00Z' }, { floatingTime: 'local' });
+    const b = updateFields(stored, { DTSTART: '2026-05-25T01:00:00Z', DTEND: '2026-05-25T11:00:00' }, { floatingTime: 'local' });
+    expect(a).toBe(b);
+    expect(lines(a, 'DTSTART')).toEqual(['DTSTART:20260525T010000Z']);
+  });
+
+  it('an all-day DTSTART takes dates only', () => {
+    const allDay = vevent().replace('DTSTART:20260101T100000Z', 'DTSTART;VALUE=DATE:20260101')
+      .replace('DTEND:20260101T110000Z', 'DTEND;VALUE=DATE:20260102');
+    expect(() => updateFields(allDay, { EXDATE: '2026-01-05T00:00:00' })).toThrow(/must be a date: DTSTART is a date/);
+    expect(lines(updateFields(allDay, { EXDATE: '2026-01-05' }), 'EXDATE')).toEqual(['EXDATE;VALUE=DATE:20260105']);
+  });
+
+  it('a timed DTSTART takes date-times only', () => {
+    expect(() => updateFields(vevent(), { DTEND: '2026-01-02' })).toThrow(/needs a time: DTSTART has one/);
+  });
+
+  it('moving DTSTART and DTEND to all-day together works in either key order', () => {
+    const out = updateFields(vevent(), { DTEND: '2026-01-03', DTSTART: '2026-01-02' });
+    expect(lines(out, 'DTSTART')).toEqual(['DTSTART;VALUE=DATE:20260102']);
+    expect(lines(out, 'DTEND')).toEqual(['DTEND;VALUE=DATE:20260103']);
+  });
+
+  it('a todo without DTSTART is not anchored', () => {
+    const out = updateFields(vtodo(), { DUE: '2026-10-26' });
+    expect(lines(out, 'DUE')).toEqual(['DUE;VALUE=DATE:20261026']);
+  });
+
+  it('UTC-only properties are never anchored', () => {
+    const out = updateFields(tokyo(), { 'LAST-MODIFIED': '2026-05-25T10:00:00Z' });
+    expect(lines(out, 'LAST-MODIFIED')).toEqual(['LAST-MODIFIED:20260525T100000Z']);
+    expect(() => updateFields(tokyo(), { 'LAST-MODIFIED': '2026-05-25T10:00:00' })).toThrow(/must be in UTC/);
+  });
+});
+
+describe('parseDateValue', () => {
+  it.each([
+    ['2026-10-26', 'date', '2026-10-26'],
+    ['20261026', 'date', '2026-10-26'],
+    ['2026-10-26T14:00-04:00', 'utc', '2026-10-26T18:00:00Z'],
+    ['20261026T180000Z', 'utc', '2026-10-26T18:00:00Z'],
+    ['2026-10-26T18:00', 'floating', '2026-10-26T18:00:00'],
+  ])('%s is a %s', (raw, kind, jcal) => {
+    expect(parseDateValue(raw)).toMatchObject({ kind, jcal });
+  });
+
+  it('throws naming the accepted forms', () => {
+    expect(() => parseDateValue('next friday')).toThrow(/Accepted forms/);
   });
 });
 

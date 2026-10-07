@@ -77,7 +77,11 @@ export function updateFields(
   //    Date and date-time properties are parsed and re-typed (see typedValue);
   //    everything else goes through updatePropertyWithValue(), which handles
   //    both updates and creates if missing. ical.js expects lowercase names.
-  for (const [key, value] of Object.entries(fields)) {
+  //    DTSTART goes first: the other date-times take their zone and value
+  //    type from it, so they must see the new one, whatever the key order.
+  const entries = Object.entries(fields).sort(
+    ([a], [b]) => Number(b.toLowerCase() === 'dtstart') - Number(a.toLowerCase() === 'dtstart'));
+  for (const [key, value] of entries) {
     if (!setDateValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }

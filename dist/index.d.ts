@@ -46,4 +46,34 @@ interface UpdateFieldsOptions {
  */
 declare function updateFields(calendarObject: CalendarObjectInput, fields: FieldUpdates, options?: UpdateFieldsOptions): string;
 
-export { type CalendarObjectInput, type FieldUpdates, type FloatingTime, type UpdateFieldsOptions, updateFields };
+/**
+ * One parsed value, in the jCal form ("2026-10-26", "2026-10-26T18:00:00Z",
+ * "2026-10-26T18:00:00"). "floating" is a wall-clock time without a zone; what
+ * it becomes on write depends on where it lands (see setDateValue), and
+ * `local` is the instant it names when read in the host timezone.
+ */
+type DateValue = {
+    kind: 'date';
+    jcal: string;
+} | {
+    kind: 'utc';
+    jcal: string;
+} | {
+    kind: 'floating';
+    jcal: string;
+    local: Date;
+};
+/**
+ * Parse one date or date-time value as a caller would write it — the grammar
+ * updateFields accepts for every date-typed property, exported so a caller
+ * can validate input with exactly the same rules.
+ *
+ * A zoned value is converted to UTC: the instant is what matters, and UTC is
+ * the only zone that needs no VTIMEZONE. A value without a zone stays a
+ * wall-clock time here; setDateValue decides what it means.
+ *
+ * @throws {Error} naming the accepted forms when the value is none of them
+ */
+declare function parseDateValue(raw: string): DateValue;
+
+export { type CalendarObjectInput, type DateValue, type FieldUpdates, type FloatingTime, type UpdateFieldsOptions, parseDateValue, updateFields };
