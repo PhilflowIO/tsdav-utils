@@ -259,25 +259,10 @@ updateFields(event, { RRULE: 'FREQ=DAILY;UNTIL=2026-10-26T14:00:00-04:00' });
   - with no DTSTART, `UNTIL` is written in the form given.
   DTSTART is written first, so `UNTIL` follows the new DTSTART whatever the key
   order.
-- Writing DTSTART also carries an existing `UNTIL` (of an RRULE/EXRULE not
-  written in the same call) into the new DTSTART's form, so the object never
-  ends up with an `UNTIL` the RFC forbids — also when DTSTART and the rule are
-  written in separate calls:
-  - to an all-day DTSTART: the `UNTIL`'s calendar date, read in the old
-    DTSTART's zone (`DTSTART:...T100000Z` + `UNTIL=20261020T100000Z`, then
-    `{ DTSTART: '2026-10-01' }` gives `UNTIL=20261020`);
-  - from a date to a timed DTSTART: the end of that day (`UNTIL` is inclusive)
-    in the zone the new DTSTART's wall clock belongs to, converted as above —
-    its `TZID`, floating, or for a UTC DTSTART under `{ floatingTime: 'local' }`
-    the host timezone. A UTC DTSTART under the default has no other zone to go
-    by, so `UNTIL=20261020` becomes `UNTIL=20261020T235959Z`;
-  - a UTC `UNTIL` stays UTC next to a UTC or `TZID` DTSTART, and becomes the
-    old zone's wall clock next to a new floating DTSTART;
-  - where the old `UNTIL` names no definite instant in the new form — a floating
-    `UNTIL` next to a new UTC DTSTART under the default, a UTC one next to a new
-    floating DTSTART with no old zone, a zone with no `VTIMEZONE` — it throws
-    and asks for the rule, with `UNTIL`, in the same call.
-  A `COUNT` rule, or an event without a rule, is left as it is.
+- Writing DTSTART also moves an existing `UNTIL` (of an RRULE/EXRULE not
+  written in the same call) with the series — see
+  [Recurring events and todos](#recurring-events-and-todos). A `COUNT` rule, or
+  an event without a rule, is left as it is.
 
 ## Recurring events and todos
 
@@ -288,15 +273,48 @@ store them in any order. `updateFields` always edits the **master**, the
 (`SUMMARY`, `EXDATE`, `RRULE`, `DTSTART`, ...) reaches the series, and date-times
 follow the master's `DTSTART` (see above).
 
-- **Overrides are not touched.** Each override is an independent instance; a new
-  `SUMMARY` on the master does not rename an instance that was renamed on its own.
-  To change an override as well, edit it with ical.js directly.
+- **Overrides keep their content.** Each override is an independent instance; a
+  new `SUMMARY` on the master does not rename an instance that was renamed on its
+  own. To change an override as well, edit it with ical.js directly.
 - **An object with only overrides** (a detached instance stored without its
   master): a single component is edited as it is; with several there is no
   telling which one is meant, so `updateFields` throws.
-- **Moving a master's `DTSTART` or changing its `RRULE`** does not move the
-  overrides' `RECURRENCE-ID`s yet, so an override can stop matching an occurrence
-  ([#16](https://github.com/PhilflowIO/tsdav-utils/issues/16)).
+- **Moving the master's `DTSTART` moves the series as a whole.** An override's
+  `RECURRENCE-ID` and an `EXDATE` name an occurrence by its original start; left
+  where they were, the override would silently stop applying and the `EXDATE`
+  stop excluding. So every `RECURRENCE-ID`, `EXDATE`, `RDATE` and `UNTIL` the call
+  does not write itself moves by the same distance DTSTART moved:
+  - the distance is measured on the series' wall clock, so a 09:00 Berlin series
+    moved to 10:00 keeps landing on 10:00 across a DST change, and the values are
+    written in the new DTSTART's form (its `TZID`, UTC, or floating);
+  - across an all-day/timed switch the distance counts in days: a value keeps
+    its day, and becomes a date, or takes the new DTSTART's time of day;
+  - an `UNTIL` therefore keeps the number of occurrences: a weekly 09:00 series
+    with `UNTIL` on its last occurrence still ends on that occurrence at 10:00;
+  - the overrides' own `DTSTART`/`DTEND` stay: they are times the instance was
+    given on purpose. Thunderbird does the same on this edit
+    (`CalRecurrenceInfo.onStartDateChange`).
+
+  ```typescript
+  // weekly at 09:00Z, override RECURRENCE-ID:20261012T090000Z moved to 13:00
+  updateFields(event, { DTSTART: '20261005T100000Z' });
+  // master DTSTART:20261005T100000Z, override RECURRENCE-ID:20261012T100000Z,
+  // DTSTART:20261012T130000Z — the moved instance stays at 13:00
+  ```
+
+  Where a value cannot be moved it throws and says what to give instead: a UTC
+  value next to a `TZID` without a `VTIMEZONE` in the document (the zone's offsets
+  are unknown), a UTC value in a floating series, an `RDATE` of periods.
+- **A changed `RRULE` or `RDATE` must keep every override and `EXDATE`** that
+  named an occurrence before. If one would no longer name an occurrence of the
+  new series — also after a DTSTART move onto another weekday of a `BYDAY` rule —
+  `updateFields` throws, naming each one. Give `EXDATE` in the same call with the
+  exclusions the new series should have; an override has to be moved or removed
+  by rewriting the whole object. An override that was already stale before the
+  call does not block it.
+- **`RECURRENCE-ID` is not written on a master** (or a plain event): it would turn
+  the series into an override of a single instance. It throws; a lone detached
+  instance, which has one already, can still be given a new one.
 - **Reading the same component yourself:** `seriesMaster(calendar, type?)` returns
   the component `updateFields` edits, for a parsed `ICAL.Component` VCALENDAR —
   use it to check what was written (e.g. DTEND against DTSTART) instead of
