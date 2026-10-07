@@ -36,18 +36,22 @@ const TYPED = new Set(['date-time', 'date', 'timestamp']);
  */
 const UTC_ONLY = new Set(['completed', 'created', 'dtstamp', 'last-modified']);
 
-const ACCEPTED_FORMS =
-  'Accepted forms: "2026-10-26T18:00:00Z", "2026-10-26T14:00:00-04:00", ' +
-  '"20261026T180000Z", "2026-10-26T18:00:00" (no zone), or a date "2026-10-26" / "20261026"';
+const DATE_TIME_FORMS =
+  '"2026-10-26T18:00:00Z", "2026-10-26T14:00:00-04:00", "20261026T180000Z" ' +
+  'or "2026-10-26T18:00:00" (no zone; seconds optional)';
+const ACCEPTED_FORMS = `Accepted forms: ${DATE_TIME_FORMS}, or a date "2026-10-26" / "20261026"`;
 
 /**
- * One parsed value. "floating" is a wall-clock time without a zone; what it
- * becomes on write depends on the property it lands on (see setDateValue).
+ * One parsed value, in the jCal form ("2026-10-26", "2026-10-26T18:00:00Z",
+ * "2026-10-26T18:00:00"). "floating" is a wall-clock time without a zone; what
+ * it becomes on write depends on where it lands (see setDateValue), and
+ * `local` is the instant it names when read in the host timezone.
  */
-type ParsedValue =
+export type DateValue =
   | { kind: 'date'; jcal: string }
   | { kind: 'utc'; jcal: string }
   | { kind: 'floating'; jcal: string; local: Date };
+type ParsedValue = DateValue;
 
 const DATE_EXTENDED = /^(\d{4})-(\d{2})-(\d{2})$/;
 const DATE_BASIC = /^(\d{4})(\d{2})(\d{2})$/;
@@ -98,13 +102,17 @@ function toUtcJcal(date: Date): string {
 }
 
 /**
- * Parse one date or date-time value as a caller would write it.
+ * Parse one date or date-time value as a caller would write it — the grammar
+ * updateFields accepts for every date-typed property, exported so a caller
+ * can validate input with exactly the same rules.
  *
  * A zoned value is converted to UTC: the instant is what matters, and UTC is
  * the only zone that needs no VTIMEZONE. A value without a zone stays a
  * wall-clock time here; setDateValue decides what it means.
+ *
+ * @throws {Error} naming the accepted forms when the value is none of them
  */
-function parseDateValue(raw: string): ParsedValue {
+export function parseDateValue(raw: string): DateValue {
   const value = raw.trim();
   let m: RegExpExecArray | null;
 
@@ -190,6 +198,48 @@ function dateProperty(component: ICAL.Component, name: string): DateProperty | n
   };
 }
 
+/** Components whose date-times are anchored by DTSTART */
+const ANCHORED = new Set(['vevent', 'vtodo', 'vjournal']);
+
+/**
+ * The zone a wall-clock value written to `name` is read in, or null when no
+ * zone applies and the floatingTime policy decides.
+ *
+ *  1. The property's own TZID: "18:00" on DTEND;TZID=Europe/Berlin is 18:00
+ *     in Berlin.
+ *  2. Otherwise DTSTART's form, for the other date-times of an event, todo or
+ *     journal (DTEND, DUE, EXDATE, RDATE, RECURRENCE-ID, ...). Those are
+ *     instants of the same schedule: an end is read in the zone of its start,
+ *     and an EXDATE only matches an occurrence if it names it in that zone.
+ *     A TZID on DTSTART means wall clock in that zone; a floating DTSTART
+ *     means the value stays floating.
+ *
+ * A UTC DTSTART, or none, anchors nothing.
+ */
+function referenceZone(
+  component: ICAL.Component,
+  name: string,
+  existing: ICAL.Property | null,
+): { tzid: string | null } | null {
+  const own = existing?.getParameter('tzid');
+  if (typeof own === 'string' && own) {
+    return { tzid: own };
+  }
+  if (name === 'dtstart' || !ANCHORED.has(component.name)) {
+    return null;
+  }
+  const dtstart = component.getFirstProperty('dtstart');
+  if (!dtstart || dtstart.type !== 'date-time') {
+    return null;
+  }
+  const tzid = dtstart.getParameter('tzid');
+  if (typeof tzid === 'string' && tzid) {
+    return { tzid };
+  }
+  const value = (dtstart.toJSON() as unknown[])[3];
+  return typeof value === 'string' && !/Z$/i.test(value) ? { tzid: null } : null;
+}
+
 /**
  * Write a date or date-time property from a caller-supplied string.
  *
@@ -197,9 +247,10 @@ function dateProperty(component: ICAL.Component, name: string): DateProperty | n
  * occurrence updatePropertyWithValue would touch, so only the encoding changes
  * and not which line is written.
  *
- * A value without a zone is a wall-clock time, and it is read in the zone the
- * property already has: on "DTSTART;TZID=Europe/Berlin:..." the value
- * "2026-10-26T18:00:00" is 18:00 in Berlin, so the TZID stays. Without a TZID
+ * A value without a zone is a wall-clock time, read in the zone referenceZone
+ * finds: the property's own TZID, else DTSTART's. "2026-10-26T18:00:00" on
+ * "DTSTART;TZID=Europe/Berlin:..." is 18:00 in Berlin, so the TZID stays, and
+ * a DTEND of the same event is read in Berlin too. With no zone to read it in
  * it is floating, or with floatingTime "local" the host's wall clock written
  * as UTC. Every other value drops the TZID, which RFC 5545 3.2.19 forbids on
  * a UTC value and which a DATE cannot carry. Other parameters (RANGE on
@@ -235,22 +286,23 @@ export function setDateValue(
   }
   const isDate = parsed[0].kind === 'date';
   if (isDate && !shape.allowedTypes.includes('date')) {
-    throw new Error(`${upper} needs a date-time, not a date. ${ACCEPTED_FORMS}`);
+    throw new Error(`${upper} needs a date-time, not a date. Accepted forms: ${DATE_TIME_FORMS}`);
   }
 
   const existing = component.getFirstProperty(lower);
-  const tzid = existing?.getParameter('tzid');
   const floating = parsed.some((p) => p.kind === 'floating');
+  const reference = floating && !UTC_ONLY.has(lower) ? referenceZone(component, lower, existing) : null;
 
-  // Which zone a wall-clock value is read in
-  const keepTzid = Boolean(floating && tzid && !UTC_ONLY.has(lower));
-  // One line has one zone: wall-clock values that stay wall-clock (in the
-  // property's TZID, or floating) cannot share it with UTC values
-  if (floating && parsed.some((p) => p.kind === 'utc') && (keepTzid || floatingTime === 'keep')) {
+  // One line has one zone: wall-clock values that stay wall-clock (in a
+  // TZID, or floating) cannot share it with UTC values
+  const staysWallClock = Boolean(reference) || floatingTime === 'keep';
+  if (floating && parsed.some((p) => p.kind === 'utc') && staysWallClock) {
     throw new Error(`${upper} mixes values with and without a zone; give all of them a zone, or none`);
   }
+  let tzid: string | null = null;
   let values: string[];
-  if (keepTzid) {
+  if (reference) {
+    tzid = reference.tzid;
     values = parsed.map((p) => p.jcal);
   } else if (floating && floatingTime === 'local') {
     values = parsed.map((p) => (p.kind === 'floating' ? toUtcJcal(p.local) : p.jcal));
@@ -271,7 +323,9 @@ export function setDateValue(
     property = new ICAL.Property(lower, component);
     component.addProperty(property);
   }
-  if (!keepTzid) {
+  if (tzid) {
+    property.setParameter('tzid', tzid);
+  } else {
     property.removeParameter('tzid');
   }
   // resetType rewrites the jCal type, which decides whether VALUE=DATE is

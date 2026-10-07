@@ -30,6 +30,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/index.ts
 var index_exports = {};
 __export(index_exports, {
+  parseDateValue: () => parseDateValue,
   updateFields: () => updateFields
 });
 module.exports = __toCommonJS(index_exports);
@@ -41,7 +42,8 @@ var import_ical2 = __toESM(require("ical.js"));
 var import_ical = __toESM(require("ical.js"));
 var TYPED = /* @__PURE__ */ new Set(["date-time", "date", "timestamp"]);
 var UTC_ONLY = /* @__PURE__ */ new Set(["completed", "created", "dtstamp", "last-modified"]);
-var ACCEPTED_FORMS = 'Accepted forms: "2026-10-26T18:00:00Z", "2026-10-26T14:00:00-04:00", "20261026T180000Z", "2026-10-26T18:00:00" (no zone), or a date "2026-10-26" / "20261026"';
+var DATE_TIME_FORMS = '"2026-10-26T18:00:00Z", "2026-10-26T14:00:00-04:00", "20261026T180000Z" or "2026-10-26T18:00:00" (no zone; seconds optional)';
+var ACCEPTED_FORMS = `Accepted forms: ${DATE_TIME_FORMS}, or a date "2026-10-26" / "20261026"`;
 var DATE_EXTENDED = /^(\d{4})-(\d{2})-(\d{2})$/;
 var DATE_BASIC = /^(\d{4})(\d{2})(\d{2})$/;
 var ZONE = "(Z|[+-]\\d{2}(?::?\\d{2})?)";
@@ -131,6 +133,26 @@ function dateProperty(component, name) {
     multiValue: Boolean(design.multiValue)
   };
 }
+var ANCHORED = /* @__PURE__ */ new Set(["vevent", "vtodo", "vjournal"]);
+function referenceZone(component, name, existing) {
+  const own = existing?.getParameter("tzid");
+  if (typeof own === "string" && own) {
+    return { tzid: own };
+  }
+  if (name === "dtstart" || !ANCHORED.has(component.name)) {
+    return null;
+  }
+  const dtstart = component.getFirstProperty("dtstart");
+  if (!dtstart || dtstart.type !== "date-time") {
+    return null;
+  }
+  const tzid = dtstart.getParameter("tzid");
+  if (typeof tzid === "string" && tzid) {
+    return { tzid };
+  }
+  const value = dtstart.toJSON()[3];
+  return typeof value === "string" && !/Z$/i.test(value) ? { tzid: null } : null;
+}
 function setDateValue(component, name, raw, floatingTime = "keep") {
   const shape = dateProperty(component, name);
   if (!shape) {
@@ -150,17 +172,19 @@ function setDateValue(component, name, raw, floatingTime = "keep") {
   }
   const isDate = parsed[0].kind === "date";
   if (isDate && !shape.allowedTypes.includes("date")) {
-    throw new Error(`${upper} needs a date-time, not a date. ${ACCEPTED_FORMS}`);
+    throw new Error(`${upper} needs a date-time, not a date. Accepted forms: ${DATE_TIME_FORMS}`);
   }
   const existing = component.getFirstProperty(lower);
-  const tzid = existing?.getParameter("tzid");
   const floating = parsed.some((p) => p.kind === "floating");
-  const keepTzid = Boolean(floating && tzid && !UTC_ONLY.has(lower));
-  if (floating && parsed.some((p) => p.kind === "utc") && (keepTzid || floatingTime === "keep")) {
+  const reference = floating && !UTC_ONLY.has(lower) ? referenceZone(component, lower, existing) : null;
+  const staysWallClock = Boolean(reference) || floatingTime === "keep";
+  if (floating && parsed.some((p) => p.kind === "utc") && staysWallClock) {
     throw new Error(`${upper} mixes values with and without a zone; give all of them a zone, or none`);
   }
+  let tzid = null;
   let values;
-  if (keepTzid) {
+  if (reference) {
+    tzid = reference.tzid;
     values = parsed.map((p) => p.jcal);
   } else if (floating && floatingTime === "local") {
     values = parsed.map((p) => p.kind === "floating" ? toUtcJcal(p.local) : p.jcal);
@@ -178,7 +202,9 @@ function setDateValue(component, name, raw, floatingTime = "keep") {
     property = new import_ical.default.Property(lower, component);
     component.addProperty(property);
   }
-  if (!keepTzid) {
+  if (tzid) {
+    property.setParameter("tzid", tzid);
+  } else {
     property.removeParameter("tzid");
   }
   property.resetType(type);
@@ -226,5 +252,6 @@ function updateFields(calendarObject, fields, options = {}) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  parseDateValue,
   updateFields
 });
