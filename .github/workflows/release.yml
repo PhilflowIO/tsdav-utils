@@ -14,6 +14,10 @@ name: release
 # `+build` metadata, so a version carrying it is refused before publishing.
 #
 # Authentication is npm trusted publishing (GitHub OIDC): the publish job
+# runs in the `npm-publish` environment, which the trusted publisher on
+# npmjs.com is bound to and which only release tags may deploy to (set in
+# the repository settings, not here: a check in this file can be removed by
+# whoever pushes a tag with an edited copy of it). The job
 # requests a short-lived token for this workflow file; there is no npm token
 # in the repository secrets. npm then attaches a provenance attestation that
 # links the published version to this run and commit.
@@ -219,6 +223,10 @@ jobs:
     name: Publish to npm
     needs: [build, verify]
     runs-on: ubuntu-latest
+    # Required reviewer and a release-tag-only deployment rule are set on this
+    # environment in the repository settings; the npm trusted publisher only
+    # accepts tokens issued for it.
+    environment: npm-publish
     permissions:
       contents: read
       id-token: write # OIDC token for npm trusted publishing and provenance
