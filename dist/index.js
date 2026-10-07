@@ -498,10 +498,9 @@ function updateFields(calendarObject, fields, options = {}) {
   } catch (error) {
     throw new Error(`Failed to parse iCal data: ${error.message}`);
   }
-  if (type && component.name !== "vcalendar") {
-    throw new Error(
-      `type "${type}" applies to an iCalendar object, but this is a ${String(component.name).toUpperCase()}`
-    );
+  if (type && component.name !== "vcalendar" && component.name !== type) {
+    const name = String(component.name).toUpperCase();
+    throw new Error(component.name === "vcard" ? `type "${type}" applies to an iCalendar object, but this is a VCARD` : `type "${type}" asks for a ${type.toUpperCase()}, but this object is a bare ${name}`);
   }
   const actualComponent = component.name === "vcalendar" ? seriesMaster(component, type) : component;
   const entries = Object.entries(fields).sort(

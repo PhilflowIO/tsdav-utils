@@ -122,13 +122,16 @@ export function updateFields(
   }
 
   // 3. Find the component to update: the master of a VCALENDAR (see
-  //    seriesMaster), or the VCARD itself, which stands alone.
+  //    seriesMaster), or a component that stands alone (a VCARD, or a bare
+  //    VEVENT/VTODO/VJOURNAL without its VCALENDAR wrapper).
   //    Note: component.name returns lowercase
-  //    A type names an iCalendar component; on a vCard it can only be a
-  //    caller's mistake, so it is refused rather than ignored.
-  if (type && component.name !== 'vcalendar') {
-    throw new Error(
-      `type "${type}" applies to an iCalendar object, but this is a ${String(component.name).toUpperCase()}`);
+  //    A named type must match a bare component; a mismatch, or a type on a
+  //    vCard, can only be a caller's mistake, so it is refused, not ignored.
+  if (type && component.name !== 'vcalendar' && component.name !== type) {
+    const name = String(component.name).toUpperCase();
+    throw new Error(component.name === 'vcard'
+      ? `type "${type}" applies to an iCalendar object, but this is a VCARD`
+      : `type "${type}" asks for a ${type.toUpperCase()}, but this object is a bare ${name}`);
   }
   const actualComponent = component.name === 'vcalendar'
     ? seriesMaster(component, type)

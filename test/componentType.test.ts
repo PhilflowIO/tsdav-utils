@@ -72,6 +72,19 @@ describe('updateFields with a component type', () => {
       .toThrow(/Invalid type "42"/);
   });
 
+  it('edits a bare component of the named type', () => {
+    const bare = 'BEGIN:VEVENT\r\nUID:e\r\nDTSTAMP:20260101T000000Z\r\nSUMMARY:Old\r\nEND:VEVENT\r\n';
+    const updated = parse(updateFields(bare, { SUMMARY: 'New' }, { type: 'vevent' }));
+    expect(updated.name).toBe('vevent');
+    expect(updated.getFirstPropertyValue('summary')).toBe('New');
+  });
+
+  it('refuses a bare component of another type, naming both', () => {
+    const bare = 'BEGIN:VEVENT\r\nUID:e\r\nDTSTAMP:20260101T000000Z\r\nSUMMARY:Old\r\nEND:VEVENT\r\n';
+    expect(() => updateFields(bare, { SUMMARY: 'New' }, { type: 'vtodo' }))
+      .toThrow('type "vtodo" asks for a VTODO, but this object is a bare VEVENT');
+  });
+
   it('refuses a type on a vCard', () => {
     const vcard = 'BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Jane\r\nEND:VCARD\r\n';
     expect(() => updateFields(vcard, { FN: 'John' }, { type: 'vtodo' }))
