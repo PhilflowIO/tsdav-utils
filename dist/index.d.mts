@@ -13,6 +13,15 @@ type CalendarObjectInput = string | {
     data: string;
     [key: string]: any;
 };
+/**
+ * How a date-time without a zone ("2026-10-26T18:00:00") is written.
+ * - "keep": as a floating time, which RFC 5545 3.3.5 allows (default)
+ * - "local": read in the host timezone and written as UTC
+ */
+type FloatingTime = 'keep' | 'local';
+interface UpdateFieldsOptions {
+    floatingTime?: FloatingTime;
+}
 
 /**
  * Update arbitrary fields on a calendar/todo/vcard object
@@ -22,6 +31,8 @@ type CalendarObjectInput = string | {
  *
  * @param calendarObject - iCal string or tsdav DAVCalendarObject with 'data' field
  * @param fields - Key-value pairs of iCal properties to update (e.g., {'SUMMARY': 'New Title'})
+ * @param options.floatingTime - how a date-time without a zone is written:
+ *   "keep" (floating, the default) or "local" (host timezone, written as UTC)
  * @returns Updated iCal string ready for tsdav.updateCalendarObject()
  *
  * @example
@@ -33,6 +44,6 @@ type CalendarObjectInput = string | {
  * });
  * ```
  */
-declare function updateFields(calendarObject: CalendarObjectInput, fields: FieldUpdates): string;
+declare function updateFields(calendarObject: CalendarObjectInput, fields: FieldUpdates, options?: UpdateFieldsOptions): string;
 
-export { type CalendarObjectInput, type FieldUpdates, updateFields };
+export { type CalendarObjectInput, type FieldUpdates, type FloatingTime, type UpdateFieldsOptions, updateFields };

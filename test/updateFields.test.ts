@@ -34,9 +34,7 @@ describe('updateFields', () => {
       expect(event?.getFirstPropertyValue('location')).toBe('Remote - Zoom');
     });
 
-    // Note: Datetime properties require ICAL.Time objects, not strings
-    // This is a known limitation - documented in GitHub issues
-    it.skip('updates DTSTART field', () => {
+    it('updates DTSTART field', () => {
       const vevent = loadFixture('vevent.ics');
       const updated = updateFields(vevent, {
         'DTSTART': '20250130T140000Z'
@@ -44,7 +42,7 @@ describe('updateFields', () => {
 
       const component = new ICAL.Component(ICAL.parse(updated));
       const event = component.getFirstSubcomponent('vevent');
-      expect(event?.getFirstPropertyValue('dtstart')).toBe('20250130T140000Z');
+      expect(event?.getFirstPropertyValue('dtstart')?.toString()).toBe('2025-01-30T14:00:00Z');
     });
 
     it('updates multiple fields simultaneously', () => {
