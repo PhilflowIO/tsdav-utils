@@ -61,7 +61,11 @@ export function seriesMaster(calendar: ICAL.Component, type?: ComponentType): IC
       'RECURRENCE-ID) and no master, so a field update cannot tell which one is meant. ' +
       'Edit the instance by rewriting the whole iCalendar object instead');
   }
-  throw new Error(`No ${types.map((t) => t.toUpperCase()).join(', ')} found in VCALENDAR`);
+  // Name what the object does hold, so a caller (an LLM tool call, say)
+  // can correct the type it asked for.
+  const held = [...new Set(calendar.getAllSubcomponents().map((c) => String(c.name).toUpperCase()))];
+  throw new Error(`No ${types.map((t) => t.toUpperCase()).join(', ')} found in VCALENDAR ` +
+    (held.length ? `(it holds: ${held.join(', ')})` : '(it holds no components)'));
 }
 
 /**

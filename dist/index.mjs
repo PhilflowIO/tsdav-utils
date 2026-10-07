@@ -440,7 +440,8 @@ function seriesMaster(calendar, type) {
       `This object holds ${all.length} ${type2.toUpperCase()} instances (each with a RECURRENCE-ID) and no master, so a field update cannot tell which one is meant. Edit the instance by rewriting the whole iCalendar object instead`
     );
   }
-  throw new Error(`No ${types.map((t) => t.toUpperCase()).join(", ")} found in VCALENDAR`);
+  const held = [...new Set(calendar.getAllSubcomponents().map((c) => String(c.name).toUpperCase()))];
+  throw new Error(`No ${types.map((t) => t.toUpperCase()).join(", ")} found in VCALENDAR ` + (held.length ? `(it holds: ${held.join(", ")})` : "(it holds no components)"));
 }
 function updateFields(calendarObject, fields, options = {}) {
   const icalString = typeof calendarObject === "string" ? calendarObject : calendarObject.data;

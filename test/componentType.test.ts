@@ -60,7 +60,13 @@ describe('updateFields with a component type', () => {
 
   it('names the requested type when the object holds none of it', () => {
     expect(() => updateFields(MIXED, { SUMMARY: 'x' }, { type: 'vjournal' }))
-      .toThrow(/No VJOURNAL found/);
+      .toThrow('No VJOURNAL found in VCALENDAR (it holds: VEVENT, VTODO)');
+  });
+
+  it('says so when the VCALENDAR holds no components at all', () => {
+    const empty = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nEND:VCALENDAR\r\n';
+    expect(() => updateFields(empty, { SUMMARY: 'x' }, { type: 'vtodo' }))
+      .toThrow('No VTODO found in VCALENDAR (it holds no components)');
   });
 
   it('refuses an unknown type instead of falling back to another component', () => {
