@@ -1,5 +1,6 @@
 import ICAL from 'ical.js';
-import type { CalendarObjectInput, FieldUpdates } from './types';
+import type { CalendarObjectInput, FieldUpdates, UpdateFieldsOptions } from './types';
+import { setDateValue } from './typedValue';
 
 /**
  * Update arbitrary fields on a calendar/todo/vcard object
@@ -9,6 +10,8 @@ import type { CalendarObjectInput, FieldUpdates } from './types';
  *
  * @param calendarObject - iCal string or tsdav DAVCalendarObject with 'data' field
  * @param fields - Key-value pairs of iCal properties to update (e.g., {'SUMMARY': 'New Title'})
+ * @param options.floatingTime - how a date-time without a zone is written:
+ *   "keep" (floating, the default) or "local" (host timezone, written as UTC)
  * @returns Updated iCal string ready for tsdav.updateCalendarObject()
  *
  * @example
@@ -22,7 +25,8 @@ import type { CalendarObjectInput, FieldUpdates } from './types';
  */
 export function updateFields(
   calendarObject: CalendarObjectInput,
-  fields: FieldUpdates
+  fields: FieldUpdates,
+  options: UpdateFieldsOptions = {}
 ): string {
   // 1. Extract iCal string from input
   const icalString = typeof calendarObject === 'string'
@@ -65,10 +69,13 @@ export function updateFields(
   }
 
   // 4. Update properties using field-agnostic loop
-  //    updatePropertyWithValue() handles both updates and creates if missing
-  //    ical.js expects lowercase property names
+  //    Date and date-time properties are parsed and re-typed (see typedValue);
+  //    everything else goes through updatePropertyWithValue(), which handles
+  //    both updates and creates if missing. ical.js expects lowercase names.
   for (const [key, value] of Object.entries(fields)) {
-    actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
+    if (!setDateValue(actualComponent, key, value, options.floatingTime)) {
+      actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
+    }
   }
 
   // 5. Serialize back to iCal string
