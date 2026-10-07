@@ -1,6 +1,7 @@
 import ICAL from 'ical.js';
 import type { CalendarObjectInput, FieldUpdates, UpdateFieldsOptions } from './types';
-import { realignUntils, setDateValue, setRecurValue, untilsFollowingDtstart } from './typedValue';
+import { beginSeriesEdit } from './series';
+import { setDateValue, setRecurValue } from './typedValue';
 
 /**
  * The component a series-level write belongs to.
@@ -10,7 +11,8 @@ import { realignUntils, setDateValue, setRecurValue, untilsFollowingDtstart } fr
  * 3.8.4.4) — in any order. A write without a named instance (SUMMARY, EXDATE,
  * RRULE, DTSTART ...) belongs to the master, the one without RECURRENCE-ID;
  * DTSTART-anchored date-times are anchored to the master's DTSTART for the
- * same reason. Overrides are independent instances and are left untouched.
+ * same reason. Overrides are independent instances; only their RECURRENCE-ID
+ * moves when the master's DTSTART does (see beginSeriesEdit).
  *
  * The type is chosen first, VEVENT before VTODO before VJOURNAL: a CalDAV
  * object holds one component type (RFC 4791 4.1). Within it, the first
@@ -116,20 +118,21 @@ export function updateFields(
   //    DTSTART goes first: the other date-times and RRULE's UNTIL take their
   //    zone and value type from it, so they must see the new one, whatever
   //    the key order.
-  //    An RRULE/EXRULE UNTIL the call does not write itself is re-derived
-  //    against the new DTSTART afterwards (see realignUntils), so a DTSTART
-  //    write never leaves an UNTIL of the old form behind.
+  //    A series moves as a whole: when DTSTART moves, the overrides'
+  //    RECURRENCE-IDs, EXDATE, RDATE and UNTIL the call does not write itself
+  //    move with it, and a new RRULE that would orphan an override or EXDATE
+  //    is refused (see beginSeriesEdit).
   const entries = Object.entries(fields).sort(
     ([a], [b]) => Number(b.toLowerCase() === 'dtstart') - Number(a.toLowerCase() === 'dtstart'));
   const written = new Set(entries.map(([key]) => key.toLowerCase()));
-  const untils = written.has('dtstart') ? untilsFollowingDtstart(actualComponent, written) : [];
+  const series = component.name === 'vcalendar' ? beginSeriesEdit(component, actualComponent, written) : null;
   for (const [key, value] of entries) {
     if (!setDateValue(actualComponent, key, value, floatingTime) &&
         !setRecurValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }
-  realignUntils(actualComponent, untils, floatingTime);
+  series?.finish();
 
   // 5. Serialize back to iCal string
   //    All unmodified properties are automatically preserved by ical.js
