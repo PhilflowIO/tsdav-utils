@@ -84,3 +84,16 @@ if (!(cjsError instanceof cjs.UpdateFieldsError) || !isUpdateFieldsError(cjsErro
   fail(`the CommonJS build threw no typed refusal, or the guard does not hold across builds: ${cjsError}`);
 }
 console.log('✅ typed refusals in ESM and CommonJS');
+
+// 6. a named zone writes the TZID and a VTIMEZONE that the resolved ical.js
+//    reads back, in both builds, the same text from each
+const named = (build) => build.updateFields(calendar(...event()),
+  { DTSTART: '2026-10-05T07:00:00Z', RRULE: 'FREQ=WEEKLY;COUNT=5' }, { zone: 'Europe/Berlin' });
+const [esmNamed, cjsNamed] = [named({ updateFields }), named(cjs)];
+if (!esmNamed.includes('DTSTART;TZID=Europe/Berlin:20261005T090000') || !esmNamed.includes('TZID:Europe/Berlin')) {
+  fail(`a zone write did not produce the TZID and its VTIMEZONE:\n${esmNamed}`);
+}
+if (esmNamed !== cjsNamed) {
+  fail('the ESM and CommonJS builds wrote a zone differently');
+}
+console.log('✅ named zone with generated VTIMEZONE');
