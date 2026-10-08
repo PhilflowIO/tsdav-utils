@@ -322,7 +322,8 @@ follow the master's `DTSTART` (see above).
     | The rule has | it follows |
     |---|---|
     | no `BY` part, `FREQ` up to `WEEKLY` | any move |
-    | no `BY` part, `MONTHLY`/`YEARLY` | a new time, or a new date in the same month between the 1st and 28th |
+    | no `BY` part, `MONTHLY` | a new time, or a new date in the same month between the 1st and 28th |
+    | no `BY` part, `YEARLY` | a new time, or a new date every year has (not 29 February), the same number of days away in every year (not across the end of February) |
     | `BYHOUR`, `BYMINUTE`, `BYSECOND` | a new date, at the same time of day |
     | `BYDAY` with `DAILY`/`WEEKLY` | a new time, or a move by whole weeks |
     | `BYDAY` with `MONTHLY`/`YEARLY`; `BYMONTH`, `BYMONTHDAY`, `BYYEARDAY`, `BYWEEKNO`, `BYSETPOS` | a new time, on the same date |
@@ -331,11 +332,15 @@ follow the master's `DTSTART` (see above).
     An all-day/timed switch counts as a new time. A part that only restates
     DTSTART, as Google and Outlook write rules — a single `BYDAY` equal to its
     weekday in a `WEEKLY` rule, a single `BYMONTHDAY` equal to its day in a
-    `MONTHLY` rule, a single `BYMONTH` (with `BYMONTHDAY`) equal to its date in a
-    `YEARLY` rule — follows the move: the rule is judged without it, and the part
-    is rewritten to the new start (`FREQ=WEEKLY;BYDAY=MO` moved from Monday to
-    Tuesday becomes `BYDAY=TU`). Only that token changes; the rest of the rule
-    keeps its text and order. Anything else throws and says why. Where a single `BYDAY`, `BYMONTHDAY`, `BYMONTH`, `BYHOUR` or `BYMINUTE`
+    `MONTHLY` rule, a single `BYMONTH` equal to its month in a `YEARLY` rule (and
+    with it a single `BYMONTHDAY` equal to its day) — follows the move: the rule
+    is judged without it, and the part is rewritten to the new start
+    (`FREQ=WEEKLY;BYDAY=MO` moved from Monday to Tuesday becomes `BYDAY=TU`).
+    Only that token changes, in the rule as the object wrote it: part names keep
+    their case, the parts their order, every other byte stays (the same for a
+    moved `UNTIL`). A rule that gives a part twice, which RFC 5545 does not
+    allow and clients read differently, is refused. Anything else throws and
+    says why. Where a single `BYDAY`, `BYMONTHDAY`, `BYMONTH`, `BYHOUR` or `BYMINUTE`
     value pins the old start, the error suggests the rule with the new start's
     value, e.g. `RRULE "FREQ=WEEKLY;COUNT=3;BYDAY=TU"` for a Monday series moved to
     Tuesday; otherwise it says to give `RRULE` in the same call. Weekly by weekday
@@ -363,11 +368,15 @@ follow the master's `DTSTART` (see above).
       `RSCALE`/`SKIP`), which writing the rule again would lose;
     - an `EXDATE`, `RECURRENCE-ID` or `RDATE` that shares its instant with an
       occurrence on a wall-clock time a DST change skips (read past the gap,
-      RFC 5545 3.3.5): in UTC, or in the series' zone as the first time after
-      the gap (`03:30` for a skipped `02:30`). Clients match it to that
-      occurrence by instant, the move by wall clock, so which one it names
-      cannot be told. Checked before and after the move, where the series has
-      such an occurrence;
+      RFC 5545 3.3.5), in whatever zone it is written — UTC, another zone, or
+      the series' own zone as the first time after the gap (`03:30` for a
+      skipped `02:30`). Clients match it to that occurrence by instant, the move
+      by wall clock, so which one it names cannot be told. Checked before and
+      after a write that changes the occurrences (a DTSTART move, a new `RRULE`
+      or `RDATE`), where the series has such an occurrence;
+    - an override's own `DTSTART`/`DTEND`/`DUE` in another zone than the series
+      that, moved, would fall in the second pass of that zone's repeated hour,
+      where its wall clock reads as the first;
     - on a switch from timed to all-day, a `RECURRENCE-ID`, `EXDATE` or `RDATE`
       at another time of day than the series (or a date already): as a date it
       could name an occurrence it never named, or fall together with another.
