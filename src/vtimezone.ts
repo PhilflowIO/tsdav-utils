@@ -1,6 +1,6 @@
 import ICAL from 'ical.js';
 import { UpdateFieldsError } from './errors';
-import { fieldsOf, ianaZone, vtimezoneIn, vtimezoneZone, wallOf } from './zone';
+import { fieldsOf, ianaZone, ianaZoneName, vtimezoneIn, vtimezoneZone, wallOf } from './zone';
 
 /*
  * VTIMEZONE generation from the runtime's IANA time zone data.
@@ -22,12 +22,16 @@ import { fieldsOf, ianaZone, vtimezoneIn, vtimezoneZone, wallOf } from './zone';
  *    observance per pair of offsets, its first date as DTSTART and every date
  *    (the first too: ical.js reads only the RDATEs of an observance that has
  *    any) as RDATE;
- *  - the zone's final state comes last, with the latest DTSTARTs: its current
- *    rule as an open DAYLIGHT/STANDARD pair (which covers an unbounded series),
- *    or, where the zone no longer changes, its last change as an observance of
- *    its own. Outlook and Exchange take the observances with the latest
- *    DTSTART as the zone's current rule (MS-OXCICAL 2.1.3.1.1.19.2), so a rule
- *    a zone has abolished (America/Sao_Paulo 2019) never sits there;
+ *  - the zone's final state comes last: the STANDARD and the DAYLIGHT with the
+ *    latest DTSTART both describe it. Outlook and Exchange read the zone's
+ *    current rule from the latest STANDARD and the latest DAYLIGHT, each
+ *    picked on its own (MS-OXCICAL 2.1.3.1.1.19.2 and its note <61>), so it
+ *    is either the current rule as an open DAYLIGHT/STANDARD pair (which
+ *    covers an unbounded series) or, where the zone no longer changes, the
+ *    last change as a STANDARD and a DAYLIGHT with the same offsets at the
+ *    same DTSTART (Exchange's own way of writing a zone without DST, note
+ *    <65>). A DST rule a zone has abolished (America/Sao_Paulo 2019) is never
+ *    the latest of its kind;
  *  - TZNAME is the zone's abbreviation where Intl has one ("CET", "EST"), else
  *    the offset ("+0530").
  *
@@ -190,55 +194,72 @@ const firstOnOrAfterBack = (year: number, from: number, weekday: number) =>
 const range = (from: number) => Array.from({ length: 7 }, (_, i) => from + i).join(',');
 
 /**
- * The BY parts of a yearly rule that lands on each of these onsets, or null.
- * All have to share wall-clock time and offsets. Tried in this order, within
- * one month: the last weekday (-1SU), the n-th (2SU), the first weekday on or
- * after a day (BYMONTHDAY=23,...,29;BYDAY=FR, Israel's "Friday before the last
- * Sunday"), a fixed date. Then, for a weekday on or after a day whose week
- * reaches into the next month (Egypt's "Friday after the last Thursday of
- * October", which can be 1 November), the same counted back from the end of
- * the year (BYYEARDAY=-67,...,-61;BYDAY=FR), which is the same day in every
- * year from March on.
+ * The BY parts of every yearly rule that lands on this onset, in order of
+ * preference — within its month: the last weekday (-1SU), the n-th (2SU), the
+ * first weekday on or after a day (BYMONTHDAY=23,...,29;BYDAY=FR, Israel's
+ * "Friday before the last Sunday"), the fixed date; then, for a weekday on or
+ * after a day whose week reaches into the next month (Egypt's "Friday after
+ * the last Thursday of October", which can be 1 November), the same counted
+ * back from the end of the year (BYYEARDAY=-67,...,-61;BYDAY=FR), the same days
+ * in every year from March on. The order is the same for every onset, so the
+ * rules several onsets share keep it.
  */
-function yearlyRule(onsets: Onset[]): string | null {
-  const [first] = onsets;
-  if (onsets.some((o) => o.time !== first.time || o.change.from !== first.change.from || o.change.to !== first.change.to)) {
-    return null;
+function rulesFor(o: Onset): string[] {
+  const out: string[] = [];
+  const month = `BYMONTH=${o.month}`;
+  const wd = WEEKDAYS[o.weekday];
+  if (o.day + 7 > daysIn(o.year, o.month)) {
+    out.push(`${month};BYDAY=-1${wd}`);
   }
-  const sameWeekday = onsets.every((o) => o.weekday === first.weekday);
-  const wd = WEEKDAYS[first.weekday];
-  if (onsets.every((o) => o.month === first.month)) {
-    const month = `BYMONTH=${first.month}`;
-    if (sameWeekday) {
-      if (onsets.every((o) => o.day + 7 > daysIn(o.year, o.month))) {
-        return `${month};BYDAY=-1${wd}`;
-      }
-      const shortest = first.month === 2 ? 28 : daysIn(2001, first.month);
-      const fits = (from: number) => onsets.every((o) => firstOnOrAfter(o.year, o.month, from, o.weekday) === o.day);
-      for (const from of [1, 8, 15, 22]) {
-        if (fits(from)) {
-          return `${month};BYDAY=${(from + 6) / 7}${wd}`;
-        }
-      }
-      for (let from = 1; from + 6 <= shortest; from++) {
-        if (fits(from)) {
-          return `${month};BYMONTHDAY=${range(from)};BYDAY=${wd}`;
-        }
-      }
-    }
-    if (onsets.every((o) => o.day === first.day)) {
-      return `${month};BYMONTHDAY=${first.day}`;
+  for (const from of [1, 8, 15, 22]) {
+    if (firstOnOrAfter(o.year, o.month, from, o.weekday) === o.day) {
+      out.push(`${month};BYDAY=${(from + 6) / 7}${wd}`);
     }
   }
-  if (sameWeekday && onsets.every((o) => o.month >= 3)) {
-    const latest = Math.min(...onsets.map((o) => o.back));
-    for (let from = latest - 6; from <= latest && from + 6 <= -1; from++) {
-      if (onsets.every((o) => firstOnOrAfterBack(o.year, from, o.weekday) === o.back)) {
-        return `BYYEARDAY=${range(from)};BYDAY=${wd}`;
+  const shortest = o.month === 2 ? 28 : daysIn(2001, o.month);
+  for (let from = Math.max(1, o.day - 6); from <= o.day && from + 6 <= shortest; from++) {
+    if (firstOnOrAfter(o.year, o.month, from, o.weekday) === o.day) {
+      out.push(`${month};BYMONTHDAY=${range(from)};BYDAY=${wd}`);
+    }
+  }
+  out.push(`${month};BYMONTHDAY=${o.day}`);
+  if (o.month >= 3) {
+    for (let from = o.back - 6; from <= o.back && from + 6 <= -1; from++) {
+      if (firstOnOrAfterBack(o.year, from, o.weekday) === o.back) {
+        out.push(`BYYEARDAY=${range(from)};BYDAY=${wd}`);
       }
     }
   }
-  return null;
+  return out;
+}
+
+/** What has to be equal for onsets to follow one rule, besides the date: time of day and offsets */
+const signature = (o: Onset) => `${o.time}|${o.change.from}|${o.change.to}`;
+
+/**
+ * The yearly rules several onsets share, grown one onset at a time: the
+ * candidates are kept and narrowed, so a run of n years costs n steps.
+ */
+class RuleSet {
+  private candidates: string[] | null = null;
+  private sig = '';
+
+  /** the rules if `onset` is added too, without adding it; empty when none */
+  with(onset: Onset): string[] {
+    if (this.candidates === null) {
+      return rulesFor(onset);
+    }
+    if (signature(onset) !== this.sig) {
+      return [];
+    }
+    const own = new Set(rulesFor(onset));
+    return this.candidates.filter((rule) => own.has(rule));
+  }
+
+  add(onset: Onset, rules: string[]) {
+    this.sig = signature(onset);
+    this.candidates = rules;
+  }
 }
 
 interface Run {
@@ -256,7 +277,12 @@ interface Run {
 function runsOf(onsets: Onset[]): { runs: Run[]; single: Onset[] } {
   const byYear = new Map<number, Onset[]>();
   for (const onset of onsets) {
-    byYear.set(onset.year, [...(byYear.get(onset.year) ?? []), onset]);
+    const list = byYear.get(onset.year);
+    if (list) {
+      list.push(onset);
+    } else {
+      byYear.set(onset.year, [onset]);
+    }
   }
   const pair = (year: number) => {
     const list = byYear.get(year);
@@ -269,8 +295,10 @@ function runsOf(onsets: Onset[]): { runs: Run[]; single: Onset[] } {
   const runs: Run[] = [];
   const inRun = new Set<Onset>();
   for (let i = 0; i < years.length;) {
-    let ups: Onset[] = [];
-    let downs: Onset[] = [];
+    const ups: Onset[] = [];
+    const downs: Onset[] = [];
+    const upRules = new RuleSet();
+    const downRules = new RuleSet();
     let rules: [string, string] | null = null;
     let j = i;
     for (; j < years.length; j++) {
@@ -278,14 +306,16 @@ function runsOf(onsets: Onset[]): { runs: Run[]; single: Onset[] } {
       if (!p || (j > i && years[j] !== years[j - 1] + 1)) {
         break;
       }
-      const upRule = yearlyRule([...ups, p.up]);
-      const downRule = yearlyRule([...downs, p.down]);
-      if (!upRule || !downRule) {
+      const up = upRules.with(p.up);
+      const down = downRules.with(p.down);
+      if (!up.length || !down.length) {
         break;
       }
-      ups = [...ups, p.up];
-      downs = [...downs, p.down];
-      rules = [upRule, downRule];
+      upRules.add(p.up, up);
+      downRules.add(p.down, down);
+      ups.push(p.up);
+      downs.push(p.down);
+      rules = [up[0], down[0]];
     }
     if (rules && ups.length >= MIN_RUN) {
       runs.push({ ups, downs, upRule: rules[0], downRule: rules[1] });
@@ -415,8 +445,9 @@ function observancesOf(found: Scan, rules: boolean, lastYear: number): Observanc
     });
   }
   if (final) {
-    out.push({ kind: 'STANDARD', from: final.change.from, to: final.change.to, start: final.local,
-      at: final.change.at, lines: [] });
+    for (const kind of ['STANDARD', 'DAYLIGHT'] as const) {
+      out.push({ kind, from: final.change.from, to: final.change.to, start: final.local, at: final.change.at, lines: [] });
+    }
   }
   return out;
 }
@@ -470,7 +501,18 @@ export function vtimezoneFor(tzid: string, firstYear: number, lastYear: number):
   }
   const local = wallOf(firstYear - 1, 1, 1);
   const start = local - zone.offsetAt(local);
-  let endYear = Math.max(LAST_SCANNED_YEAR, lastYear + 2);
+  // A value's last year does not extend the scan: once the zone has settled
+  // into its current rule or a last fixed offset, that state covers every
+  // later year (UNTIL=99991231 needs nothing past it)
+  void lastYear;
+  // A value centuries back on local mean time is refused before scanning
+  // the centuries up to today (the scan below finds the date it ended)
+  if (firstYear < 1800 && zone.offsetAt(wallOf(firstYear, 1, 1)) % 60 !== 0) {
+    throw new UpdateFieldsError('UNSUPPORTED_VTIMEZONE', `"${tzid}" was on local mean time in ${firstYear}, an offset ` +
+      'in seconds that iCalendar readers cannot read: give values in UTC, or from the year standard time began',
+    { remedy: 'fix-value' });
+  }
+  let endYear = LAST_SCANNED_YEAR;
   let found: Scan;
   for (;;) {
     const endLocal = wallOf(endYear + 1, 1, 1);
@@ -534,7 +576,12 @@ export function generateVtimezone(tzid: string, range: VtimezoneRange): string {
     throw new UpdateFieldsError('INVALID_INPUT', 'generateVtimezone takes an IANA zone name and { from, to? }, ' +
       'integer years with from <= to', { remedy: 'fix-value' });
   }
-  return vtimezoneFor(tzid, from, to!).toString();
+  const name = ianaZoneName(tzid);
+  if (!name) {
+    throw new UpdateFieldsError('UNKNOWN_TZID', `"${tzid}" is no IANA time zone`, { remedy: 'fix-value' });
+  }
+  // spelled as updateFields writes it ("europe/berlin" is "Europe/Berlin")
+  return vtimezoneFor(name, from, to!).toString();
 }
 
 /** The walls (naive seconds) of the values an object writes in a TZID, and the years of its UNTILs */
