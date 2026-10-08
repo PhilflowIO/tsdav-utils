@@ -1,4 +1,5 @@
 import ICAL from 'ical.js';
+import { UpdateFieldsError } from './errors';
 
 /*
  * Wall clocks and time zones.
@@ -139,7 +140,7 @@ function transitionsOf(vtimezone: ICAL.Component, horizon: number): Transition[]
       // Real zones change yearly; ical.js gives up on a YEARLY or MONTHLY rule
       // that matches nothing, but would search a finer one without end
       if (recur.freq !== 'YEARLY' && recur.freq !== 'MONTHLY') {
-        throw new Error(`the VTIMEZONE "${vtimezone.getFirstPropertyValue('tzid')}" has an observance repeating ` +
+        throw new UpdateFieldsError('UNSUPPORTED_VTIMEZONE', `the VTIMEZONE "${vtimezone.getFirstPropertyValue('tzid')}" has an observance repeating ` +
           `${recur.freq}, which no time zone does, so it is not read`);
       }
       if (recur.until) {

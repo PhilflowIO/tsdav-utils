@@ -30,6 +30,9 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/index.ts
 var index_exports = {};
 __export(index_exports, {
+  UPDATE_FIELDS_ERROR_CODES: () => UPDATE_FIELDS_ERROR_CODES,
+  UpdateFieldsError: () => UpdateFieldsError,
+  isUpdateFieldsError: () => isUpdateFieldsError,
   parseDateValue: () => parseDateValue,
   seriesMaster: () => seriesMaster,
   updateFields: () => updateFields
@@ -50,6 +53,76 @@ var import_ical2 = __toESM(require("ical.js"));
 
 // src/zone.ts
 var import_ical = __toESM(require("ical.js"));
+
+// src/errors.ts
+var UPDATE_FIELDS_ERROR_CODES = [
+  /** calendarObject is neither an iCalendar string nor an object with a "data" string */
+  "INVALID_INPUT",
+  /** the iCalendar or vCard text does not parse */
+  "INVALID_ICALENDAR",
+  /** options.type (or seriesMaster's type) is not "vevent", "vtodo" or "vjournal" */
+  "INVALID_TYPE",
+  /** options.floatingTime is not "keep" or "local" */
+  "INVALID_FLOATING_TIME",
+  /** the object holds no component of the type asked for (or is a vCard) */
+  "COMPONENT_NOT_FOUND",
+  /** several instances with RECURRENCE-ID and no master: which one is meant cannot be told */
+  "NO_MASTER",
+  /** a date or date-time value does not parse, or names no real date, time or offset */
+  "INVALID_VALUE",
+  /** a date where a date-time is needed, or the other way round */
+  "VALUE_TYPE_MISMATCH",
+  /** a value lacks the zone it needs, has one it must not have, or mixes both */
+  "ZONE_MISMATCH",
+  /** a TZID whose rules are needed has no VTIMEZONE in the object and is no IANA zone */
+  "UNKNOWN_TZID",
+  /** a VTIMEZONE in the object repeats in a way no time zone does, so it is not read */
+  "UNSUPPORTED_VTIMEZONE",
+  /** a rule given has a part RFC 5545 3.3.10 does not define (or RSCALE/SKIP, or an "RRULE:" prefix) */
+  "UNKNOWN_RULE_PART",
+  /** a rule given names a part twice */
+  "DUPLICATE_RULE_PART",
+  /** a rule given is otherwise invalid: a bad value, no FREQ, a combination RFC 5545 rules out */
+  "INVALID_RULE",
+  /** RECURRENCE-ID written on the series master */
+  "RECURRENCE_ID_ON_MASTER",
+  /** a DTSTART move the series (its rule, UNTIL, EXDATE, RDATE or overrides) cannot follow exactly */
+  "SERIES_MOVE_REFUSED",
+  /** a new RRULE or RDATE leaves an override or EXDATE naming no occurrence */
+  "ORPHANS_OVERRIDES",
+  /** a value sits at a DST change, where the wall clock does not name one instant */
+  "DST_AMBIGUOUS",
+  /** the series is too sparse, or what has to be checked too far ahead, to check within the work limit */
+  "CHECK_LIMIT_EXCEEDED",
+  /** whether the overrides and EXDATEs still name occurrences cannot be checked at all */
+  "SERIES_UNVERIFIABLE"
+];
+var UpdateFieldsError = class extends Error {
+  constructor(code, message, details = {}) {
+    super(message);
+    this.name = "UpdateFieldsError";
+    this.code = code;
+    if (details.property !== void 0) {
+      this.property = details.property;
+    }
+    if (details.suggestion !== void 0) {
+      this.suggestion = details.suggestion;
+    }
+  }
+};
+function isUpdateFieldsError(error, code) {
+  if (!(error instanceof Error) || error.name !== "UpdateFieldsError") {
+    return false;
+  }
+  const actual = error.code;
+  return UPDATE_FIELDS_ERROR_CODES.includes(actual) && (code === void 0 || actual === code);
+}
+function wrapped(error, fallback, message, details = {}) {
+  const code = error instanceof UpdateFieldsError ? error.code : fallback;
+  return code ? new UpdateFieldsError(code, message, details) : new Error(message);
+}
+
+// src/zone.ts
 var DAY = 86400;
 function wallOf(y, mo, d, h = 0, mi = 0, s = 0) {
   const t = new Date(Date.UTC(2e3, mo - 1, d, h, mi, s));
@@ -119,7 +192,7 @@ function transitionsOf(vtimezone, horizon) {
     for (const property of observance.getAllProperties("rrule")) {
       const recur = property.getFirstValue().clone();
       if (recur.freq !== "YEARLY" && recur.freq !== "MONTHLY") {
-        throw new Error(`the VTIMEZONE "${vtimezone.getFirstPropertyValue("tzid")}" has an observance repeating ${recur.freq}, which no time zone does, so it is not read`);
+        throw new UpdateFieldsError("UNSUPPORTED_VTIMEZONE", `the VTIMEZONE "${vtimezone.getFirstPropertyValue("tzid")}" has an observance repeating ${recur.freq}, which no time zone does, so it is not read`);
       }
       if (recur.until) {
         const until = wallOfTime(recur.until) + (recur.until.zone === import_ical.default.Timezone.utcTimezone ? from : 0);
@@ -240,7 +313,7 @@ function localDate(y, mo, d, h, mi, s) {
 function assertRealDateTime(raw, y, mo, d, h = 0, mi = 0, s = 0) {
   const t = new Date(utcMillis(y, mo, d, h, mi, 0));
   if (t.getUTCFullYear() !== y || t.getUTCMonth() !== mo - 1 || t.getUTCDate() !== d || h > 23 || mi > 59 || s > 60) {
-    throw new Error(`"${raw}" is not a valid date or time`);
+    throw new UpdateFieldsError("INVALID_VALUE", `"${raw}" is not a valid date or time`);
   }
 }
 function toUtcJcal(date) {
@@ -256,7 +329,7 @@ function parseDateValue(raw) {
   }
   m = DATE_TIME_EXTENDED.exec(value) || DATE_TIME_BASIC.exec(value);
   if (!m) {
-    throw new Error(`"${raw}" is not a date or date-time. ${ACCEPTED_FORMS}`);
+    throw new UpdateFieldsError("INVALID_VALUE", `"${raw}" is not a date or date-time. ${ACCEPTED_FORMS}`);
   }
   const [y, mo, d, h, mi] = [1, 2, 3, 4, 5].map((i) => Number(m[i]));
   const s = Number(m[6] ?? 0);
@@ -270,7 +343,7 @@ function parseDateValue(raw) {
       const hours = Number(digits.slice(0, 2));
       const minutes = Number(digits.slice(2, 4) || 0);
       if (hours > 23 || minutes > 59) {
-        throw new Error(`"${raw}" has an invalid UTC offset`);
+        throw new UpdateFieldsError("INVALID_VALUE", `"${raw}" has an invalid UTC offset`);
       }
       ms -= sign * (hours * 60 + minutes) * 6e4;
     }
@@ -338,33 +411,57 @@ function setDateValue(component, name, raw, floatingTime = "keep") {
     const parts = shape.multiValue ? raw.split(",").filter((part) => part.trim() !== "") : [raw];
     parsed = (parts.length ? parts : [raw]).map(parseDateValue);
   } catch (error) {
-    throw new Error(`${upper}: ${error.message}`);
+    throw wrapped(error, "INVALID_VALUE", `${upper}: ${error.message}`, { property: upper });
   }
   if (new Set(parsed.map((p) => p.kind === "date")).size > 1) {
-    throw new Error(`${upper} mixes dates and date-times; all values must be one or the other`);
+    throw new UpdateFieldsError(
+      "VALUE_TYPE_MISMATCH",
+      `${upper} mixes dates and date-times; all values must be one or the other`,
+      { property: upper }
+    );
   }
   const isDate = parsed[0].kind === "date";
   if (isDate && !shape.allowedTypes.includes("date")) {
-    throw new Error(`${upper} needs a date-time, not a date. Accepted forms: ${DATE_TIME_FORMS}`);
+    throw new UpdateFieldsError(
+      "VALUE_TYPE_MISMATCH",
+      `${upper} needs a date-time, not a date. Accepted forms: ${DATE_TIME_FORMS}`,
+      { property: upper }
+    );
   }
   const existing = component.getFirstProperty(lower);
   const anchor = anchorOf(component, lower);
   const why = ["exdate", "rdate"].includes(lower) ? "otherwise it names no occurrence of the series" : "RFC 5545 requires the same value type";
   if (anchor?.form === "date" && !isDate) {
-    throw new Error(`${upper} must be a date: DTSTART is a date (all-day), and ${why}`);
+    throw new UpdateFieldsError(
+      "VALUE_TYPE_MISMATCH",
+      `${upper} must be a date: DTSTART is a date (all-day), and ${why}`,
+      { property: upper }
+    );
   }
   if (anchor && anchor.form !== "date" && isDate) {
-    throw new Error(`${upper} needs a time: DTSTART has one, and ${why}`);
+    throw new UpdateFieldsError(
+      "VALUE_TYPE_MISMATCH",
+      `${upper} needs a time: DTSTART has one, and ${why}`,
+      { property: upper }
+    );
   }
   const own = existing?.getParameter("tzid");
   const zone2 = UTC_ONLY.has(lower) ? null : typeof own === "string" && own ? own : anchor?.form === "tzid" ? anchor.tzid : null;
   const floating = parsed.some((p) => p.kind === "floating");
   const wallClock = !floating ? null : zone2 ? "tzid" : anchor?.form === "floating" ? "floating" : floatingTime === "local" ? "utc" : anchor?.form === "utc" || UTC_ONLY.has(lower) ? null : "floating";
   if (floating && wallClock === null) {
-    throw new Error(UTC_ONLY.has(lower) ? `${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"` : `${upper} has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"`);
+    throw new UpdateFieldsError(
+      "ZONE_MISMATCH",
+      UTC_ONLY.has(lower) ? `${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"` : `${upper} has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"`,
+      { property: upper }
+    );
   }
   if (floating && wallClock !== "utc" && parsed.some((p) => p.kind === "utc")) {
-    throw new Error(`${upper} mixes values with and without a zone; give all of them a zone, or none`);
+    throw new UpdateFieldsError(
+      "ZONE_MISMATCH",
+      `${upper} mixes values with and without a zone; give all of them a zone, or none`,
+      { property: upper }
+    );
   }
   const tzid = wallClock === "tzid" ? zone2 : null;
   const values = parsed.map((p) => p.kind === "floating" && wallClock === "utc" ? toUtcJcal(p.local) : p.jcal);
@@ -438,52 +535,52 @@ function parseRuleParts(raw) {
     const check = RULE_PARTS[name];
     if (!check) {
       if (name === "RSCALE" || name === "SKIP") {
-        throw new Error("RSCALE/SKIP (RFC 7529) are not supported: ical.js cannot write them without losing them");
+        throw new UpdateFieldsError("UNKNOWN_RULE_PART", "RSCALE/SKIP (RFC 7529) are not supported: ical.js cannot write them without losing them");
       }
       const colon = name.indexOf(":");
       if (colon >= 0) {
-        throw new Error(`"${part.trim()}" is not a rule part: drop the "${name.slice(0, colon + 1)}" prefix and give only the rule, e.g. "${part.trim().slice(colon + 1)}"`);
+        throw new UpdateFieldsError("UNKNOWN_RULE_PART", `"${part.trim()}" is not a rule part: drop the "${name.slice(0, colon + 1)}" prefix and give only the rule, e.g. "${part.trim().slice(colon + 1)}"`);
       }
-      throw new Error(`"${part.trim()}" is not a rule part. RFC 5545 defines ${Object.keys(RULE_PARTS).join(", ")} (e.g. "FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10")`);
+      throw new UpdateFieldsError("UNKNOWN_RULE_PART", `"${part.trim()}" is not a rule part. RFC 5545 defines ${Object.keys(RULE_PARTS).join(", ")} (e.g. "FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10")`);
     }
     if (parts.has(name)) {
-      throw new Error(`${name} is given twice; each rule part may occur once`);
+      throw new UpdateFieldsError("DUPLICATE_RULE_PART", `${name} is given twice; each rule part may occur once`);
     }
     if (value === "") {
-      throw new Error(`${name} has no value`);
+      throw new UpdateFieldsError("INVALID_RULE", `${name} has no value`);
     }
     const wrong = check(value);
     if (wrong) {
-      throw new Error(`${name}: ${wrong}`);
+      throw new UpdateFieldsError("INVALID_RULE", `${name}: ${wrong}`);
     }
     parts.set(name, value);
   }
   const freq = parts.get("FREQ");
   if (!freq) {
-    throw new Error('FREQ is missing; every rule needs one (e.g. "FREQ=DAILY;COUNT=5")');
+    throw new UpdateFieldsError("INVALID_RULE", 'FREQ is missing; every rule needs one (e.g. "FREQ=DAILY;COUNT=5")');
   }
   if (parts.has("COUNT") && parts.has("UNTIL")) {
-    throw new Error("COUNT and UNTIL cannot both be given (RFC 5545 3.3.10); use one of them");
+    throw new UpdateFieldsError("INVALID_RULE", "COUNT and UNTIL cannot both be given (RFC 5545 3.3.10); use one of them");
   }
   if (parts.has("BYWEEKNO") && freq !== "YEARLY") {
-    throw new Error("BYWEEKNO is only allowed with FREQ=YEARLY (RFC 5545 3.3.10)");
+    throw new UpdateFieldsError("INVALID_RULE", "BYWEEKNO is only allowed with FREQ=YEARLY (RFC 5545 3.3.10)");
   }
   if (parts.has("BYYEARDAY") && ["DAILY", "WEEKLY", "MONTHLY"].includes(freq)) {
-    throw new Error(`BYYEARDAY is not allowed with FREQ=${freq} (RFC 5545 3.3.10)`);
+    throw new UpdateFieldsError("INVALID_RULE", `BYYEARDAY is not allowed with FREQ=${freq} (RFC 5545 3.3.10)`);
   }
   if (parts.has("BYMONTHDAY") && freq === "WEEKLY") {
-    throw new Error("BYMONTHDAY is not allowed with FREQ=WEEKLY (RFC 5545 3.3.10)");
+    throw new UpdateFieldsError("INVALID_RULE", "BYMONTHDAY is not allowed with FREQ=WEEKLY (RFC 5545 3.3.10)");
   }
   const ordinalDay = (parts.get("BYDAY") ?? "").split(",").some((d) => /\d/.test(d));
   if (ordinalDay && (!["MONTHLY", "YEARLY"].includes(freq) || parts.has("BYWEEKNO"))) {
-    throw new Error('BYDAY with an ordinal ("1MO", "-1FR") is only allowed with FREQ=MONTHLY or FREQ=YEARLY, and not together with BYWEEKNO (RFC 5545 3.3.10)');
+    throw new UpdateFieldsError("INVALID_RULE", 'BYDAY with an ordinal ("1MO", "-1FR") is only allowed with FREQ=MONTHLY or FREQ=YEARLY, and not together with BYWEEKNO (RFC 5545 3.3.10)');
   }
   const tooFar = (parts.get("BYDAY") ?? "").split(",").find((d) => Math.abs(Number(/^([+-]?\d+)/.exec(d)?.[1] ?? 0)) > 5);
   if (tooFar && (freq === "MONTHLY" || parts.has("BYMONTH"))) {
-    throw new Error(`BYDAY: "${tooFar}" counts past the fifth weekday of a month; within a month the ordinal is 1 to 5 or -5 to -1 (RFC 5545 3.3.10)`);
+    throw new UpdateFieldsError("INVALID_RULE", `BYDAY: "${tooFar}" counts past the fifth weekday of a month; within a month the ordinal is 1 to 5 or -5 to -1 (RFC 5545 3.3.10)`);
   }
   if (parts.has("BYSETPOS") && ![...parts.keys()].some((k) => k.startsWith("BY") && k !== "BYSETPOS")) {
-    throw new Error("BYSETPOS needs another BYxxx part to select from (RFC 5545 3.3.10)");
+    throw new UpdateFieldsError("INVALID_RULE", "BYSETPOS needs another BYxxx part to select from (RFC 5545 3.3.10)");
   }
   return parts;
 }
@@ -492,24 +589,24 @@ function untilTime(component, ruleName, raw, floatingTime) {
   try {
     parsed = parseDateValue(raw);
   } catch (error) {
-    throw new Error(`${ruleName} UNTIL: ${error.message}`);
+    throw wrapped(error, "INVALID_VALUE", `${ruleName} UNTIL: ${error.message}`, { property: ruleName });
   }
   const anchor = anchorOf(component, ruleName.toLowerCase());
-  const fail = (why) => new Error(`${ruleName} UNTIL ${why}`);
+  const fail = (code, why) => new UpdateFieldsError(code, `${ruleName} UNTIL ${why}`, { property: ruleName });
   if (anchor?.form === "date" && parsed.kind !== "date") {
-    throw fail('must be a date: DTSTART is a date (all-day), and RFC 5545 3.3.10 requires the same type, e.g. "2026-10-26"');
+    throw fail("VALUE_TYPE_MISMATCH", 'must be a date: DTSTART is a date (all-day), and RFC 5545 3.3.10 requires the same type, e.g. "2026-10-26"');
   }
   if (anchor && anchor.form !== "date" && parsed.kind === "date") {
-    throw fail("needs a time: DTSTART has one, and RFC 5545 3.3.10 requires the same type");
+    throw fail("VALUE_TYPE_MISMATCH", "needs a time: DTSTART has one, and RFC 5545 3.3.10 requires the same type");
   }
   if (anchor?.form === "floating" && parsed.kind === "utc") {
-    throw fail('must be a local time without a zone, like the floating DTSTART (RFC 5545 3.3.10), e.g. "2026-10-26T18:00:00"');
+    throw fail("ZONE_MISMATCH", 'must be a local time without a zone, like the floating DTSTART (RFC 5545 3.3.10), e.g. "2026-10-26T18:00:00"');
   }
   if (parsed.kind === "floating") {
     if (anchor?.form === "tzid") {
       const zone2 = zoneOf(component, anchor.tzid);
       if (!zone2) {
-        throw fail(`has no zone, and DTSTART's zone "${anchor.tzid}" has no VTIMEZONE in the document and is no IANA time zone to convert it to UTC with (RFC 5545 3.3.10 requires UTC here): give it a zone, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T18:00:00+01:00"`);
+        throw fail("UNKNOWN_TZID", `has no zone, and DTSTART's zone "${anchor.tzid}" has no VTIMEZONE in the document and is no IANA time zone to convert it to UTC with (RFC 5545 3.3.10 requires UTC here): give it a zone, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T18:00:00+01:00"`);
       }
       const wall = import_ical2.default.Time.fromDateTimeString(parsed.jcal);
       const utc = fieldsOf(zone2.toUtc(wallOf(wall.year, wall.month, wall.day, wall.hour, wall.minute, wall.second)));
@@ -522,7 +619,7 @@ function untilTime(component, ruleName, raw, floatingTime) {
       return import_ical2.default.Time.fromDateTimeString(toUtcJcal(parsed.local));
     }
     if (anchor?.form === "utc") {
-      throw fail('has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"');
+      throw fail("ZONE_MISMATCH", 'has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"');
     }
     return import_ical2.default.Time.fromDateTimeString(parsed.jcal);
   }
@@ -541,7 +638,7 @@ function setRecurValue(component, name, raw, floatingTime = "keep") {
   try {
     parts = parseRuleParts(raw);
   } catch (error) {
-    throw new Error(`${upper}: ${error.message}`);
+    throw wrapped(error, "INVALID_RULE", `${upper}: ${error.message}`, { property: upper });
   }
   const until = parts.get("UNTIL");
   parts.delete("UNTIL");
@@ -596,7 +693,7 @@ var icalForm = (jcal) => jcal.replace(/[-:]/g, "");
 function zone(component, tzid) {
   const resolved = zoneOf(component, tzid);
   if (!resolved) {
-    throw new Error(unknownZone(tzid));
+    throw new UpdateFieldsError("UNKNOWN_TZID", unknownZone(tzid));
   }
   return resolved;
 }
@@ -610,7 +707,7 @@ function wallIn(component, stamp, frame) {
   }
   if (frame.form === "floating") {
     if (stamp.kind === "utc") {
-      throw new Error("it is in UTC, and a floating series has no zone to read it in");
+      throw new UpdateFieldsError("ZONE_MISMATCH", "it is in UTC, and a floating series has no zone to read it in");
     }
     return stamp.wall;
   }
@@ -710,7 +807,7 @@ function wallOut(component, wall, frame, own) {
   const own2 = zone(component, to);
   const out = own2.fromUtc(utc);
   if (own2.toUtc(out) !== utc) {
-    throw new Error(`moved, it would be ${icalForm(jcalOf(utc, "utc"))}, which in "${to}" falls in the second pass of the hour the DST change shows twice, where ${icalForm(jcalOf(out, "floating"))} reads as the first`);
+    throw new UpdateFieldsError("DST_AMBIGUOUS", `moved, it would be ${icalForm(jcalOf(utc, "utc"))}, which in "${to}" falls in the second pass of the hour the DST change shows twice, where ${icalForm(jcalOf(out, "floating"))} reads as the first`);
   }
   return out;
 }
@@ -892,7 +989,7 @@ function moveUntil(property, move, texts) {
   if (move.from.form === "tzid" && until.kind === "utc") {
     const old = zone(move.component, move.from.tzid);
     if (old.gapAlias(until.wall) !== null || old.ambiguity(old.fromUtc(until.wall))) {
-      throw new Error(`it lies at the DST change in "${move.from.tzid}", where the wall clock and the order of instants part, so moved on the wall clock it could let one occurrence too many or too few through`);
+      throw new UpdateFieldsError("DST_AMBIGUOUS", `it lies at the DST change in "${move.from.tzid}", where the wall clock and the order of instants part, so moved on the wall clock it could let one occurrence too many or too few through`);
     }
   }
   if (until.kind === "date" !== (move.from.form === "date")) {
@@ -906,7 +1003,7 @@ function moveUntil(property, move, texts) {
     const target = zone(move.component, move.to.tzid);
     const ambiguity = target.ambiguity(wall) ?? (target.gapAlias(target.toUtc(wall)) !== null ? "gap" : null);
     if (ambiguity) {
-      throw new Error(`moved, it would be ${icalForm(jcalOf(wall, "floating"))} in "${move.to.tzid}", at the DST change, where ${ambiguity === "gap" ? "the wall clock skips times" : "the wall clock shows an hour twice"} and its order and the order of instants part`);
+      throw new UpdateFieldsError("DST_AMBIGUOUS", `moved, it would be ${icalForm(jcalOf(wall, "floating"))} in "${move.to.tzid}", at the DST change, where ${ambiguity === "gap" ? "the wall clock skips times" : "the wall clock shows an hour twice"} and its order and the order of instants part`);
     }
     untilValue = jcalOf(convert(move.component, wall, move.to.tzid, null), "utc");
   } else {
@@ -1062,13 +1159,13 @@ var NO_SERIES = { finish() {
 function beginSeriesEdit(calendar, master, written, source = null) {
   const failClosed = (error) => {
     if (error instanceof SeriesUnverifiable) {
-      return new Error(`Cannot check that the overrides and EXDATEs still name occurrences of the series: ${error.message}. Rewrite the whole iCalendar object instead`);
+      return new UpdateFieldsError("SERIES_UNVERIFIABLE", `Cannot check that the overrides and EXDATEs still name occurrences of the series: ${error.message}. Rewrite the whole iCalendar object instead`);
     }
     if (!(error instanceof SeriesTooSparse)) {
       return error;
     }
     const rule = master.getFirstProperty("rrule")?.toICALString() ?? "The rule";
-    return written.has("rrule") || written.has("rdate") ? new Error(`Cannot check that the overrides and EXDATEs still name occurrences of the series: ${rule}: ${error.message}. Rewrite the whole iCalendar object instead`) : new Error(`Cannot check that moving DTSTART keeps the series' occurrences: ${rule}: ${error.message}. Give RRULE, UNTIL and EXDATE explicitly in the same call, or rewrite the whole iCalendar object`);
+    return written.has("rrule") || written.has("rdate") ? new UpdateFieldsError("CHECK_LIMIT_EXCEEDED", `Cannot check that the overrides and EXDATEs still name occurrences of the series: ${rule}: ${error.message}. Rewrite the whole iCalendar object instead`) : new UpdateFieldsError("CHECK_LIMIT_EXCEEDED", `Cannot check that moving DTSTART keeps the series' occurrences: ${rule}: ${error.message}. Give RRULE, UNTIL and EXDATE explicitly in the same call, or rewrite the whole iCalendar object`);
   };
   try {
     const edit = startSeriesEdit(calendar, master, written, source);
@@ -1091,7 +1188,7 @@ function startSeriesEdit(calendar, master, written, source) {
     return NO_SERIES;
   }
   if (written.has("recurrence-id")) {
-    throw new Error("RECURRENCE-ID cannot be written on the series master: it would turn the master into an override of a single instance (RFC 5545 3.8.4.4). updateFields edits the series; to change one instance, add or edit an override component (same UID, with RECURRENCE-ID) by rewriting the whole iCalendar object");
+    throw new UpdateFieldsError("RECURRENCE_ID_ON_MASTER", "RECURRENCE-ID cannot be written on the series master: it would turn the master into an override of a single instance (RFC 5545 3.8.4.4). updateFields edits the series; to change one instance, add or edit an override component (same UID, with RECURRENCE-ID) by rewriting the whole iCalendar object", { property: "RECURRENCE-ID" });
   }
   const replaced = new Set([...written].map((name) => master.getFirstProperty(name)).filter(Boolean));
   const own = (name) => master.getAllProperties(name).filter((p) => !replaced.has(p));
@@ -1151,7 +1248,12 @@ function startSeriesEdit(calendar, master, written, source) {
           try {
             moveUntil(property, move, texts);
           } catch (error) {
-            throw new Error(`DTSTART changed, and the existing ${upper} UNTIL=${until} cannot follow it (${error.message}): give ${upper}, with UNTIL, in the same call`);
+            throw wrapped(
+              error,
+              "SERIES_MOVE_REFUSED",
+              `DTSTART changed, and the existing ${upper} UNTIL=${until} cannot follow it (${error.message}): give ${upper}, with UNTIL, in the same call`,
+              { property: upper }
+            );
           }
         }
         for (const property of [...exdates, ...rdates]) {
@@ -1159,7 +1261,12 @@ function startSeriesEdit(calendar, master, written, source) {
           try {
             moveInstants(property, move);
           } catch (error) {
-            throw new Error(`DTSTART changed, and the existing ${line} cannot follow it (${error.message}): give ${property.name.toUpperCase()} in the same call`);
+            throw wrapped(
+              error,
+              "SERIES_MOVE_REFUSED",
+              `DTSTART changed, and the existing ${line} cannot follow it (${error.message}): give ${property.name.toUpperCase()} in the same call`,
+              { property: property.name.toUpperCase() }
+            );
           }
         }
         for (const override of overrides) {
@@ -1170,7 +1277,12 @@ function startSeriesEdit(calendar, master, written, source) {
             moveInstants(rid, move);
             moveOverrideTimes(override, old, propertyStamps(rid)[0], move);
           } catch (error) {
-            throw new Error(`DTSTART changed, and the override for ${line} cannot follow it (${error.message}): rewrite the whole iCalendar object with the override moved`);
+            throw wrapped(
+              error,
+              "SERIES_MOVE_REFUSED",
+              `DTSTART changed, and the override for ${line} cannot follow it (${error.message}): rewrite the whole iCalendar object with the override moved`,
+              { property: "RECURRENCE-ID" }
+            );
           }
         }
         if (keepsRule) {
@@ -1187,7 +1299,7 @@ function startSeriesEdit(calendar, master, written, source) {
         const twin = twinBefore ?? after2;
         if (twin) {
           const verb = twinBefore ? "names" : moving ? "would name, moved," : "would name";
-          throw new Error(`${cause} is refused: ${twin.replace("%NAMES%", verb)}. Rewrite the whole iCalendar object with the values it should have`);
+          throw new UpdateFieldsError("DST_AMBIGUOUS", `${cause} is refused: ${twin.replace("%NAMES%", verb)}. Rewrite the whole iCalendar object with the values it should have`);
         }
       }
       texts.mark();
@@ -1198,7 +1310,7 @@ function startSeriesEdit(calendar, master, written, source) {
       const lost = watched.filter((_, i) => after[i] === false);
       if (lost.length) {
         const what = shaping.map((n) => n.toUpperCase()).join(" and ");
-        throw new Error(`The new ${what} leaves ${lost.map((ref) => ref.label).join(", ")} naming no occurrence of the series, so ${lost.length > 1 ? "they" : "it"} would silently stop applying (RFC 5545 3.8.4.4, 3.8.5.1). Give RRULE (or RDATE) in the same call so the series still has ${lost.length > 1 ? "these occurrences" : "this occurrence"}, and EXDATE in the same call with the exclusions the new series should have; or rewrite the whole iCalendar object to move or remove the override`);
+        throw new UpdateFieldsError("ORPHANS_OVERRIDES", `The new ${what} leaves ${lost.map((ref) => ref.label).join(", ")} naming no occurrence of the series, so ${lost.length > 1 ? "they" : "it"} would silently stop applying (RFC 5545 3.8.4.4, 3.8.5.1). Give RRULE (or RDATE) in the same call so the series still has ${lost.length > 1 ? "these occurrences" : "this occurrence"}, and EXDATE in the same call with the exclusions the new series should have; or rewrite the whole iCalendar object to move or remove the override`, { property: written.has("rrule") ? "RRULE" : "RDATE" });
       }
     }
   };
@@ -1309,7 +1421,11 @@ function checkMove(master, move, from, to, texts) {
     }
     const upper = property.name.toUpperCase();
     const suggestion = suggestedRule(recur, move.toWall, move.to.form !== "date");
-    throw new Error(`Moving DTSTART (${from} to ${to}) does not move the whole series: ${property.toICALString()} ${why}, so the moved series would not have the same occurrences, each moved. Give ${upper} in the same call to fit the new start${suggestion ? ` (e.g. ${upper} "${suggestion}")` : ""}; to start the series later without moving it, give RRULE, UNTIL and EXDATE explicitly, or rewrite the whole iCalendar object`);
+    throw new UpdateFieldsError(
+      "SERIES_MOVE_REFUSED",
+      `Moving DTSTART (${from} to ${to}) does not move the whole series: ${property.toICALString()} ${why}, so the moved series would not have the same occurrences, each moved. Give ${upper} in the same call to fit the new start${suggestion ? ` (e.g. ${upper} "${suggestion}")` : ""}; to start the series later without moving it, give RRULE, UNTIL and EXDATE explicitly, or rewrite the whole iCalendar object`,
+      { property: upper, ...suggestion ? { suggestion } : {} }
+    );
   }
 }
 function checkDatesOnly(master, move, properties) {
@@ -1319,7 +1435,7 @@ function checkDatesOnly(master, move, properties) {
       const wall = stamp.kind === "date" ? null : wallIn(master, stamp, move.from);
       if (wall === null || wall - dayOf(wall) !== timeOfDay) {
         const line = property.toICALString();
-        throw new Error(`DTSTART changed to a date, and ${line} is ${wall === null ? "a date already" : "not at the series' time of day"}, so as a date it could name an occurrence it did not name before: give ${property.name === "recurrence-id" ? "the override" : property.name.toUpperCase()} as dates by rewriting the whole iCalendar object`);
+        throw new UpdateFieldsError("SERIES_MOVE_REFUSED", `DTSTART changed to a date, and ${line} is ${wall === null ? "a date already" : "not at the series' time of day"}, so as a date it could name an occurrence it did not name before: give ${property.name === "recurrence-id" ? "the override" : property.name.toUpperCase()} as dates by rewriting the whole iCalendar object`, { property: property.name.toUpperCase() });
       }
     }
   }
@@ -1329,7 +1445,7 @@ function checkDatesOnly(master, move, properties) {
 function componentType(type) {
   const name = typeof type === "string" ? type.toLowerCase() : "";
   if (!COMPONENT_TYPES.includes(name)) {
-    throw new Error(`Invalid type "${String(type)}": use "vevent", "vtodo" or "vjournal"`);
+    throw new UpdateFieldsError("INVALID_TYPE", `Invalid type "${String(type)}": use "vevent", "vtodo" or "vjournal"`);
   }
   return name;
 }
@@ -1347,21 +1463,22 @@ function seriesMaster(calendar, type) {
     if (all.length === 1) {
       return all[0];
     }
-    throw new Error(
+    throw new UpdateFieldsError(
+      "NO_MASTER",
       `This object holds ${all.length} ${type2.toUpperCase()} instances (each with a RECURRENCE-ID) and no master, so a field update cannot tell which one is meant. Edit the instance by rewriting the whole iCalendar object instead`
     );
   }
   const held = [...new Set(calendar.getAllSubcomponents().map((c) => String(c.name).toUpperCase()))];
-  throw new Error(`No ${types.map((t) => t.toUpperCase()).join(", ")} found in VCALENDAR ` + (held.length ? `(it holds: ${held.join(", ")})` : "(it holds no components)"));
+  throw new UpdateFieldsError("COMPONENT_NOT_FOUND", `No ${types.map((t) => t.toUpperCase()).join(", ")} found in VCALENDAR ` + (held.length ? `(it holds: ${held.join(", ")})` : "(it holds no components)"));
 }
 function updateFields(calendarObject, fields, options = {}) {
   const icalString = typeof calendarObject === "string" ? calendarObject : calendarObject.data;
   if (!icalString) {
-    throw new Error('Invalid input: calendarObject must be a string or object with "data" field');
+    throw new UpdateFieldsError("INVALID_INPUT", 'Invalid input: calendarObject must be a string or object with "data" field');
   }
   const floatingTime = options.floatingTime ?? "keep";
   if (floatingTime !== "keep" && floatingTime !== "local") {
-    throw new Error(`Invalid floatingTime "${floatingTime}": use "keep" or "local"`);
+    throw new UpdateFieldsError("INVALID_FLOATING_TIME", `Invalid floatingTime "${floatingTime}": use "keep" or "local"`);
   }
   const type = options.type === void 0 ? void 0 : componentType(options.type);
   let jcalData;
@@ -1370,11 +1487,11 @@ function updateFields(calendarObject, fields, options = {}) {
     jcalData = import_ical4.default.parse(icalString);
     component = new import_ical4.default.Component(jcalData);
   } catch (error) {
-    throw new Error(`Failed to parse iCal data: ${error.message}`);
+    throw new UpdateFieldsError("INVALID_ICALENDAR", `Failed to parse iCal data: ${error.message}`);
   }
   if (type && component.name !== "vcalendar" && component.name !== type) {
     const name = String(component.name).toUpperCase();
-    throw new Error(component.name === "vcard" ? `type "${type}" applies to an iCalendar object, but this is a VCARD` : `type "${type}" asks for a ${type.toUpperCase()}, but this object is a bare ${name}`);
+    throw new UpdateFieldsError("COMPONENT_NOT_FOUND", component.name === "vcard" ? `type "${type}" applies to an iCalendar object, but this is a VCARD` : `type "${type}" asks for a ${type.toUpperCase()}, but this object is a bare ${name}`);
   }
   const actualComponent = component.name === "vcalendar" ? seriesMaster(component, type) : component;
   const entries = Object.entries(fields).sort(
@@ -1397,6 +1514,9 @@ function updateFields(calendarObject, fields, options = {}) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  UPDATE_FIELDS_ERROR_CODES,
+  UpdateFieldsError,
+  isUpdateFieldsError,
   parseDateValue,
   seriesMaster,
   updateFields

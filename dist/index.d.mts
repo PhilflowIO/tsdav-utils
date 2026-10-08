@@ -121,8 +121,50 @@ type DateValue = {
  * the only zone that needs no VTIMEZONE. A value without a zone stays a
  * wall-clock time here; setDateValue decides what it means.
  *
- * @throws {Error} naming the accepted forms when the value is none of them
+ * @throws {UpdateFieldsError} INVALID_VALUE, naming the accepted forms, when the
+ *   value is none of them
  */
 declare function parseDateValue(raw: string): DateValue;
 
-export { type CalendarObjectInput, type ComponentType, type DateValue, type FieldUpdates, type FloatingTime, type UpdateFieldsOptions, parseDateValue, seriesMaster, updateFields };
+/**
+ * Why updateFields (or seriesMaster, or parseDateValue) refused a call.
+ *
+ * Every code names a mistake in what the caller gave — the arguments, the
+ * object, or a write the object cannot take as asked — so a consumer can tell
+ * a refusal it should hand back to its own caller from a failure of the
+ * library, and branch on it without matching message texts. The codes are
+ * stable; the messages explain and may be reworded.
+ *
+ * See "Errors" in the README for when each code occurs.
+ */
+declare const UPDATE_FIELDS_ERROR_CODES: readonly ["INVALID_INPUT", "INVALID_ICALENDAR", "INVALID_TYPE", "INVALID_FLOATING_TIME", "COMPONENT_NOT_FOUND", "NO_MASTER", "INVALID_VALUE", "VALUE_TYPE_MISMATCH", "ZONE_MISMATCH", "UNKNOWN_TZID", "UNSUPPORTED_VTIMEZONE", "UNKNOWN_RULE_PART", "DUPLICATE_RULE_PART", "INVALID_RULE", "RECURRENCE_ID_ON_MASTER", "SERIES_MOVE_REFUSED", "ORPHANS_OVERRIDES", "DST_AMBIGUOUS", "CHECK_LIMIT_EXCEEDED", "SERIES_UNVERIFIABLE"];
+/** A stable reason for a refusal; see UPDATE_FIELDS_ERROR_CODES */
+type UpdateFieldsErrorCode = typeof UPDATE_FIELDS_ERROR_CODES[number];
+interface UpdateFieldsErrorDetails {
+    /** the property the refusal is about, upper-cased ("DTEND", "RRULE") */
+    property?: string;
+    /**
+     * A value that would be accepted instead, where the library can tell: for
+     * SERIES_MOVE_REFUSED the rule to give with the new start ("FREQ=WEEKLY;BYDAY=TU")
+     */
+    suggestion?: string;
+}
+/**
+ * A refusal of updateFields, seriesMaster or parseDateValue: the call asked
+ * for something the object cannot take, and nothing was written. Anything else
+ * thrown is a plain Error and a failure of the library.
+ */
+declare class UpdateFieldsError extends Error {
+    readonly code: UpdateFieldsErrorCode;
+    readonly property?: string;
+    readonly suggestion?: string;
+    constructor(code: UpdateFieldsErrorCode, message: string, details?: UpdateFieldsErrorDetails);
+}
+/**
+ * Whether an error is an UpdateFieldsError, optionally with one code. Checked
+ * by name and code rather than instanceof, so it also holds when the ESM and
+ * the CommonJS build of this package are both loaded.
+ */
+declare function isUpdateFieldsError(error: unknown, code?: UpdateFieldsErrorCode): error is UpdateFieldsError;
+
+export { type CalendarObjectInput, type ComponentType, type DateValue, type FieldUpdates, type FloatingTime, UPDATE_FIELDS_ERROR_CODES, UpdateFieldsError, type UpdateFieldsErrorCode, type UpdateFieldsErrorDetails, type UpdateFieldsOptions, isUpdateFieldsError, parseDateValue, seriesMaster, updateFields };

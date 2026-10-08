@@ -2,6 +2,7 @@ import ICAL from 'ical.js';
 import { COMPONENT_TYPES } from './types';
 import type { CalendarObjectInput, ComponentType, FieldUpdates, UpdateFieldsOptions } from './types';
 import { beginSeriesEdit } from './series';
+import { UpdateFieldsError } from './errors';
 import { setDateValue, setRecurValue } from './typedValue';
 
 /**
@@ -12,7 +13,7 @@ import { setDateValue, setRecurValue } from './typedValue';
 function componentType(type: unknown): ComponentType {
   const name = typeof type === 'string' ? type.toLowerCase() : '';
   if (!(COMPONENT_TYPES as readonly string[]).includes(name)) {
-    throw new Error(`Invalid type "${String(type)}": use "vevent", "vtodo" or "vjournal"`);
+    throw new UpdateFieldsError('INVALID_TYPE', `Invalid type "${String(type)}": use "vevent", "vtodo" or "vjournal"`);
   }
   return name as ComponentType;
 }
@@ -58,7 +59,7 @@ export function seriesMaster(calendar: ICAL.Component, type?: ComponentType): IC
     if (all.length === 1) {
       return all[0];
     }
-    throw new Error(
+    throw new UpdateFieldsError('NO_MASTER',
       `This object holds ${all.length} ${type.toUpperCase()} instances (each with a ` +
       'RECURRENCE-ID) and no master, so a field update cannot tell which one is meant. ' +
       'Edit the instance by rewriting the whole iCalendar object instead');
@@ -66,7 +67,7 @@ export function seriesMaster(calendar: ICAL.Component, type?: ComponentType): IC
   // Name what the object does hold, so a caller (an LLM tool call, say)
   // can correct the type it asked for.
   const held = [...new Set(calendar.getAllSubcomponents().map((c) => String(c.name).toUpperCase()))];
-  throw new Error(`No ${types.map((t) => t.toUpperCase()).join(', ')} found in VCALENDAR ` +
+  throw new UpdateFieldsError('COMPONENT_NOT_FOUND', `No ${types.map((t) => t.toUpperCase()).join(', ')} found in VCALENDAR ` +
     (held.length ? `(it holds: ${held.join(', ')})` : '(it holds no components)'));
 }
 
@@ -107,12 +108,12 @@ export function updateFields(
     : calendarObject.data;
 
   if (!icalString) {
-    throw new Error('Invalid input: calendarObject must be a string or object with "data" field');
+    throw new UpdateFieldsError('INVALID_INPUT', 'Invalid input: calendarObject must be a string or object with "data" field');
   }
 
   const floatingTime = options.floatingTime ?? 'keep';
   if (floatingTime !== 'keep' && floatingTime !== 'local') {
-    throw new Error(`Invalid floatingTime "${floatingTime}": use "keep" or "local"`);
+    throw new UpdateFieldsError('INVALID_FLOATING_TIME', `Invalid floatingTime "${floatingTime}": use "keep" or "local"`);
   }
   const type = options.type === undefined ? undefined : componentType(options.type);
 
@@ -124,7 +125,7 @@ export function updateFields(
     jcalData = ICAL.parse(icalString);
     component = new ICAL.Component(jcalData);
   } catch (error: any) {
-    throw new Error(`Failed to parse iCal data: ${error.message}`);
+    throw new UpdateFieldsError('INVALID_ICALENDAR', `Failed to parse iCal data: ${error.message}`);
   }
 
   // 3. Find the component to update: the master of a VCALENDAR (see
@@ -135,7 +136,7 @@ export function updateFields(
   //    vCard, can only be a caller's mistake, so it is refused, not ignored.
   if (type && component.name !== 'vcalendar' && component.name !== type) {
     const name = String(component.name).toUpperCase();
-    throw new Error(component.name === 'vcard'
+    throw new UpdateFieldsError('COMPONENT_NOT_FOUND', component.name === 'vcard'
       ? `type "${type}" applies to an iCalendar object, but this is a VCARD`
       : `type "${type}" asks for a ${type.toUpperCase()}, but this object is a bare ${name}`);
   }
