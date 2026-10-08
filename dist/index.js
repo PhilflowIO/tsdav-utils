@@ -69,14 +69,22 @@ function fieldsOf(wall) {
 }
 var wallOfTime = (t) => wallOf(t.year, t.month, t.day, t.hour, t.minute, t.second);
 function zoneFrom(offsetAt) {
+  const fits = (wall) => [.../* @__PURE__ */ new Set([wall - offsetAt(wall - 2 * DAY), wall - offsetAt(wall + 2 * DAY)])].filter((utc) => utc + offsetAt(utc) === wall);
+  const toUtc = (wall) => {
+    const found = fits(wall);
+    return found.length ? Math.min(...found) : wall - offsetAt(wall - 2 * DAY);
+  };
   return {
     offsetAt,
     fromUtc: (utc) => utc + offsetAt(utc),
-    toUtc: (wall) => {
-      const before = offsetAt(wall - 2 * DAY);
-      const after = offsetAt(wall + 2 * DAY);
-      const fits = [wall - before, wall - after].filter((utc) => utc + offsetAt(utc) === wall);
-      return fits.length ? Math.min(...fits) : wall - before;
+    toUtc,
+    ambiguity: (wall) => {
+      const found = fits(wall).length;
+      return found === 0 ? "gap" : found > 1 ? "overlap" : null;
+    },
+    gapAlias: (utc) => {
+      const alias = utc + offsetAt(utc - 4 * 3600);
+      return alias !== utc + offsetAt(utc) && fits(alias).length === 0 && toUtc(alias) === utc ? alias : null;
     }
   };
 }
@@ -470,6 +478,10 @@ function parseRuleParts(raw) {
   if (ordinalDay && (!["MONTHLY", "YEARLY"].includes(freq) || parts.has("BYWEEKNO"))) {
     throw new Error('BYDAY with an ordinal ("1MO", "-1FR") is only allowed with FREQ=MONTHLY or FREQ=YEARLY, and not together with BYWEEKNO (RFC 5545 3.3.10)');
   }
+  const tooFar = (parts.get("BYDAY") ?? "").split(",").find((d) => Math.abs(Number(/^([+-]?\d+)/.exec(d)?.[1] ?? 0)) > 5);
+  if (tooFar && (freq === "MONTHLY" || parts.has("BYMONTH"))) {
+    throw new Error(`BYDAY: "${tooFar}" counts past the fifth weekday of a month; within a month the ordinal is 1 to 5 or -5 to -1 (RFC 5545 3.3.10)`);
+  }
   if (parts.has("BYSETPOS") && ![...parts.keys()].some((k) => k.startsWith("BY") && k !== "BYSETPOS")) {
     throw new Error("BYSETPOS needs another BYxxx part to select from (RFC 5545 3.3.10)");
   }
@@ -592,7 +604,7 @@ function convert(component, wall, from, to) {
   const utc = from === null ? wall : zone(component, from).toUtc(wall);
   return to === null ? utc : zone(component, to).fromUtc(utc);
 }
-function wallIn(component, stamp, frame) {
+function wallIn(component, stamp, frame, naming = false) {
   if (stamp.kind === "date" || stamp.kind === "floating" || frame.form === "date") {
     return stamp.wall;
   }
@@ -604,11 +616,22 @@ function wallIn(component, stamp, frame) {
   }
   const own = stamp.kind === "utc" ? null : stamp.tzid;
   const target = frame.form === "utc" ? null : frame.tzid;
-  return own === target ? stamp.wall : convert(component, stamp.wall, own, target);
+  if (own === target) {
+    return stamp.wall;
+  }
+  const utc = own === null ? stamp.wall : zone(component, own).toUtc(stamp.wall);
+  if (target === null) {
+    return utc;
+  }
+  const series = zone(component, target);
+  if (naming && series.gapAlias(utc) !== null) {
+    throw new Error(`it names ${icalForm(jcalOf(utc, "utc"))}, which in "${target}" is both a wall-clock time the DST change skips and the time just after it, so the occurrence it names cannot be told`);
+  }
+  return series.fromUtc(utc);
 }
 var byDays = (move) => move.from.form === "date" || move.to.form === "date";
-function moved(stamp, move) {
-  const wall = wallIn(move.component, stamp, move.from);
+function moved(stamp, move, naming = false) {
+  const wall = wallIn(move.component, stamp, move.from, naming);
   if (byDays(move) || stamp.kind === "date") {
     const days = (dayOf(wall) - dayOf(move.fromWall)) / DAY2;
     return (move.to.form === "date" ? dayOf(move.toWall) : move.toWall) + days * DAY2;
@@ -633,7 +656,17 @@ function moveInstants(property, move) {
   if (property.type === "period") {
     throw new Error("it holds periods, which updateFields does not move");
   }
-  writeInstants(property, propertyStamps(property).map((stamp) => moved(stamp, move)), move.to);
+  const stamps = propertyStamps(property);
+  if (property.type === "date" && move.from.form !== "date" && move.to.form !== "date") {
+    const shift = dayOf(move.toWall) - dayOf(move.fromWall);
+    if (move.toWall - move.fromWall !== shift) {
+      throw new Error("it is a date, a whole day, which cannot move by the time of day DTSTART moved");
+    }
+    writeInstants(property, stamps.map((stamp) => stamp.wall + shift), { form: "date" });
+    return;
+  }
+  const naming = property.name === "recurrence-id" || property.name === "exdate";
+  writeInstants(property, stamps.map((stamp) => moved(stamp, move, naming)), move.to);
 }
 function wallOut(component, wall, frame, own) {
   if (own.kind === "floating" || own.kind === "date" || frame.form === "floating" || frame.form === "date") {
@@ -664,13 +697,51 @@ function moveOverrideTimes(override, before, after, move) {
     }
   }
 }
+var RULE_KEYS = /* @__PURE__ */ new Set([
+  "freq",
+  "until",
+  "count",
+  "interval",
+  "wkst",
+  "bysecond",
+  "byminute",
+  "byhour",
+  "byday",
+  "bymonthday",
+  "byyearday",
+  "byweekno",
+  "bymonth",
+  "bysetpos"
+]);
+function unknownRuleParts(property) {
+  const raw = property.toJSON()[3];
+  return raw && typeof raw === "object" ? Object.keys(raw).filter((key) => !RULE_KEYS.has(key.toLowerCase())).map((key) => key.toUpperCase()) : [];
+}
 function moveUntil(property, move) {
+  const unknown = unknownRuleParts(property);
+  if (unknown.length) {
+    throw new Error(`the rule has ${unknown.join(", ")}, which updateFields would lose rewriting it`);
+  }
   const recur = property.getFirstValue();
   const until = stampOf(recur.until.toString());
+  if (move.from.form === "tzid" && until.kind === "utc") {
+    const old = zone(move.component, move.from.tzid);
+    if (old.gapAlias(until.wall) !== null || old.ambiguity(old.fromUtc(until.wall))) {
+      throw new Error(`it lies at the DST change in "${move.from.tzid}", where the wall clock and the order of instants part, so moved on the wall clock it could let one occurrence too many or too few through`);
+    }
+  }
+  if (until.kind === "date" !== (move.from.form === "date")) {
+    throw new Error(`UNTIL is a ${until.kind === "date" ? "date" : "date-time"} next to a ${move.from.form === "date" ? "date" : "date-time"} DTSTART, so where it ends the series is not defined`);
+  }
   const wall = move.from.form !== "date" && move.to.form === "date" ? dayOf(move.toWall) + Math.floor((wallIn(move.component, until, move.from) - move.fromWall) / DAY2) * DAY2 : moved(until, move);
   if (move.to.form === "date") {
     recur.until = import_ical3.default.Time.fromDateString(jcalOf(wall, move.to));
   } else if (move.to.form === "tzid") {
+    const target = zone(move.component, move.to.tzid);
+    const ambiguity = target.ambiguity(wall) ?? (target.gapAlias(target.toUtc(wall)) !== null ? "gap" : null);
+    if (ambiguity) {
+      throw new Error(`moved, it would be ${icalForm(jcalOf(wall, "floating"))} in "${move.to.tzid}", at the DST change, where ${ambiguity === "gap" ? "the wall clock skips times" : "the wall clock shows an hour twice"} and its order and the order of instants part`);
+    }
     recur.until = import_ical3.default.Time.fromDateTimeString(
       jcalOf(convert(move.component, wall, move.to.tzid, null), "utc")
     );
@@ -709,6 +780,8 @@ var SeriesTooSparse = class extends Error {
 };
 var HorizonReached = class extends Error {
 };
+var SeriesUnverifiable = class extends Error {
+};
 function bounded(iterator, budget, recur, horizon) {
   const cost = stepCost(recur);
   const it = iterator;
@@ -732,7 +805,7 @@ function bounded(iterator, budget, recur, horizon) {
 function expand(master, until) {
   const start = startOf(master);
   if (!start) {
-    return null;
+    throw new SeriesUnverifiable("the series has no DTSTART");
   }
   const { frame } = start;
   const day = frame.form === "date";
@@ -768,41 +841,34 @@ function expand(master, until) {
     }
   } catch (error) {
     if (error instanceof SeriesTooSparse) {
-      throw error;
+      throw new SeriesTooSparse(walls.size > 200 ? `the override or EXDATE furthest ahead (${icalForm(jcalOf(until, frame))}) lies too far ahead to check within the work limit` : error.message);
     }
-    return null;
+    throw new SeriesUnverifiable(error.message);
   }
   return walls;
 }
-function occurrences(master, stamps) {
+function occurrences(master, stamps, labels) {
   const frame = frameOf(master);
   if (!frame) {
-    return stamps.map(() => void 0);
+    throw new SeriesUnverifiable("the series has no DTSTART");
   }
-  const targets = stamps.map((stamp) => {
-    if (!stamp) {
-      return void 0;
-    }
+  const targets = stamps.map((stamp, i) => {
     try {
-      const wall = wallIn(master, stamp, frame);
+      const wall = wallIn(master, stamp, frame, true);
       return frame.form === "date" ? dayOf(wall) : wall;
-    } catch {
-      return void 0;
+    } catch (error) {
+      throw new SeriesUnverifiable(`${labels[i]}: ${error.message}`);
     }
   });
-  const known = targets.filter((t) => t !== void 0);
-  const walls = known.length ? expand(master, Math.max(...known)) : null;
-  if (!walls) {
-    return stamps.map(() => void 0);
-  }
-  return targets.map((t) => t === void 0 ? void 0 : walls.has(t));
+  const walls = expand(master, Math.max(...targets));
+  return targets.map((t) => walls.has(t));
 }
 function referenceStamps(refs) {
   return refs.map((ref) => {
     try {
       return propertyStamps(ref.property)[ref.index];
-    } catch {
-      return void 0;
+    } catch (error) {
+      throw new SeriesUnverifiable(`${ref.label}: ${error.message}`);
     }
   });
 }
@@ -831,6 +897,9 @@ var NO_SERIES = { finish() {
 } };
 function beginSeriesEdit(calendar, master, written) {
   const failClosed = (error) => {
+    if (error instanceof SeriesUnverifiable) {
+      return new Error(`Cannot check that the overrides and EXDATEs still name occurrences of the series: ${error.message}. Rewrite the whole iCalendar object instead`);
+    }
     if (!(error instanceof SeriesTooSparse)) {
       return error;
     }
@@ -879,7 +948,7 @@ function startSeriesEdit(calendar, master, written) {
   ];
   const shaping = SHAPING.filter((name) => written.has(name));
   const ruleWritten = written.has("rrule") || written.has("rdate");
-  const before = ruleWritten && references.length ? occurrences(master, referenceStamps(references)) : [];
+  const before = ruleWritten && references.length ? occurrences(master, referenceStamps(references), references.map((ref) => ref.label)) : [];
   const watched = references.filter((_, i) => before[i] === true);
   const start = written.has("dtstart") ? startOf(master) : null;
   const keepsRule = !["rrule", "exrule", "rdate"].some((name) => written.has(name));
@@ -888,6 +957,13 @@ function startSeriesEdit(calendar, master, written) {
       const now = start && startOf(master);
       if (start && now && start.text !== now.text) {
         const move = { component: master, from: start.frame, fromWall: start.wall, to: now.frame, toWall: now.wall };
+        if (move.from.form !== "date" && move.to.form === "date") {
+          checkDatesOnly(master, move, [
+            ...exdates,
+            ...rdates,
+            ...overrides.map((c) => c.getFirstProperty("recurrence-id"))
+          ]);
+        }
         for (const property of rules) {
           const upper = property.name.toUpperCase();
           const until = property.getFirstValue().until.toICALString();
@@ -923,7 +999,7 @@ function startSeriesEdit(calendar, master, written) {
       if (!watched.length) {
         return;
       }
-      const after = occurrences(master, referenceStamps(watched));
+      const after = occurrences(master, referenceStamps(watched), watched.map((ref) => ref.label));
       const lost = watched.filter((_, i) => after[i] === false);
       if (lost.length) {
         const what = shaping.map((n) => n.toUpperCase()).join(" and ");
@@ -988,13 +1064,26 @@ function checkMove(master, move, from, to) {
       continue;
     }
     const recur = property.getFirstValue();
-    const why = moveBreaksRule(recur, move);
+    const unknown = unknownRuleParts(property);
+    const why = unknown.length ? `has ${unknown.join(", ")}, whose effect on a move updateFields cannot tell` : moveBreaksRule(recur, move);
     if (!why) {
       continue;
     }
     const upper = property.name.toUpperCase();
     const suggestion = suggestedRule(recur, move.toWall, move.to.form !== "date");
     throw new Error(`Moving DTSTART (${from} to ${to}) does not move the whole series: ${property.toICALString()} ${why}, so the moved series would not have the same occurrences, each moved. Give ${upper} in the same call to fit the new start${suggestion ? ` (e.g. ${upper} "${suggestion}")` : ""}; to start the series later without moving it, give RRULE, UNTIL and EXDATE explicitly, or rewrite the whole iCalendar object`);
+  }
+}
+function checkDatesOnly(master, move, properties) {
+  const timeOfDay = move.fromWall - dayOf(move.fromWall);
+  for (const property of properties) {
+    for (const stamp of propertyStamps(property)) {
+      const wall = stamp.kind === "date" ? null : wallIn(master, stamp, move.from, property.name !== "rdate");
+      if (wall === null || wall - dayOf(wall) !== timeOfDay) {
+        const line = property.toICALString();
+        throw new Error(`DTSTART changed to a date, and ${line} is ${wall === null ? "a date already" : "not at the series' time of day"}, so as a date it could name an occurrence it did not name before: give ${property.name === "recurrence-id" ? "the override" : property.name.toUpperCase()} as dates by rewriting the whole iCalendar object`);
+      }
+    }
   }
 }
 

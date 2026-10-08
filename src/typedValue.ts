@@ -501,6 +501,14 @@ function parseRuleParts(raw: string): Map<string, string> {
     throw new Error('BYDAY with an ordinal ("1MO", "-1FR") is only allowed with FREQ=MONTHLY or ' +
       'FREQ=YEARLY, and not together with BYWEEKNO (RFC 5545 3.3.10)');
   }
+  // Within a month a weekday occurs at most five times (RFC 5545 3.3.10:
+  // MONTHLY, or YEARLY with BYMONTH); ical.js refuses "6MO" only when it expands
+  const tooFar = (parts.get('BYDAY') ?? '').split(',')
+    .find((d) => Math.abs(Number(/^([+-]?\d+)/.exec(d)?.[1] ?? 0)) > 5);
+  if (tooFar && (freq === 'MONTHLY' || parts.has('BYMONTH'))) {
+    throw new Error(`BYDAY: "${tooFar}" counts past the fifth weekday of a month; within a month the ordinal is ` +
+      '1 to 5 or -5 to -1 (RFC 5545 3.3.10)');
+  }
   if (parts.has('BYSETPOS') && ![...parts.keys()].some((k) => k.startsWith('BY') && k !== 'BYSETPOS')) {
     throw new Error('BYSETPOS needs another BYxxx part to select from (RFC 5545 3.3.10)');
   }

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import ICAL from 'ical.js';
 import { updateFields } from '../src/updateFields';
 import { expansionWork } from '../src/series';
@@ -112,6 +112,39 @@ describe('a moved series keeps every occurrence on the wall clock, across DST ch
   });
 });
 
+describe('a value in UTC naming an occurrence in the DST gap is refused, never moved wrong', () => {
+  // On 29 Mar 2026 Berlin skips 02:00-03:00; an occurrence at 02:30 is read as
+  // 03:30 CEST (RFC 5545 3.3.5), 01:30Z, the same instant as a real 03:30. An
+  // EXDATE or RECURRENCE-ID given as that instant cannot tell the two apart.
+  let seed = 329;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const int = (a: number, b: number) => a + Math.floor(rnd() * (b - a + 1));
+  const p2 = (n: number) => String(n).padStart(2, '0');
+
+  it('holds for 100 seeded series through the spring change', () => {
+    for (let i = 0; i < 100; i++) {
+      const minute = int(0, 59);
+      const weeksBefore = int(1, 4);
+      const freq = rnd() < 0.5 ? 'DAILY' : 'WEEKLY';
+      const first = Date.UTC(2026, 2, 29 - (freq === 'DAILY' ? weeksBefore : 7 * weeksBefore), 2, minute) / 1000;
+      const d = new Date(first * 1000);
+      const dtstart = `${d.getUTCFullYear()}${p2(d.getUTCMonth() + 1)}${p2(d.getUTCDate())}T02${p2(minute)}00`;
+      const instant = `20260329T01${p2(minute)}00Z`;
+      const named = rnd() < 0.5
+        ? [`EXDATE:${instant}`]
+        : [];
+      const override = named.length ? [] : ['BEGIN:VEVENT', 'UID:g', 'DTSTAMP:20260101T000000Z',
+        `RECURRENCE-ID:${instant}`, 'DTSTART:20260329T100000Z', 'END:VEVENT'];
+      const ical = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//EN', 'BEGIN:VEVENT', 'UID:g', 'DTSTAMP:20260101T000000Z',
+        `DTSTART;TZID=Europe/Berlin:${dtstart}`, `RRULE:FREQ=${freq};COUNT=${weeksBefore + 4}`, ...named, 'END:VEVENT',
+        ...override, 'END:VCALENDAR', ''].join('\r\n');
+      const moved = new Date((first + int(0, 3) * 86400 + int(1, 6) * 3600) * 1000).toISOString().slice(0, 19);
+      expect(() => updateFields(ical, { DTSTART: moved }), `case ${i}\n${ical}`)
+        .toThrow(/both a wall-clock time the DST change skips and the time just after it/);
+    }
+  });
+});
+
 describe('a move is accepted only where the rule provably moves with it', () => {
   // The oracle: ical.js' own expansion of the series before and after, far
   // beyond anything updateFields expands (30 years, 3000 occurrences), on a
@@ -139,9 +172,29 @@ describe('a move is accepted only where the rule provably moves with it', () => 
   };
   const wallOfTime = (t: ICAL.Time) => Date.UTC(t.year, t.month - 1, t.day, t.hour, t.minute, t.second) / 1000;
 
-  /** the occurrences of DTSTART + RRULE by ical.js, up to `until` or LIMIT; complete when the rule ended first */
-  const oracle = (dtstart: ICAL.Time, rule: ICAL.Recur, until: number) => {
-    const it = rule.iterator(dtstart);
+  // ical.js searches a sparse rule without end; the oracle stops after a fixed
+  // number of candidates and the case is skipped, not passed
+  class OracleGaveUp extends Error {}
+  const proto = (ICAL as unknown as { RecurIterator: { prototype: Record<string, (...a: unknown[]) => unknown> } })
+    .RecurIterator.prototype;
+  const check_contracting_rules = proto.check_contracting_rules;
+  let candidates = 0;
+  beforeAll(() => {
+    proto.check_contracting_rules = function (this: unknown, ...args: unknown[]) {
+      if (++candidates > 3_000_000) {
+        throw new OracleGaveUp();
+      }
+      return check_contracting_rules.apply(this, args);
+    };
+  });
+  afterAll(() => {
+    proto.check_contracting_rules = check_contracting_rules;
+  });
+
+  /** the occurrences of the event by ical.js (RRULE, RDATE, EXDATE), up to `until` or LIMIT; complete when they ended first */
+  const oracle = (vevent: ICAL.Component, until: number) => {
+    candidates = 0;
+    const it = new ICAL.Event(vevent).iterator();
     const walls: number[] = [];
     let next: ICAL.Time | null;
     while ((next = it.next())) {
@@ -153,26 +206,26 @@ describe('a move is accepted only where the rule provably moves with it', () => 
     }
     return { walls, complete: true, last: Infinity };
   };
-  const seriesOf = (ical: string) => {
-    const vevent = new ICAL.Component(ICAL.parse(ical)).getFirstSubcomponent('vevent')!;
-    return { dtstart: vevent.getFirstPropertyValue('dtstart') as ICAL.Time, rule: vevent.getFirstPropertyValue('rrule') as ICAL.Recur };
-  };
-  const event = (dtstart: number, date: boolean, rule: string) => ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//EN',
-    'BEGIN:VEVENT', 'UID:s', 'DTSTAMP:20260101T000000Z', 'SUMMARY:M',
+  const veventOf = (ical: string) => new ICAL.Component(ICAL.parse(ical)).getFirstSubcomponent('vevent')!;
+  const event = (dtstart: number, date: boolean, rule: string, extra: string[] = []) => ['BEGIN:VCALENDAR', 'VERSION:2.0',
+    'PRODID:-//t//EN', 'BEGIN:VEVENT', 'UID:s', 'DTSTAMP:20260101T000000Z', 'SUMMARY:M',
     date ? `DTSTART;VALUE=DATE:${fmt(dtstart, true)}` : `DTSTART:${fmt(dtstart, false)}`,
-    `RRULE:${rule}`, 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+    `RRULE:${rule}`, ...extra, 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
 
   /**
    * Move a series and compare with the oracle. Returns 'refused' or
    * 'accepted'; an accepted move whose occurrences differ fails the test.
    */
-  const check = (start: number, date: boolean, rule: string, to: number, toDate: boolean, label: string) => {
-    const before = event(start, date, rule);
+  const check = (start: number, date: boolean, rule: string, to: number, toDate: boolean, label: string,
+    extra: string[] = []) => {
+    const before = event(start, date, rule, extra);
     let after: string;
     try {
       after = updateFields(before, { DTSTART: input(to, toDate) });
     } catch (error) {
-      expect((error as Error).message, label).toMatch(/does not move the whole series/);
+      // a refusal names the reason: a rule that does not follow the move, or
+      // a value that cannot move with a meaning kept
+      expect((error as Error).message, label).toMatch(/does not move the whole series|^DTSTART changed/);
       return 'refused';
     }
     const dayOf = (w: number) => Math.floor(w / D) * D;
@@ -180,13 +233,21 @@ describe('a move is accepted only where the rule provably moves with it', () => 
     const move = (w: number) => toDate ? dayOf(w) + days * D
       : date ? w + days * D + (to - dayOf(to))
       : w + (to - start);
-    const old = seriesOf(before);
-    const moved = seriesOf(after);
-    const a = oracle(old.dtstart, old.rule, start + YEARS_30);
-    const b = oracle(moved.dtstart, moved.rule, to + YEARS_30);
+    let a: ReturnType<typeof oracle>;
+    let b: ReturnType<typeof oracle>;
+    try {
+      a = oracle(veventOf(before), start + YEARS_30);
+      b = oracle(veventOf(after), to + YEARS_30);
+    } catch (error) {
+      if (error instanceof OracleGaveUp) {
+        return 'skipped';
+      }
+      throw error;
+    }
     const want = [...new Set(a.walls.map(move))];
     const horizon = Math.min(a.complete ? Infinity : move(a.last), b.complete ? Infinity : b.last);
-    expect(b.walls.filter((w) => w <= horizon).map((w) => fmt(w, toDate)), `${label}\n${before}\n${after}`)
+    // an RDATE on an occurrence of the rule comes out twice; occurrences are a set
+    expect([...new Set(b.walls)].filter((w) => w <= horizon).map((w) => fmt(w, toDate)), `${label}\n${before}\n${after}`)
       .toEqual(want.filter((w) => w <= horizon).map((w) => fmt(w, toDate)));
     return 'accepted';
   };
@@ -210,6 +271,7 @@ describe('a move is accepted only where the rule provably moves with it', () => 
 
   it('every accepted random move keeps the occurrences, each moved (2000 series)', () => {
     let accepted = 0;
+    let skipped = 0;
     for (let i = 0; i < 2000; i++) {
       const date = rnd() < 0.2;
       const start = Date.UTC(2026, int(0, 11), int(1, 28)) / 1000 + (date ? 0 : int(0, 23) * 3600 + pick([0, 15, 30, 45]) * 60);
@@ -234,11 +296,30 @@ describe('a move is accepted only where the rule provably moves with it', () => 
       if (to === start && toDate === date) {
         continue;
       }
-      if (check(start, date, rule, to, toDate, `case ${i}: ${rule} by ${kind}`) === 'accepted') {
-        accepted++;
+      // the shapes review found moved without a kept meaning: an UNTIL of the
+      // other value type, RDATE and EXDATE of whole days next to a timed
+      // series, and rule parts RFC 5545 does not define
+      const extra: string[] = [];
+      const shape = rnd();
+      if (shape < 0.08 && end === 'until' && !date) {
+        rule = rule.replace(/UNTIL=(\d{8})T\d{6}/, 'UNTIL=$1');
+      } else if (shape < 0.16 && !date) {
+        extra.push(`RDATE;VALUE=DATE:${fmt(start + int(1, 60) * D, true)}`);
+      } else if (shape < 0.24 && !date) {
+        extra.push(`EXDATE;VALUE=DATE:${fmt(start + int(1, 20) * D, true)}`);
+      } else if (shape < 0.3) {
+        rule += pick([';X-FOO=1', ';RSCALE=GREGORIAN;SKIP=FORWARD', ';BYEASTER=0']);
+      } else if (shape < 0.45) {
+        extra.push(`EXDATE${date ? ';VALUE=DATE' : ''}:${fmt(start + int(1, 20) * D, date)}`,
+          `RDATE${date ? ';VALUE=DATE' : ''}:${fmt(start + int(1, 20) * D + (date ? 0 : int(1, 5) * 3600), date)}`);
       }
+      const result = check(start, date, rule, to, toDate, `case ${i}: ${rule} ${extra.join(' ')} by ${kind}`, extra);
+      accepted += Number(result === 'accepted');
+      skipped += Number(result === 'skipped');
     }
-    console.log(`random rules and moves: ${accepted} of 2000 accepted, each checked against ical.js`);
+    console.log(`random rules and moves: ${accepted} of 2000 accepted, each checked against ical.js ` +
+      `(${skipped} too sparse for the oracle to expand)`);
+    expect(skipped).toBeLessThan(40);
     expect(accepted).toBeGreaterThan(500);
   });
 

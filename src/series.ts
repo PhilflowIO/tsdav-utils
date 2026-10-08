@@ -101,8 +101,10 @@ function convert(component: ICAL.Component, wall: number, from: string | null, t
  * A value's wall clock in a series' frame: as it is when it already lives
  * there (or has no zone), converted when it is in UTC or another zone. Against
  * an all-day series a timed value keeps its own wall clock, whose date counts.
+ * `naming` marks a value that names an occurrence (RECURRENCE-ID, EXDATE),
+ * which a UTC instant at the end of a DST gap cannot do unambiguously.
  */
-function wallIn(component: ICAL.Component, stamp: Stamp, frame: Anchor): number {
+function wallIn(component: ICAL.Component, stamp: Stamp, frame: Anchor, naming = false): number {
   if (stamp.kind === 'date' || stamp.kind === 'floating' || frame.form === 'date') {
     return stamp.wall;
   }
@@ -114,7 +116,22 @@ function wallIn(component: ICAL.Component, stamp: Stamp, frame: Anchor): number 
   }
   const own = stamp.kind === 'utc' ? null : stamp.tzid!;
   const target = frame.form === 'utc' ? null : frame.tzid;
-  return own === target ? stamp.wall : convert(component, stamp.wall, own, target);
+  if (own === target) {
+    return stamp.wall;
+  }
+  const utc = own === null ? stamp.wall : zone(component, own).toUtc(stamp.wall);
+  if (target === null) {
+    return utc;
+  }
+  // An occurrence on a wall clock the DST change skips is read past the gap
+  // (RFC 5545 3.3.5), at the same instant as the first wall clock after it:
+  // given as that instant, the value cannot tell which of the two it names
+  const series = zone(component, target);
+  if (naming && series.gapAlias(utc) !== null) {
+    throw new Error(`it names ${icalForm(jcalOf(utc, 'utc'))}, which in "${target}" is both a wall-clock time ` +
+      'the DST change skips and the time just after it, so the occurrence it names cannot be told');
+  }
+  return series.fromUtc(utc);
 }
 
 /** The DTSTART of a series before and after a write, each in its own frame */
@@ -136,8 +153,8 @@ const byDays = (move: Move) => move.from.form === 'date' || move.to.form === 'da
  * an all-day/timed switch the distance is counted in days: a value keeps its
  * day, and a timed one takes the new DTSTART's time of day.
  */
-function moved(stamp: Stamp, move: Move): number {
-  const wall = wallIn(move.component, stamp, move.from);
+function moved(stamp: Stamp, move: Move, naming = false): number {
+  const wall = wallIn(move.component, stamp, move.from, naming);
   if (byDays(move) || stamp.kind === 'date') {
     const days = (dayOf(wall) - dayOf(move.fromWall)) / DAY;
     return (move.to.form === 'date' ? dayOf(move.toWall) : move.toWall) + days * DAY;
@@ -165,7 +182,20 @@ function moveInstants(property: ICAL.Property, move: Move) {
   if (property.type === 'period') {
     throw new Error('it holds periods, which updateFields does not move');
   }
-  writeInstants(property, propertyStamps(property).map((stamp) => moved(stamp, move)), move.to);
+  const stamps = propertyStamps(property);
+  if (property.type === 'date' && move.from.form !== 'date' && move.to.form !== 'date') {
+    // A date next to a timed series (an RDATE or EXDATE of a whole day) stays
+    // a date, moved by the days the series moved; a whole day cannot move by
+    // a time of day
+    const shift = dayOf(move.toWall) - dayOf(move.fromWall);
+    if (move.toWall - move.fromWall !== shift) {
+      throw new Error('it is a date, a whole day, which cannot move by the time of day DTSTART moved');
+    }
+    writeInstants(property, stamps.map((stamp) => stamp.wall + shift), { form: 'date' });
+    return;
+  }
+  const naming = property.name === 'recurrence-id' || property.name === 'exdate';
+  writeInstants(property, stamps.map((stamp) => moved(stamp, move, naming)), move.to);
 }
 
 /**
@@ -213,14 +243,53 @@ function moveOverrideTimes(override: ICAL.Component, before: Stamp, after: Stamp
   }
 }
 
+/** The rule parts RFC 5545 3.3.10 defines, as ical.js keys them */
+const RULE_KEYS = new Set(['freq', 'until', 'count', 'interval', 'wkst', 'bysecond', 'byminute', 'byhour',
+  'byday', 'bymonthday', 'byyearday', 'byweekno', 'bymonth', 'bysetpos']);
+
+/**
+ * The parts of a RECUR property RFC 5545 3.3.10 does not define (X-names,
+ * BYEASTER, RFC 7529 RSCALE and SKIP), read from the property as parsed:
+ * ical.js keeps them there, but drops them once the rule is written again.
+ */
+function unknownRuleParts(property: ICAL.Property): string[] {
+  const raw = (property.toJSON() as unknown[])[3];
+  return raw && typeof raw === 'object'
+    ? Object.keys(raw).filter((key) => !RULE_KEYS.has(key.toLowerCase())).map((key) => key.toUpperCase())
+    : [];
+}
+
 /**
  * Move a rule's UNTIL. UNTIL is a date next to an all-day DTSTART, local time
  * next to a floating one and UTC otherwise (RFC 5545 3.3.10), so a wall clock
  * in a TZID is converted to UTC with the zone's rules.
  */
 function moveUntil(property: ICAL.Property, move: Move) {
+  const unknown = unknownRuleParts(property);
+  if (unknown.length) {
+    // ical.js keeps them only as long as the rule is not written again
+    throw new Error(`the rule has ${unknown.join(', ')}, which updateFields would lose rewriting it`);
+  }
   const recur = property.getFirstValue() as ICAL.Recur;
   const until = stampOf(recur.until!.toString());
+  if (move.from.form === 'tzid' && until.kind === 'utc') {
+    // Near a DST change wall-clock order and the order of instants part: an
+    // occurrence on a skipped wall clock (read past the gap) can lie after an
+    // UNTIL that is later on the wall clock, and an UNTIL in the repeated hour
+    // can lie after an occurrence later on the wall clock. Moved on the wall
+    // clock, such an UNTIL would let one occurrence too many or too few through.
+    const old = zone(move.component, move.from.tzid);
+    if (old.gapAlias(until.wall) !== null || old.ambiguity(old.fromUtc(until.wall))) {
+      throw new Error(`it lies at the DST change in "${move.from.tzid}", where the wall clock and the order of ` +
+        'instants part, so moved on the wall clock it could let one occurrence too many or too few through');
+    }
+  }
+  if ((until.kind === 'date') !== (move.from.form === 'date')) {
+    // RFC 5545 3.3.10 ties UNTIL's type to DTSTART's; a date UNTIL next to a
+    // timed DTSTART ends at a time of day each client reads differently
+    throw new Error(`UNTIL is a ${until.kind === 'date' ? 'date' : 'date-time'} next to a ` +
+      `${move.from.form === 'date' ? 'date' : 'date-time'} DTSTART, so where it ends the series is not defined`);
+  }
   // Timed to all-day: the day of the last occurrence UNTIL lets through, which
   // is the day before UNTIL's when UNTIL falls earlier in the day than DTSTART
   const wall = move.from.form !== 'date' && move.to.form === 'date'
@@ -229,6 +298,15 @@ function moveUntil(property: ICAL.Property, move: Move) {
   if (move.to.form === 'date') {
     recur.until = ICAL.Time.fromDateString(jcalOf(wall, move.to));
   } else if (move.to.form === 'tzid') {
+    const target = zone(move.component, move.to.tzid);
+    const ambiguity = target.ambiguity(wall) ?? (target.gapAlias(target.toUtc(wall)) !== null ? 'gap' : null);
+    if (ambiguity) {
+      // in a gap or an overlap the wall clock names no single instant, so the
+      // moved UNTIL could let one occurrence too many or too few through
+      throw new Error(`moved, it would be ${icalForm(jcalOf(wall, 'floating'))} in "${move.to.tzid}", at the DST ` +
+        `change, where ${ambiguity === 'gap' ? 'the wall clock skips times' : 'the wall clock shows an hour twice'} ` +
+        'and its order and the order of instants part');
+    }
     recur.until = ICAL.Time.fromDateTimeString(
       jcalOf(convert(move.component, wall, move.to.tzid, null), 'utc'));
   } else {
@@ -281,6 +359,9 @@ class SeriesTooSparse extends Error {}
 /** The iterator has passed the furthest wall clock the expansion needs */
 class HorizonReached extends Error {}
 
+/** A check that cannot be made (a rule ical.js cannot expand, a zone that cannot be read): it fails closed */
+class SeriesUnverifiable extends Error {}
+
 /**
  * Bound a RecurIterator. next() has no bound of its own; every candidate it
  * tests passes check_contracting_rules once, so that is where the work is
@@ -315,14 +396,14 @@ function bounded(iterator: ICAL.RecurIterator, budget: { left: number }, recur: 
  * The occurrences of the series as it stands up to `until` (a wall clock of the
  * series' frame) — DTSTART, the instances of each RRULE and the RDATEs (EXDATE
  * does not count: an override of an excluded instance still names it), on the
- * series' wall clock with UNTIL read on it too. Null where it cannot be told
- * (a zone that cannot be resolved); throws SeriesTooSparse when the budget
- * runs out first.
+ * series' wall clock with UNTIL read on it too. Throws SeriesTooSparse when
+ * the budget runs out first, and SeriesUnverifiable when it cannot be told at
+ * all (a rule ical.js cannot expand, a zone that cannot be read).
  */
-function expand(master: ICAL.Component, until: number): Set<number> | null {
+function expand(master: ICAL.Component, until: number): Set<number> {
   const start = startOf(master);
   if (!start) {
-    return null;
+    throw new SeriesUnverifiable('the series has no DTSTART');
   }
   const { frame } = start;
   const day = frame.form === 'date';
@@ -361,37 +442,37 @@ function expand(master: ICAL.Component, until: number): Set<number> | null {
     }
   } catch (error) {
     if (error instanceof SeriesTooSparse) {
-      throw error;
+      // a dense rule that runs out reaches far: the reason is the distance
+      throw new SeriesTooSparse(walls.size > 200
+        ? `the override or EXDATE furthest ahead (${icalForm(jcalOf(until, frame))}) lies too far ahead to check ` +
+          'within the work limit'
+        : error.message);
     }
-    return null;
+    throw new SeriesUnverifiable((error as Error).message);
   }
   return walls;
 }
 
-/** Which stamps name an occurrence of the series; undefined where it cannot be told */
-function occurrences(master: ICAL.Component, stamps: (Stamp | undefined)[]): (boolean | undefined)[] {
+/**
+ * Which stamps name an occurrence of the series. Where that cannot be told the
+ * check fails closed: SeriesUnverifiable, with the reason.
+ */
+function occurrences(master: ICAL.Component, stamps: Stamp[], labels: string[]): boolean[] {
   const frame = frameOf(master);
   if (!frame) {
-    return stamps.map(() => undefined);
+    throw new SeriesUnverifiable('the series has no DTSTART');
   }
-  const targets = stamps.map((stamp) => {
-    if (!stamp) {
-      return undefined;
-    }
+  const targets = stamps.map((stamp, i) => {
     try {
-      const wall = wallIn(master, stamp, frame);
+      const wall = wallIn(master, stamp, frame, true);
       return frame.form === 'date' ? dayOf(wall) : wall;
-    } catch {
-      return undefined;
+    } catch (error) {
+      throw new SeriesUnverifiable(`${labels[i]}: ${(error as Error).message}`);
     }
   });
-  const known = targets.filter((t): t is number => t !== undefined);
   // no override or EXDATE lies beyond the furthest one, so nothing past it is needed
-  const walls = known.length ? expand(master, Math.max(...known)) : null;
-  if (!walls) {
-    return stamps.map(() => undefined);
-  }
-  return targets.map((t) => t === undefined ? undefined : walls.has(t));
+  const walls = expand(master, Math.max(...targets));
+  return targets.map((t) => walls.has(t));
 }
 
 /** An override or exclusion that has to keep naming an occurrence */
@@ -402,12 +483,12 @@ interface Reference {
   label: string;
 }
 
-function referenceStamps(refs: Reference[]): (Stamp | undefined)[] {
+function referenceStamps(refs: Reference[]): Stamp[] {
   return refs.map((ref) => {
     try {
       return propertyStamps(ref.property)[ref.index];
-    } catch {
-      return undefined;
+    } catch (error) {
+      throw new SeriesUnverifiable(`${ref.label}: ${(error as Error).message}`);
     }
   });
 }
@@ -455,6 +536,10 @@ const NO_SERIES = { finish() {} };
 export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component, written: Set<string>) {
   // A check that cannot be completed fails closed, with what the caller can do
   const failClosed = (error: unknown) => {
+    if (error instanceof SeriesUnverifiable) {
+      return new Error(`Cannot check that the overrides and EXDATEs still name occurrences of the series: ` +
+        `${error.message}. Rewrite the whole iCalendar object instead`);
+    }
     if (!(error instanceof SeriesTooSparse)) {
       return error;
     }
@@ -520,7 +605,8 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
   const ruleWritten = written.has('rrule') || written.has('rdate');
   // Only what names an occurrence now has to keep naming one; an override that
   // was already stale is not this call's doing
-  const before = ruleWritten && references.length ? occurrences(master, referenceStamps(references)) : [];
+  const before = ruleWritten && references.length
+    ? occurrences(master, referenceStamps(references), references.map((ref) => ref.label)) : [];
   const watched = references.filter((_, i) => before[i] === true);
   const start = written.has('dtstart') ? startOf(master) : null;
   // Without a new rule the series has to come out the same, moved
@@ -531,6 +617,10 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
       const now = start && startOf(master);
       if (start && now && start.text !== now.text) {
         const move: Move = { component: master, from: start.frame, fromWall: start.wall, to: now.frame, toWall: now.wall };
+        if (move.from.form !== 'date' && move.to.form === 'date') {
+          checkDatesOnly(master, move, [...exdates, ...rdates,
+            ...overrides.map((c) => c.getFirstProperty('recurrence-id')!)]);
+        }
         for (const property of rules) {
           const upper = property.name.toUpperCase();
           const until = (property.getFirstValue() as ICAL.Recur).until!.toICALString();
@@ -570,7 +660,7 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
       if (!watched.length) {
         return;
       }
-      const after = occurrences(master, referenceStamps(watched));
+      const after = occurrences(master, referenceStamps(watched), watched.map((ref) => ref.label));
       const lost = watched.filter((_, i) => after[i] === false);
       if (lost.length) {
         const what = shaping.map((n) => n.toUpperCase()).join(' and ');
@@ -673,7 +763,10 @@ function checkMove(master: ICAL.Component, move: Move, from: string, to: string)
       continue;
     }
     const recur = property.getFirstValue() as ICAL.Recur;
-    const why = moveBreaksRule(recur, move);
+    const unknown = unknownRuleParts(property);
+    const why = unknown.length
+      ? `has ${unknown.join(', ')}, whose effect on a move updateFields cannot tell`
+      : moveBreaksRule(recur, move);
     if (!why) {
       continue;
     }
@@ -683,5 +776,29 @@ function checkMove(master: ICAL.Component, move: Move, from: string, to: string)
       `${why}, so the moved series would not have the same occurrences, each moved. Give ${upper} in the same ` +
       `call to fit the new start${suggestion ? ` (e.g. ${upper} "${suggestion}")` : ''}; to start the series ` +
       'later without moving it, give RRULE, UNTIL and EXDATE explicitly, or rewrite the whole iCalendar object');
+  }
+}
+
+/**
+ * Before a timed series becomes all-day: each RECURRENCE-ID, EXDATE and RDATE
+ * becomes the date it falls on, which only keeps its meaning where it sits at
+ * the series' time of day. One at another time (a stale override, an extra
+ * RDATE in the evening) or a date already would become the date of an
+ * occurrence it never named, or fall together with another value; so that
+ * throws.
+ */
+function checkDatesOnly(master: ICAL.Component, move: Move, properties: ICAL.Property[]) {
+  const timeOfDay = move.fromWall - dayOf(move.fromWall);
+  for (const property of properties) {
+    for (const stamp of propertyStamps(property)) {
+      const wall = stamp.kind === 'date' ? null : wallIn(master, stamp, move.from, property.name !== 'rdate');
+      if (wall === null || wall - dayOf(wall) !== timeOfDay) {
+        const line = property.toICALString();
+        throw new Error(`DTSTART changed to a date, and ${line} is ${wall === null ? 'a date already' : 'not at the ' +
+          "series' time of day"}, so as a date it could name an occurrence it did not name before: give ` +
+          `${property.name === 'recurrence-id' ? 'the override' : property.name.toUpperCase()} as dates ` +
+          'by rewriting the whole iCalendar object');
+      }
+    }
   }
 }

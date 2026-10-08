@@ -41,6 +41,15 @@ export interface Zone {
    * (02:30 in a 02:00-03:00 gap is 03:30).
    */
   toUtc(wall: number): number;
+  /** whether a DST change skips this wall clock ('gap') or shows it twice ('overlap') */
+  ambiguity(wall: number): 'gap' | 'overlap' | null;
+  /**
+   * The wall clock a DST change skips that toUtc maps onto this instant, or
+   * null: in a 02:00-03:00 gap, 01:30Z is 03:30 CEST, but 02:30 (which does
+   * not exist) is read as 01:30Z too, so a value given in UTC cannot tell which
+   * of the two it names.
+   */
+  gapAlias(utc: number): number | null;
 }
 
 /**
@@ -54,14 +63,25 @@ export interface Zone {
  * minimum version, this can go back to convertToZone.
  */
 function zoneFrom(offsetAt: (utc: number) => number): Zone {
+  /** the UTC instants this zone shows as the wall clock: none in a gap, two in an overlap */
+  const fits = (wall: number) => [...new Set([wall - offsetAt(wall - 2 * DAY), wall - offsetAt(wall + 2 * DAY)])]
+    .filter((utc) => utc + offsetAt(utc) === wall);
+  const toUtc = (wall: number) => {
+    const found = fits(wall);
+    return found.length ? Math.min(...found) : wall - offsetAt(wall - 2 * DAY);
+  };
   return {
     offsetAt,
     fromUtc: (utc) => utc + offsetAt(utc),
-    toUtc: (wall) => {
-      const before = offsetAt(wall - 2 * DAY);
-      const after = offsetAt(wall + 2 * DAY);
-      const fits = [wall - before, wall - after].filter((utc) => utc + offsetAt(utc) === wall);
-      return fits.length ? Math.min(...fits) : wall - before;
+    toUtc,
+    ambiguity: (wall) => {
+      const found = fits(wall).length;
+      return found === 0 ? 'gap' : found > 1 ? 'overlap' : null;
+    },
+    gapAlias: (utc) => {
+      // a gap is shorter than four hours in every zone
+      const alias = utc + offsetAt(utc - 4 * 3600);
+      return alias !== utc + offsetAt(utc) && fits(alias).length === 0 && toUtc(alias) === utc ? alias : null;
     },
   };
 }

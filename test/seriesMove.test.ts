@@ -314,10 +314,19 @@ describe('moving DTSTART moves EXDATE and RDATE with the series', () => {
     ]);
   });
 
-  it('to all-day: EXDATE takes the date, which RFC 5545 requires next to a DATE DTSTART', () => {
-    const out = updateFields(weekly, { DTSTART: '2026-10-05' });
+  it('to all-day: EXDATE and RDATE take the date, which RFC 5545 requires next to a DATE DTSTART', () => {
+    const atNine = calendar(master('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;COUNT=4',
+      'EXDATE:20261012T090000Z,20261019T090000Z', 'RDATE:20261008T090000Z'));
+    const out = updateFields(atNine, { DTSTART: '2026-10-05' });
     expect(prop(masterOf(out), 'EXDATE')).toEqual(['EXDATE;VALUE=DATE:20261012,20261019']);
     expect(prop(masterOf(out), 'RDATE')).toEqual(['RDATE;VALUE=DATE:20261008']);
+  });
+
+  it('to all-day: a value at another time of day than the series is refused', () => {
+    // the 15:00 RDATE would become 8 Oct, a date it shares with nothing now,
+    // but an EXDATE at 15:00 could fall together with an occurrence it never named
+    expect(() => updateFields(weekly, { DTSTART: '2026-10-05' }))
+      .toThrow(/DTSTART changed to a date, and RDATE:20261008T150000Z is not at the series' time of day/);
   });
 
   it('an EXDATE given in the same call is the caller\'s and is not moved', () => {
@@ -447,5 +456,90 @@ describe('a bare component (no VCALENDAR) gets the same series handling', () => 
   it('RECURRENCE-ID is refused on it as on a master in a VCALENDAR', () => {
     expect(() => updateFields(bare(), { 'RECURRENCE-ID': '20261001T100000Z' }))
       .toThrow(/RECURRENCE-ID cannot be written on the series master/);
+  });
+});
+
+describe('a value that cannot move with its meaning kept is refused (adversarial review of #22)', () => {
+  it('a date UNTIL next to a timed DTSTART', () => {
+    expect(() => updateFields(calendar(BERLIN,
+      master('DTSTART;TZID=Europe/Berlin:20260105T090000', 'RRULE:FREQ=DAILY;UNTIL=20260110')),
+    { DTSTART: '2026-01-06T09:00:00' }))
+      .toThrow(/RRULE UNTIL=20260110 cannot follow it \(UNTIL is a date next to a date-time DTSTART/);
+  });
+
+  it.each([
+    ['moved into the spring gap', 'DTSTART;TZID=Europe/Berlin:20260301T030000', 'RRULE:FREQ=DAILY;UNTIL=20260315T013000Z', '2026-03-15T03:00:00'],
+    ['in the repeated autumn hour', 'DTSTART;TZID=Europe/Berlin:20261020T024500', 'RRULE:FREQ=DAILY;UNTIL=20261025T013000Z', '2026-10-21T02:45:00'],
+  ])('an UNTIL %s, where wall clock and instants part', (_, dtstart, rule, to) => {
+    expect(() => updateFields(calendar(BERLIN, master(dtstart, rule)), { DTSTART: to }))
+      .toThrow(/cannot follow it \((moved, it would be .* at the DST change|it lies at the DST change)/);
+  });
+
+  it('an UNTIL just past a gap, which a skipped occurrence lies after (Sydney)', () => {
+    // 3 Oct 2027 Sydney skips 02:00-03:00; the 02:30 occurrence is 16:30Z,
+    // after UNTIL 16:00Z, but before it on the wall clock
+    expect(() => updateFields(calendar(
+      master('DTSTART;TZID=Australia/Sydney:20270328T023000', 'RRULE:FREQ=WEEKLY;UNTIL=20271002T160000Z')),
+    { DTSTART: '2027-03-27T02:30:00' })).toThrow(/it lies at the DST change in "Australia\/Sydney"/);
+  });
+
+  it('a date RDATE next to a timed series: kept a date on a move by days, refused on a new time', () => {
+    const series = calendar(BERLIN, master('DTSTART;TZID=Europe/Berlin:20260105T090000', 'RRULE:FREQ=WEEKLY;COUNT=5',
+      'RDATE;VALUE=DATE:20260301'));
+    expect(prop(masterOf(updateFields(series, { DTSTART: '2026-01-12T09:00:00' })), 'RDATE'))
+      .toEqual(['RDATE;VALUE=DATE:20260308']);
+    expect(() => updateFields(series, { DTSTART: '2026-01-05T10:00:00' }))
+      .toThrow(/RDATE;VALUE=DATE:20260301 cannot follow it \(it is a date, a whole day, which cannot move by the time of day/);
+  });
+
+  it.each([
+    ['X-FOO=1', 'FREQ=DAILY;UNTIL=20260301T000000Z;X-FOO=1'],
+    ['RSCALE and SKIP', 'FREQ=MONTHLY;UNTIL=20270101T000000Z;RSCALE=GREGORIAN;SKIP=FORWARD'],
+    ['BYEASTER', 'FREQ=YEARLY;BYEASTER=0'],
+  ])('a rule with %s, which writing it again would lose', (_, rule) => {
+    expect(() => updateFields(calendar(master('DTSTART:20260105T090000Z', `RRULE:${rule}`)), { DTSTART: '2026-01-06T09:00:00Z' }))
+      .toThrow(/(has (X-FOO|RSCALE, SKIP|BYEASTER), whose effect on a move updateFields cannot tell)|(which updateFields would lose rewriting it)/);
+  });
+
+  it('timed to all-day with a stale override at another time of day', () => {
+    expect(() => updateFields(calendar(
+      master('DTSTART;TZID=America/New_York:20271031T023000', 'RRULE:FREQ=WEEKLY'),
+      override('RECURRENCE-ID;TZID=America/New_York:20271114T030000', 'DTSTART:20271114T090000Z'),
+    ), { DTSTART: '2027-11-07' })).toThrow(/DTSTART changed to a date, and RECURRENCE-ID;TZID=America\/New_York:20271114T030000 is not at the series' time of day/);
+  });
+
+  it('timed to all-day with an RDATE and an EXDATE that would fall on one date', () => {
+    expect(() => updateFields(calendar(master('DTSTART:20261005T090000Z', 'RRULE:FREQ=YEARLY',
+      'RDATE:20261210T210000Z', 'EXDATE:20261210T200000Z')), { DTSTART: '2026-10-05' }))
+      .toThrow(/DTSTART changed to a date, and (EXDATE|RDATE):20261210T2[01]0000Z is not at the series' time of day/);
+  });
+
+  it.each([
+    ['an EXDATE', ['EXDATE:20260329T013000Z'], [], '2026-03-22T03:30:00'],
+    ['an override', [], [['BEGIN:VEVENT', 'UID:series-1', 'DTSTAMP:20260101T000000Z', 'RECURRENCE-ID:20260329T013000Z',
+      'DTSTART:20260329T100000Z', 'END:VEVENT']], '2026-03-23T02:30:00'],
+  ])('%s given in UTC for the occurrence in the spring gap', (_, props, extra, to) => {
+    expect(() => updateFields(calendar(master('DTSTART;TZID=Europe/Berlin:20260322T023000', 'RRULE:FREQ=WEEKLY;COUNT=4',
+      ...(props as string[])), ...(extra as string[][])), { DTSTART: to }))
+      .toThrow(/20260329T013000Z, which in "Europe\/Berlin" is both a wall-clock time the DST change skips and the time just after it/);
+  });
+
+  it('the check of a new rule fails closed when a zone cannot be read', () => {
+    expect(() => updateFields(calendar(
+      master('DTSTART;TZID=Mars/Olympus:20260105T090000', 'RRULE:FREQ=DAILY;UNTIL=20260120T090000Z'),
+      override('RECURRENCE-ID;TZID=Mars/Olympus:20260110T090000', 'DTSTART;TZID=Mars/Olympus:20260110T100000'),
+    ), { RRULE: 'FREQ=DAILY;COUNT=2' }))
+      .toThrow(/^Cannot check that the overrides and EXDATEs still name occurrences of the series: .*Mars\/Olympus/);
+  });
+
+  it('BYDAY past the fifth weekday of a month is refused when written', () => {
+    expect(() => updateFields(calendar(master('DTSTART:20260105T090000Z', 'RRULE:FREQ=DAILY')), { RRULE: 'FREQ=MONTHLY;BYDAY=6MO' }))
+      .toThrow(/BYDAY: "6MO" counts past the fifth weekday of a month/);
+  });
+
+  it('a dense rule with an override far ahead says so, not "too sparse"', () => {
+    expect(() => updateFields(calendar(master('DTSTART:20260101T090000Z', 'RRULE:FREQ=DAILY'),
+      override('RECURRENCE-ID:21250101T090000Z', 'DTSTART:21250101T100000Z')), { RRULE: 'FREQ=WEEKLY' }))
+      .toThrow(/the override or EXDATE furthest ahead \(21250101T090000Z\) lies too far ahead to check within the work limit/);
   });
 });
