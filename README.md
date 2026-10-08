@@ -265,7 +265,13 @@ updateFields(event, { RRULE: 'FREQ=DAILY;UNTIL=2026-10-26T14:00:00-04:00' });
     document has none, with the IANA zone of that name (`Europe/Berlin`) from the
     runtime's time zone data. **For a `TZID` that is neither (`W. Europe Standard
     Time`), it throws and asks for a UTC or offset value** — the zone's offset
-    rules are unknown, and guessing one could end the series hours early or late;
+    rules are unknown, and guessing one could end the series hours early or late.
+    A `VTIMEZONE` is read from its own observances (`DTSTART`, `RDATE`, `RRULE`
+    with `UNTIL`), not with ical.js' `convertToZone`, which is off by an hour for
+    up to five hours around each DST change ([ical.js#847](https://github.com/kewisch/ical.js/issues/847)).
+    A wall-clock time a change makes ambiguous is its first occurrence, and one
+    that does not exist lies past the gap by as much as it was into it (02:30 on
+    the spring-forward night is 03:30), as RFC 5545 3.3.5 reads them;
   - floating DTSTART: floating; a value with a zone throws;
   - a date next to a timed DTSTART throws;
   - with no DTSTART, `UNTIL` is written in the form given.
@@ -315,10 +321,12 @@ follow the master's `DTSTART` (see above).
     value, e.g. `RRULE "FREQ=WEEKLY;COUNT=3;BYDAY=TU"` for a Monday series moved to
     Tuesday; for the rest (a month-end start, several values per part, several
     occurrences a day going all-day) it says to give `RRULE` in the same call.
-  - The expansion's work is bounded. A rule so sparse that the check cannot be
-    completed within it (`FREQ=MINUTELY;BYMONTH=12;BYMONTHDAY=31`) fails closed:
-    it throws and asks for `RRULE`, `UNTIL` and `EXDATE` in the same call, or a
-    rewrite of the object.
+  - The expansion's work is bounded, weighted per `FREQ`, so a check takes well
+    under a second. A rule so sparse that the check cannot be completed within
+    it (`FREQ=MINUTELY;BYMONTH=12;BYMONTHDAY=31`, `FREQ=HOURLY;BYMONTH=1;BYMONTHDAY=1`)
+    fails closed: it throws and asks for `RRULE`, `UNTIL` and `EXDATE` in the same
+    call, or a rewrite of the object. Ordinary rules — weekly for years, daily
+    without end, every 15 minutes, weekdays 9-17 — stay far inside it.
   - **To start a series later without moving it** (drop its first weeks), give
     `RRULE`, `UNTIL` and `EXDATE` explicitly in the same call, or replace the
     object: a bare `DTSTART` write moves every occurrence.
