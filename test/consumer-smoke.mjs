@@ -97,3 +97,16 @@ if (esmNamed !== cjsNamed) {
   fail('the ESM and CommonJS builds wrote a zone differently');
 }
 console.log('✅ named zone with generated VTIMEZONE');
+
+// 7. the helpers for consumers are exported by both builds and work on the
+//    resolved ical.js: a VTIMEZONE, a zone conversion, a bounded expansion
+for (const [name, build] of [['ESM', await import('tsdav-utils')], ['CommonJS', cjs]]) {
+  const vtimezone = build.generateVtimezone('Europe/Berlin', { from: 2026 });
+  const wall = build.resolveZone('Europe/Berlin', calendar(vtimezone)).toWallTime('2026-10-25T01:30:00Z');
+  const sparse = build.expandOccurrences(calendar(...event('DTSTART:19500101T000000Z',
+    'RRULE:FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0')), { budget: build.createRecurrenceBudget(), until: '2027-01-01T00:00:00Z' });
+  if (!vtimezone.startsWith('BEGIN:VTIMEZONE') || wall !== '2026-10-25T02:30:00' || sparse.stoppedBy !== 'budget') {
+    fail(`the ${name} helpers misbehave: ${wall}, ${sparse.stoppedBy}`);
+  }
+}
+console.log('✅ helpers for consumers in ESM and CommonJS');

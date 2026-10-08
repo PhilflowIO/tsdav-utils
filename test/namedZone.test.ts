@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import ICAL from 'ical.js';
 import { UpdateFieldsError, seriesMaster, updateFields } from '../src/index';
-import { generateVtimezone } from '../src/vtimezone';
+import { scanCacheSize, vtimezoneFor as generateVtimezone } from '../src/vtimezone';
 import { zoneOf } from '../src/zone';
 
 // The oracle is Intl, read here on its own (not through src/zone.ts): every
@@ -108,10 +108,10 @@ function samples(tzid: string, first: number, last: number): number[] {
     }
     return out;
   }
-  // the changes in those years, found on Intl's offsets by the hour
-  for (let t = utcOf(first - 1); t < utcOf(last + 2); t += 3600) {
-    if (intlOffset(tzid, t) !== intlOffset(tzid, t + 3600)) {
-      for (let h = -48; h <= 48; h++) {
+  // the changes in those years, found on Intl's offsets by the day
+  for (let t = utcOf(first - 1); t < utcOf(last + 2); t += 86400) {
+    if (intlOffset(tzid, t) !== intlOffset(tzid, t + 86400)) {
+      for (let h = -24; h <= 48; h++) {
         out.push(t + h * 3600);
       }
     }
@@ -119,20 +119,63 @@ function samples(tzid: string, first: number, last: number): number[] {
   return out;
 }
 
+/** The observances of a VTIMEZONE with the latest DTSTART, as Outlook picks the current rule (MS-OXCICAL 2.1.3.1.1.19.2) */
+function latest(vtimezone: ICAL.Component): ICAL.Component[] {
+  const key = (o: ICAL.Component) => (o.getFirstPropertyValue('dtstart') as ICAL.Time).toString();
+  const sorted = [...vtimezone.getAllSubcomponents()].sort((a, b) => key(a).localeCompare(key(b)));
+  // the final state is a pair of rules while the zone has DST, else one observance
+  const pair = sorted.slice(-2);
+  return pair.length === 2 && pair.every((o) => o.hasProperty('rrule')) ? pair : sorted.slice(-1);
+}
+/** whether a zone has DST in 2030 (by Intl) */
+const hasDst = (tzid: string) => intlOffset(tzid, utcOf(2030, 1, 15)) !== intlOffset(tzid, utcOf(2030, 7, 15));
+
 describe('generated VTIMEZONE against Intl', () => {
-  it.each(ZONES)('%s: both readers give the Intl offset 1970-2060, and hourly around each change 2025-2027', (tzid) => {
-    const vtimezone = generateVtimezone(tzid, 2026, 2026);
-    expect(mismatches(tzid, vtimezone, samples(tzid, 2026, 2026))).toEqual([]);
+  it.each(ZONES)('%s: both readers give the Intl offset, for values from 2026 and from 1971', (tzid) => {
+    expect(mismatches(tzid, generateVtimezone(tzid, 2026, 2026), samples(tzid, 2026, 2026))).toEqual([]);
+    expect(mismatches(tzid, generateVtimezone(tzid, 1971, 2026), samples(tzid, 1971, 2026))).toEqual([]);
   });
 
   it.each([
     ['America/Sao_Paulo', 2018, 2020], ['Europe/Moscow', 2010, 2015], ['America/New_York', 2006, 2008],
     // DST for one week, 8 to 15 October 2000
     ['America/Recife', 2000, 2000],
+    // DST ends on the Friday after the last Thursday of October, which can be 1 November
+    ['Africa/Cairo', 2023, 2031],
   ])('%s around its rule change (%i-%i)', (tzid, first, last) => {
     const vtimezone = generateVtimezone(tzid, first, last);
     expect(mismatches(tzid, vtimezone, samples(tzid, first, last))).toEqual([]);
   });
+
+  it('starts on 1 January of the year before the earliest value', () => {
+    const start = (tzid: string, year: number) =>
+      generateVtimezone(tzid, year, year).getAllSubcomponents()[0].getFirstPropertyValue('dtstart')!.toString();
+    expect(start('Europe/Berlin', 2026)).toBe('2025-01-01T00:00:00');
+    expect(start('Europe/Berlin', 1960)).toBe('1959-01-01T00:00:00');
+    // a 2026 Berlin VTIMEZONE is the start and the current rule
+    expect(generateVtimezone('Europe/Berlin', 2026, 2026).getAllSubcomponents()).toHaveLength(3);
+  });
+
+  it.each(['America/Sao_Paulo', 'Europe/Moscow', 'America/Mexico_City', 'Europe/Istanbul', 'Asia/Tehran',
+    'Asia/Amman', 'Europe/Berlin', 'Africa/Cairo', 'Australia/Sydney', 'America/New_York', 'Asia/Kolkata',
+    'Africa/Casablanca', 'Asia/Gaza'])(
+    '%s: the observances with the latest DTSTART are the zone\'s final state, for Outlook', (tzid) => {
+      for (const first of [1971, 2026]) {
+        const vtimezone = generateVtimezone(tzid, first, 2026);
+        const final = latest(vtimezone);
+        if (hasDst(tzid) && !['Africa/Casablanca'].includes(tzid)) {
+          expect(final.map((o) => o.name).sort()).toEqual(['daylight', 'standard']);
+          for (const o of final) {
+            expect(String(o.getFirstPropertyValue('rrule'))).not.toContain('UNTIL');
+          }
+        } else {
+          expect(final).toHaveLength(1);
+          expect(final[0].hasProperty('rrule') || final[0].hasProperty('rdate')).toBe(false);
+          expect((final[0].getFirstPropertyValue('tzoffsetto') as ICAL.UtcOffset).toSeconds())
+            .toBe(intlOffset(tzid, utcOf(2100)));
+        }
+      }
+    });
 
   it('a zone without DST has a single STANDARD observance', () => {
     for (const tzid of ['Asia/Kolkata', 'Asia/Tokyo', 'UTC', 'Etc/GMT+5']) {
@@ -141,21 +184,36 @@ describe('generated VTIMEZONE against Intl', () => {
     }
   });
 
+  it('names each observance: the zone\'s abbreviation, else its offset', () => {
+    const names = (tzid: string) => generateVtimezone(tzid, 2026, 2026).getAllSubcomponents()
+      .map((o) => o.getFirstPropertyValue('tzname'));
+    expect(names('Europe/Berlin')).toEqual(['CET', 'CEST', 'CET']);
+    expect(names('America/New_York')).toEqual(['EST', 'EDT', 'EST']);
+    expect(names('Asia/Kolkata')).toEqual(['IST']);
+    expect(names('America/Sao_Paulo')).toEqual(['-03']);
+    expect(names('Asia/Kathmandu')).toEqual(['+0545']);
+  });
+
   it('the current rule is an open RRULE, so an unbounded series is covered', () => {
     const text = generateVtimezone('Europe/Berlin', 2026, 2026).toString();
     expect(text).toContain('RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\r\n');
     expect(text).toContain('RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\r\n');
-    const vtimezone = generateVtimezone('Europe/Berlin', 2026, 2026);
     const far = [];
     for (let t = utcOf(2090); t < utcOf(2101); t += 6 * 3600) {
       far.push(t);
     }
-    expect(mismatches('Europe/Berlin', vtimezone, far)).toEqual([]);
+    for (const tzid of ['Europe/Berlin', 'Africa/Cairo', 'Asia/Jerusalem', 'Australia/Sydney']) {
+      expect(mismatches(tzid, generateVtimezone(tzid, 2026, 2026), far)).toEqual([]);
+    }
   });
 
-  it('a rule that is no n-th weekday is written as the first weekday on or after a day', () => {
+  it('writes rules that are no n-th weekday as the first weekday on or after a day, across a month end too', () => {
     expect(generateVtimezone('Asia/Jerusalem', 2026, 2026).toString())
       .toContain('RRULE:FREQ=YEARLY;BYMONTH=3;BYMONTHDAY=23,24,25,26,27,28,29;BYDAY=FR');
+    // Egypt: the Friday after the last Thursday of October, 26 October to 1 November
+    const cairo = generateVtimezone('Africa/Cairo', 2026, 2026);
+    expect(cairo.toString()).toContain('RRULE:FREQ=YEARLY;BYYEARDAY=-67,-66,-65,-64,-63,-62,-61;BYDAY=FR\r\n');
+    expect(cairo.getAllSubcomponents().length).toBeLessThanOrEqual(3);
   });
 
   it('is the same text for the same input', () => {
@@ -163,11 +221,18 @@ describe('generated VTIMEZONE against Intl', () => {
       .toEqual(generateVtimezone('Australia/Sydney', 2026, 2027).toString());
   });
 
-  it('starts before 1970 only for a value before 1970', () => {
-    const start = (tzid: string, year: number) =>
-      generateVtimezone(tzid, year, year).getFirstSubcomponent('standard')!.getFirstPropertyValue('dtstart')!.toString();
-    expect(start('Europe/Berlin', 2026)).toBe('1970-01-01T00:00:00');
-    expect(start('Europe/Berlin', 1960)).toBe('1959-01-01T00:00:00');
+  it('keeps one cache entry per zone, of its changes only, grown for new years', () => {
+    const zones = ['Europe/Paris', 'America/Chicago', 'Pacific/Auckland'];
+    const before = scanCacheSize();
+    for (const tzid of zones) {
+      for (const [first, last] of [[2026, 2026], [2044, 2063], [1990, 1991], [2026, 2030]]) {
+        generateVtimezone(tzid, first, last);
+      }
+    }
+    const after = scanCacheSize();
+    expect(after.zones - before.zones).toBe(zones.length);
+    // Paris, Chicago and Auckland change twice a year: 1989 to 2065 is under 160 changes each
+    expect(after.changes - before.changes).toBeLessThan(zones.length * 160);
   });
 
   it('refuses a value on local mean time, whose offset in seconds iCalendar cannot hold', () => {
@@ -176,29 +241,36 @@ describe('generated VTIMEZONE against Intl', () => {
     expect(error.code).toBe('UNSUPPORTED_VTIMEZONE');
     expect(error.remedy).toBe('fix-value');
     expect(error.message).toContain('19720107');
-    // after it, the VTIMEZONE starts where local mean time ended
-    const vtimezone = generateVtimezone('Africa/Monrovia', 2026, 2026);
-    expect(vtimezone.getFirstSubcomponent('standard')!.getFirstPropertyValue('dtstart')!.toString())
-      .toBe('1972-01-07T00:44:30');
-    expect(mismatches('Africa/Monrovia', vtimezone, samples('Africa/Monrovia', 2026, 2026)))
-      .toEqual([]);
+    // with a value from 1973 on, the VTIMEZONE starts where local mean time ended
+    const vtimezone = generateVtimezone('Africa/Monrovia', 1973, 1973);
+    expect(vtimezone.getAllSubcomponents()[0].getFirstPropertyValue('dtstart')!.toString()).toBe('1972-01-07T00:44:30');
+    expect(mismatches('Africa/Monrovia', vtimezone, samples('Africa/Monrovia', 1973, 1973))).toEqual([]);
   });
 
-  it.runIf(process.env.VTIMEZONE_ALL_ZONES)('every zone the runtime knows, 1970-2060', () => {
+  it.runIf(process.env.VTIMEZONE_ALL_ZONES)('every zone the runtime knows, from 1971 and from 2026', () => {
     const failed: string[] = [];
     for (const tzid of Intl.supportedValuesOf('timeZone')) {
-      try {
-        const bad = mismatches(tzid, generateVtimezone(tzid, 2026, 2026), samples(tzid, 2026, 2026));
-        if (bad.length) {
-          failed.push(`${tzid}: ${bad.length} mismatches, first ${bad[0]}`);
+      for (const first of [1971, 2026]) {
+        try {
+          const vtimezone = generateVtimezone(tzid, first, 2026);
+          const bad = mismatches(tzid, vtimezone, samples(tzid, first, 2026));
+          if (bad.length) {
+            failed.push(`${tzid} from ${first}: ${bad.length} mismatches, first ${bad[0]}`);
+          }
+          const final = latest(vtimezone);
+          if (final.some((o) => o.hasProperty('rdate')) || final.some((o) => /UNTIL/.test(String(o.getFirstPropertyValue('rrule') ?? '')))) {
+            failed.push(`${tzid} from ${first}: the latest observances are no final state`);
+          }
+        } catch (error) {
+          if (!(first === 1971 && (error as UpdateFieldsError).code === 'UNSUPPORTED_VTIMEZONE')) {
+            failed.push(`${tzid} from ${first}: ${(error as Error).message}`);
+          }
         }
-      } catch (error) {
-        failed.push(`${tzid}: ${(error as Error).message}`);
       }
     }
     console.log(`all zones: ${Intl.supportedValuesOf('timeZone').length} checked, ${failed.length} failed`);
     expect(failed).toEqual([]);
-  }, 600000);
+  }, 1200000);
 });
 
 describe('options.zone', () => {
@@ -377,6 +449,98 @@ describe('options.zone', () => {
     expect(vtimezones(earlier)).toHaveLength(1);
     const [start] = icalInstants(earlier);
     expect(walls('Europe/Berlin', [start])).toEqual(['1999-07-05 09:00']);
+  });
+
+  it('generates its own VTIMEZONE again when a later write moves a value before it', () => {
+    const once = updateFields(skeleton(), { DTSTART: '2026-10-05T09:00:00' }, { zone: 'Europe/Berlin' });
+    expect(vtimezones(once)[0].getAllSubcomponents()[0].getFirstPropertyValue('dtstart')!.toString()).toBe('2025-01-01T00:00:00');
+    for (const [value, start] of [['2020-07-06T09:00:00', '2019-01-01T00:00:00'], ['1950-07-03T09:00:00', '1949-01-01T00:00:00']]) {
+      const moved = updateFields(once, { DTSTART: value }, { zone: 'Europe/Berlin' });
+      expect(vtimezones(moved)).toHaveLength(1);
+      expect(vtimezones(moved)[0].getAllSubcomponents()[0].getFirstPropertyValue('dtstart')!.toString()).toBe(start);
+      const [instant] = icalInstants(moved, 1);
+      expect(walls('Europe/Berlin', [instant])).toEqual([value.slice(0, 16).replace('T', ' ')]);
+      registered.splice(0).forEach((tzid) => ICAL.TimezoneService.remove(tzid));
+    }
+  });
+
+  it('refuses a value before a VTIMEZONE it did not generate, rather than rewrite it', () => {
+    const server = ['BEGIN:VTIMEZONE', 'TZID:Europe/Berlin',
+      'BEGIN:DAYLIGHT', 'TZOFFSETFROM:+0100', 'TZOFFSETTO:+0200', 'TZNAME:CEST', 'DTSTART:19810329T020000',
+      'RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU', 'END:DAYLIGHT',
+      'BEGIN:STANDARD', 'TZOFFSETFROM:+0200', 'TZOFFSETTO:+0100', 'TZNAME:CET', 'DTSTART:19961027T030000',
+      'RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU', 'END:STANDARD', 'END:VTIMEZONE'];
+    const ics = calendar(...server, 'BEGIN:VEVENT', 'UID:x', 'DTSTAMP:20260101T000000Z', 'END:VEVENT');
+    expect(lines(updateFields(ics, { DTSTART: '1990-07-02T09:00:00' }, { zone: 'Europe/Berlin' })))
+      .toContain('DTSTART;TZID=Europe/Berlin:19900702T090000');
+    const error = refusal(() => updateFields(ics, { DTSTART: '1975-07-07T09:00:00' }, { zone: 'Europe/Berlin' }));
+    expect(error.code).toBe('UNSUPPORTED_VTIMEZONE');
+    expect(error.remedy).toBe('rewrite-object');
+  });
+
+  describe('DTEND and DUE follow a DTSTART written in a zone', () => {
+    const berlin = skeleton('DTSTART;TZID=Europe/Berlin:20260907T100000', 'DTEND;TZID=Europe/Berlin:20260907T110000');
+
+    it('keeps the duration on the new zone\'s wall clock', () => {
+      const out = updateFields(berlin, { DTSTART: '2026-09-07T10:00:00' }, { zone: 'America/New_York' });
+      expect(lines(out)).toContain('DTSTART;TZID=America/New_York:20260907T100000');
+      expect(lines(out)).toContain('DTEND;TZID=America/New_York:20260907T110000');
+      expect(vtimezones(out).map((c) => c.getFirstPropertyValue('tzid'))).toEqual(['America/New_York']);
+    });
+
+    it('also within the same zone, and into UTC', () => {
+      expect(lines(updateFields(berlin, { DTSTART: '2026-09-07T14:00:00' }, { zone: 'Europe/Berlin' })))
+        .toContain('DTEND;TZID=Europe/Berlin:20260907T150000');
+      expect(lines(updateFields(berlin, { DTSTART: '2026-09-07T14:00:00Z' }, { zone: 'UTC' })))
+        .toContain('DTEND:20260907T150000Z');
+    });
+
+    it('measures an end in another zone than its start in elapsed time', () => {
+      const flight = skeleton('DTSTART;TZID=Europe/Berlin:20260907T100000', 'DTEND;TZID=America/New_York:20260907T120000');
+      // 08:00Z to 16:00Z: eight hours
+      expect(lines(updateFields(flight, { DTSTART: '2026-09-08T10:00:00' }, { zone: 'Europe/Berlin' })))
+        .toContain('DTEND;TZID=Europe/Berlin:20260908T180000');
+    });
+
+    it('moves a todo\'s DUE', () => {
+      const todo = calendar('BEGIN:VTODO', 'UID:t', 'DTSTAMP:20260101T000000Z', 'DTSTART:20260907T080000Z',
+        'DUE:20260907T100000Z', 'END:VTODO');
+      expect(lines(updateFields(todo, { DTSTART: '2026-09-08T09:00:00' }, { zone: 'Europe/Berlin' })))
+        .toContain('DUE;TZID=Europe/Berlin:20260908T110000');
+    });
+
+    it('leaves an end the call writes itself, and refuses one before the start', () => {
+      expect(lines(updateFields(berlin, { DTSTART: '2026-09-07T10:00:00', DTEND: '2026-09-07T12:30:00' },
+        { zone: 'America/New_York' }))).toContain('DTEND;TZID=America/New_York:20260907T123000');
+      const error = refusal(() => updateFields(berlin, { DTEND: '2026-09-07T09:00:00' }, { zone: 'Europe/Berlin' }));
+      expect(error.code).toBe('END_BEFORE_START');
+      expect(error.property).toBe('DTEND');
+    });
+
+    it('does not refuse an unrelated write next to an end that already lies before its start', () => {
+      const broken = skeleton('DTSTART;TZID=Europe/Berlin:20260907T100000', 'DTEND;TZID=Europe/Berlin:20260907T090000');
+      expect(lines(updateFields(broken, { SUMMARY: 'x' }, { zone: 'Europe/Berlin' }))).toContain('SUMMARY:x');
+    });
+  });
+
+  it.each(['UTC', 'Etc/UTC', 'GMT', 'Etc/GMT', 'Zulu'])('zone "%s" writes UTC with Z and no VTIMEZONE', (zone) => {
+    const out = updateFields(skeleton(), { DTSTART: '2026-10-05T09:00:00', DTEND: '2026-10-05T12:00:00+02:00',
+      RRULE: 'FREQ=WEEKLY;UNTIL=20261102T090000' }, { zone });
+    expect(lines(out)).toContain('DTSTART:20261005T090000Z');
+    expect(lines(out)).toContain('DTEND:20261005T100000Z');
+    expect(lines(out)).toContain('RRULE:FREQ=WEEKLY;UNTIL=20261102T090000Z');
+    expect(out).not.toContain('VTIMEZONE');
+    expect(out).not.toContain('TZID');
+  });
+
+  it('spells an alias properly: as given in proper case, else as the zone it links to', () => {
+    const tzidOf = (zone: string) => /DTSTART;TZID=([^:]+):/.exec(updateFields(skeleton(), { DTSTART: '2026-07-01T09:00:00' }, { zone }))![1];
+    const linked = (name: string) => new Intl.DateTimeFormat('en-US', { timeZone: name }).resolvedOptions().timeZone;
+    expect(tzidOf('US/Eastern')).toBe('US/Eastern');
+    expect(tzidOf('us/eastern')).toBe('America/New_York');
+    expect(tzidOf('asia/kolkata')).toBe(Intl.supportedValuesOf('timeZone').includes('Asia/Kolkata') ? 'Asia/Kolkata' : linked('Asia/Kolkata'));
+    expect(tzidOf('europe/kyiv')).toBe(Intl.supportedValuesOf('timeZone').includes('Europe/Kyiv') ? 'Europe/Kyiv' : linked('Europe/Kyiv'));
+    expect(tzidOf('Europe/Kyiv')).toBe('Europe/Kyiv');
   });
 
   describe('moving an existing series into the zone', () => {
