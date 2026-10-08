@@ -300,14 +300,25 @@ follow the master's `DTSTART` (see above).
   - The distance is measured on the series' wall clock, so a 09:00 Berlin series
     moved to 10:00 keeps landing on 10:00 across a DST change; moved values are
     written in the new DTSTART's form (its `TZID`, UTC, floating, or a date).
+  - An override's own times move on that same wall clock and keep their own
+    form: an instance rescheduled to Monday 09:00 Berlin stays at 09:00 when the
+    series moves a week across a DST change — also when it is written in UTC,
+    whose value then changes by the hour the offset changed.
   - Across an all-day/timed switch the distance counts in days: an occurrence
     keeps its day and becomes a date or takes the new DTSTART's time of day; an
     override keeps its own time on its day.
   - A rule part that pins days or times (`BYDAY=MO`, `BYMONTHDAY=5`, `BYHOUR`) does
     not move with DTSTART. When the call gives no `RRULE`, the series is expanded
     before and after; if the moved series would gain or lose an occurrence, it
-    throws and suggests the rule to give, e.g. `RRULE "FREQ=WEEKLY;BYDAY=TU"` for a
-    Monday series moved to Tuesday.
+    throws. Where a single `BYDAY`, `BYMONTHDAY`, `BYMONTH`, `BYHOUR` or `BYMINUTE`
+    value pins the old start, the error suggests the rule with the new start's
+    value, e.g. `RRULE "FREQ=WEEKLY;COUNT=3;BYDAY=TU"` for a Monday series moved to
+    Tuesday; for the rest (a month-end start, several values per part, several
+    occurrences a day going all-day) it says to give `RRULE` in the same call.
+  - The expansion's work is bounded. A rule so sparse that the check cannot be
+    completed within it (`FREQ=MINUTELY;BYMONTH=12;BYMONTHDAY=31`) fails closed:
+    it throws and asks for `RRULE`, `UNTIL` and `EXDATE` in the same call, or a
+    rewrite of the object.
   - **To start a series later without moving it** (drop its first weeks), give
     `RRULE`, `UNTIL` and `EXDATE` explicitly in the same call, or replace the
     object: a bare `DTSTART` write moves every occurrence.
