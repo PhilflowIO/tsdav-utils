@@ -242,6 +242,9 @@ function vtimezoneZone(vtimezone) {
   });
 }
 function ianaZone(tzid) {
+  if (/^[+-]/.test(tzid.trim())) {
+    return null;
+  }
   let format;
   try {
     format = new Intl.DateTimeFormat("en-US", {

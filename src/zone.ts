@@ -180,7 +180,7 @@ const transitionCache = new WeakMap<ICAL.Component, { horizon: number; list: Tra
  * every change (https://github.com/kewisch/ical.js/issues/847). Once a fixed
  * ical.js release is the minimum version, this can go back to convertToZone.
  */
-function vtimezoneZone(vtimezone: ICAL.Component): Zone {
+export function vtimezoneZone(vtimezone: ICAL.Component): Zone {
   const transitions = (utc: number) => {
     let cached = transitionCache.get(vtimezone);
     if (!cached || cached.horizon < utc + DAY * 400) {
@@ -215,7 +215,11 @@ function vtimezoneZone(vtimezone: ICAL.Component): Zone {
 }
 
 /** A zone from the runtime's IANA time zone data, or null for an unknown name */
-function ianaZone(tzid: string): Zone | null {
+export function ianaZone(tzid: string): Zone | null {
+  // Intl also takes a UTC offset ("+01:00") as a time zone; that is no TZID
+  if (/^[+-]/.test(tzid.trim())) {
+    return null;
+  }
   let format: Intl.DateTimeFormat;
   try {
     format = new Intl.DateTimeFormat('en-US', {
@@ -247,6 +251,36 @@ function ianaZone(tzid: string): Zone | null {
 export function zoneOf(component: ICAL.Component, tzid: string): Zone | null {
   const vtimezone = vtimezoneOf(component, tzid);
   return vtimezone ? vtimezoneZone(vtimezone) : ianaZone(tzid);
+}
+
+/** The VTIMEZONE a TZID refers to in the document, or null */
+export function vtimezoneIn(component: ICAL.Component, tzid: string): ICAL.Component | null {
+  return vtimezoneOf(component, tzid);
+}
+
+let lowerNames: Map<string, string> | null = null;
+
+/**
+ * An IANA zone name as the time zone data spells it, or null when the runtime
+ * does not know it. Intl reads names case-insensitively, but other readers of
+ * a TZID may not, so "europe/berlin" comes back as "Europe/Berlin". A name is
+ * not replaced by the one Intl links it to ("Asia/Kolkata" stays, although
+ * some runtimes report it as "Asia/Calcutta"): the caller's name is kept.
+ */
+export function ianaZoneName(name: string): string | null {
+  if (!ianaZone(name)) {
+    return null;
+  }
+  if (!lowerNames) {
+    const supported = (Intl as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf?.('timeZone') ?? [];
+    lowerNames = new Map(supported.map((n) => [n.toLowerCase(), n]));
+  }
+  const listed = lowerNames.get(name.toLowerCase());
+  if (listed) {
+    return listed;
+  }
+  const resolved = new Intl.DateTimeFormat('en-US', { timeZone: name }).resolvedOptions().timeZone;
+  return resolved.toLowerCase() === name.toLowerCase() ? resolved : name;
 }
 
 /** The error for a TZID zoneOf cannot resolve */
