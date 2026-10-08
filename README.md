@@ -177,11 +177,13 @@ Updates arbitrary properties on a calendar/todo/contact object.
     `updateFields(todo.data, { DUE: '...' }, { type: 'vtodo' })` writes into the todo
     instead of the event
 
-- **options.append**: `('EXDATE' | 'RDATE')[]` (optional)
-  - The lists to add the values given to, instead of replacing them: the values
-    join the ones the object holds, and one already there is not written twice
-    (see [Lists of dates](#lists-of-dates-exdate-and-rdate))
-  - Throws `INVALID_INPUT` for anything but a list of `EXDATE` and `RDATE`
+- **options.lists**: `{ EXDATE?: ListMode, RDATE?: ListMode }` (optional), `ListMode`
+  `'replace' | 'add' | 'remove'`, default `'replace'`
+  - Whether the values given for a list of dates are the whole list, join it, or
+    leave it (see [Lists of dates](#lists-of-dates-exdate-and-rdate)); to cancel
+    or restore occurrences, `cancelOccurrences`/`restoreOccurrences` say it more
+    directly
+  - Throws `INVALID_INPUT` for anything but `EXDATE`/`RDATE` with one of the three modes
 
 #### Returns
 
@@ -441,60 +443,118 @@ throws naming the accepted forms.
 Apart from following DTSTART, each value is encoded on its own. Keeping related
 properties consistent — DUE vs. DURATION, say — is the caller's job; an RRULE
 `UNTIL` follows DTSTART (see [Recurrence rules](#recurrence-rules)). `EXDATE` and
-`RDATE` are lists, written as a whole or added to (see the next section).
+`RDATE` are lists, replaced, added to or removed from (see the next section).
 
 ### Lists of dates: `EXDATE` and `RDATE`
 
 `EXDATE` and `RDATE` each hold one set of dates, which an object may spread over
-several lines and comma lists (RFC 5545 3.8.5.1, 3.8.5.2). A write treats the set
-as one:
+several lines and comma lists, each line with its own `TZID` and parameters
+(RFC 5545 3.8.5.1, 3.8.5.2). A write treats the set as one, in the mode
+`options.lists` names for it:
 
-- **A plain write sets the whole list.** Every line of the property goes, and the
-  values given are written on one line. Give every value the list should keep:
+| Mode | The values given | Refused when |
+|---|---|---|
+| `'replace'` (default) | are the whole list | — |
+| `'add'` | join the list | an added `EXDATE` names no occurrence (`UNMATCHED_EXDATE`) |
+| `'remove'` | leave the list | a value is not in the list (`NOT_IN_LIST`) |
+
+> **Consumers: a plain write replaces the whole list.** Writing
+> `{ EXDATE: '2026-12-31T10:00:00' }` to cancel one more occurrence brings back
+> every occurrence cancelled before. To cancel one, use `cancelOccurrences` (or
+> `lists: { EXDATE: 'add' }`); to give the whole list, give every value it
+> should keep.
+
+Values are matched by the instant they name, whatever zone each is written in,
+read with RFC 5545 3.3.5 (in the hour a DST change shows twice, `00:30Z` and
+`01:30Z` on 25 October in Berlin are two different values, and only the first
+names the 02:30 occurrence); by date in an all-day series, by wall clock in a
+floating one. A value that names no instant to compare — a floating value in a
+series with a zone, a zone without known rules — matches only itself and is
+left as it is.
+
+- **`'replace'` is a minimal change.** Values the list holds and the call gives
+  again stay where they are, on their own line, in their own zone, with their
+  parameters; the others go, and a line left empty goes; the values not there
+  yet are written on a new line. Restating the list changes nothing, byte for
+  byte.
 
   ```typescript
-  // EXDATE:20261210T090000Z / EXDATE:20261224T090000Z,20261231T090000Z
-  updateFields(event, { EXDATE: '2026-12-24T09:00:00Z' });
-  // EXDATE:20261224T090000Z — the 10th and 31st occur again
+  // EXDATE;TZID=America/New_York;X-FOO=bar:20261210T040000,20261217T040000
+  // EXDATE:20261224T090000Z            (a weekly 10:00 Berlin series)
+  updateFields(event, { EXDATE: '2026-12-10T10:00:00,2026-12-31T10:00:00' });
+  // EXDATE;TZID=America/New_York;X-FOO=bar:20261210T040000   — kept as it was
+  // EXDATE;TZID=Europe/Berlin:20261231T100000                — added
+  // the 17th and 24th occur again
   ```
 
-  A wall-clock value is read in the zone of the first line, else DTSTART's, as
-  above; a set written with DTSTART in the same call is the new series' and is
-  not moved.
-- **`{ append: ['EXDATE'] }` adds to it**, for a caller that wants to cancel one
-  more occurrence without knowing the ones cancelled already:
+  A list given with DTSTART in the same call is the new series' and is not moved.
+- **`'add'`** — the lines the list holds stay as written; values it does not hold
+  yet go on a new line, and a repeat within the call is written once. A call
+  that adds nothing new changes nothing.
 
   ```typescript
-  updateFields(event, { EXDATE: '2026-12-31T10:00:00' }, { append: ['EXDATE'] });
-  // the lines already there stay; EXDATE;TZID=Europe/Berlin:20261231T100000 is added
+  updateFields(event, { EXDATE: '2026-12-31T10:00:00' }, { lists: { EXDATE: 'add' } });
+  // EXDATE;TZID=Europe/Berlin:20261231T100000 is added; nothing else changes
   ```
+- **`'remove'`** — the values given leave whatever line holds them; a line left
+  empty goes. A value the list does not hold is refused, `NOT_IN_LIST`
+  (`fix-value`), naming the list.
 
-  - The values are added on a line of their own, typed and zoned as a new line
-    would be (DTSTART's zone and value type, or under `zone` that zone's
-    `TZID`); the lines already there are kept as written.
-  - A value the list already holds is dropped, as is a repeat within the call:
-    the same instant, whatever zone each is written in (in an all-day series, the
-    same date). Where an instant cannot be told (no DTSTART, a zone without
-    known rules) values are compared as written. A call that adds nothing new
-    leaves the list as it was.
-  - With DTSTART in the same call, the lines already there move with the series
-    (see [Recurring events and todos](#recurring-events-and-todos)) and the added
-    values are the moved series' own: `{ DTSTART: '…T10:00:00Z', EXDATE:
-    '…T10:00:00Z' }` excludes the 10:00 occurrence.
-  - **An added `EXDATE` has to name an occurrence** of the series as the call
-    leaves it (DTSTART, the `RRULE` and the `RDATE`s, including ones written in
-    the same call). One that names none would exclude nothing, and the
-    occurrence meant to be cancelled would silently stay — most often a time
-    given in the wrong zone — so it throws `UNMATCHED_EXDATE` (`fix-value`),
-    naming the value and the series. Where the series cannot be checked (no
-    DTSTART) it throws `SERIES_UNVERIFIABLE`, as for a new rule. A plain write is
-    not checked: it states the list as given, like any other value.
-  - An added `RDATE` only adds occurrences, so nothing is checked beyond its
-    form; periods (`VALUE=PERIOD`) already in the list are kept.
-  - Naming a property the call does not write is allowed, so a caller can pass
-    `{ append: ['EXDATE', 'RDATE'] }` on every call.
+In every mode the values given are typed and zoned as for a new line: DTSTART's
+zone and value type (under `zone`, that zone's `TZID`) — never the zone of a
+line the list holds. In a list in a `TZID`, a value with `Z` or an offset next
+to wall-clock ones is written as its wall clock there. In a floating series a
+value with `Z` or an offset names no occurrence and is refused,
+`ZONE_MISMATCH` (`fix-value`: drop the zone). With DTSTART in the same call,
+`'add'` and `'remove'` meet the moved series: the lines held move with it
+(see [Recurring events and todos](#recurring-events-and-todos)), and the values
+given are the new start's.
 
-Removing a single value is not offered: read the list and write it whole.
+**An added `EXDATE` has to name an occurrence** of the series as the call leaves
+it (DTSTART, the `RRULE` and the `RDATE`s, including ones written in the same
+call). One that names none would exclude nothing, and the occurrence meant to be
+cancelled would silently stay — most often a time in the wrong zone — so it
+throws `UNMATCHED_EXDATE` (`fix-value`), naming the value, the series, the
+occurrence it has that day if any, and how an occurrence is named in this
+series (the wall clock in DTSTART's zone or an instant; UTC with `Z`; local time
+without a zone; or the date). Where the series cannot be checked (no DTSTART)
+it throws `SERIES_UNVERIFIABLE`; where it cannot be checked within the work
+limit, `CHECK_LIMIT_EXCEEDED` (`rewrite-object`). A list given whole
+(`'replace'`) is not checked: it states the list as given, like any other value.
+
+**An `EXDATE` may not exclude an overridden occurrence** (in any mode): the
+override (the component with that `RECURRENCE-ID`) would apply to nothing. It
+throws `ORPHANED_EXCEPTIONS` (`fix-value`); cancel the occurrence with
+`cancelOccurrences`, which removes the override too. An override excluded
+before the call does not block it.
+
+### Cancelling and restoring occurrences
+
+```typescript
+cancelOccurrences(object, ids, { type? })   // → iCalendar text
+restoreOccurrences(object, ids, { type? })  // → iCalendar text
+```
+
+The same edits, named by occurrence. `ids` are the original starts of the
+occurrences, as `expandOccurrences` gives them — **`occurrence.recurrenceId.value`,
+not `start`: for an overridden occurrence `start` is where the override moved
+it**. An id may also carry `Z` or an offset; it is matched by instant (by date in
+an all-day series).
+
+- `cancelOccurrences` adds an `EXDATE` for each, in the series' own form and
+  zone, and removes the override of each, so no override is left applying to
+  nothing. An occurrence cancelled already is left as it is. An id that is no
+  occurrence of the series is refused, `UNKNOWN_OCCURRENCE` (`fix-value`),
+  naming the occurrence the series has that day.
+- `restoreOccurrences` removes the `EXDATE` values naming each, whatever line and
+  zone they are on. An id no `EXDATE` names is refused, `NOT_IN_LIST`
+  (`fix-value`). An override removed by a cancel does not come back.
+
+```typescript
+const { occurrences } = expandOccurrences(event.data, { budget, until: '2027-01-01T00:00:00Z' });
+const christmas = occurrences.find((o) => o.recurrenceId.value.startsWith('2026-12-24'))!;
+const updated = cancelOccurrences(event.data, [christmas.recurrenceId.value]);
+```
 
 ## Recurrence rules
 
@@ -809,7 +869,7 @@ unreadable one is refused (`INVALID_RULE`) rather than rewritten.
 
 | Code | When | Remedy |
 |---|---|---|
-| `INVALID_INPUT` | an argument has the wrong type: `calendarObject` not a string or `{ data: string }`, `fields` or `options` not an object, `options.zone` not a non-empty string, a non-string to `parseDateValue`, several top-level components in one text, `options.append` not a list of `EXDATE` and `RDATE` | `fix-value` |
+| `INVALID_INPUT` | an argument has the wrong type: `calendarObject` not a string or `{ data: string }`, `fields` or `options` not an object, `options.zone` not a non-empty string, a non-string to `parseDateValue`, several top-level components in one text, `options.lists` naming anything but `EXDATE`/`RDATE` with `replace`, `add` or `remove`, no list of ids to `cancelOccurrences`/`restoreOccurrences` | `fix-value` |
 | `INVALID_ICALENDAR` | the iCalendar or vCard text does not parse (`cause`: the ical.js error) | `rewrite-object` |
 | `INVALID_TYPE` | `options.type` (or `seriesMaster`'s type) is not `vevent`, `vtodo` or `vjournal` | `fix-value` |
 | `INVALID_FLOATING_TIME` | `options.floatingTime` is not `keep` or `local`, or is given together with `zone` | `fix-value` |
@@ -819,7 +879,7 @@ unreadable one is refused (`INVALID_RULE`) rather than rewritten.
 | `NO_MASTER` | several instances with `RECURRENCE-ID` and no master, so which one is meant cannot be told | `rewrite-object` |
 | `INVALID_VALUE` | a date or date-time value (also a rule's `UNTIL`) does not parse, names no real date, time or offset, or is no string; or such a value already in the object | `fix-value`; `rewrite-object` or `same-call` for a value in the object, as the message says |
 | `VALUE_TYPE_MISMATCH` | a date where a date-time is needed or the other way round: next to DTSTART, on a property that takes no date, or mixed in one list | `fix-value` |
-| `ZONE_MISMATCH` | a value lacks the zone it needs (next to a UTC DTSTART, on `DTSTAMP`/`CREATED`/...), has one it must not have (`UNTIL` of a floating series), or a list mixes both; or, under `zone`, a value that follows DTSTART (DTEND, DUE, EXDATE, RDATE, `UNTIL`) while DTSTART is in UTC, floating or another zone and not in the call | `fix-value`; `same-call` under `zone` (give DTSTART too); for a value in the object `same-call` where a DTSTART move would carry it, else `rewrite-object` |
+| `ZONE_MISMATCH` | a value lacks the zone it needs (next to a UTC DTSTART, on `DTSTAMP`/`CREATED`/...), has one it must not have (`UNTIL` of a floating series), or a list mixes both outside a `TZID`; a list value with `Z` or an offset in a floating series (`fix-value`: drop the zone); or, under `zone`, a value that follows DTSTART (DTEND, DUE, EXDATE, RDATE, `UNTIL`) while DTSTART is in UTC, floating or another zone and not in the call | `fix-value`; `same-call` under `zone` (give DTSTART too); for a value in the object `same-call` where a DTSTART move would carry it, else `rewrite-object` |
 | `UNKNOWN_TZID` | a TZID whose rules are needed (a time converted to or from it, `absoluteTime: 'keep-zone'`) has no `VTIMEZONE` in the object and is no IANA zone — the same code whether a move or a new rule needs it; or `options.zone` is neither | `fix-value` for a value or `zone` given; for a zone in the object `same-call` where a DTSTART move would carry the value, else `rewrite-object` |
 | `UNSUPPORTED_VTIMEZONE` | a `VTIMEZONE` in the object repeats more often than monthly, or its rule cannot be read; under `zone`, a value before the first observance of a `VTIMEZONE` the library did not generate; or a value in the zone's local mean time, whose offset in seconds no `VTIMEZONE` can hold | `rewrite-object`; `fix-value` for local mean time |
 | `UNKNOWN_RULE_PART` | a rule given has a part RFC 5545 3.3.10 does not define, `RSCALE`/`SKIP`, or an `RRULE:` prefix | `fix-value` |
@@ -828,10 +888,12 @@ unreadable one is refused (`INVALID_RULE`) rather than rewritten.
 | `END_BEFORE_START` | under `zone`, DTEND or DUE would lie before DTSTART | `fix-value` |
 | `RECURRENCE_ID_ON_MASTER` | `RECURRENCE-ID` written on the series master | `rewrite-object` |
 | `SERIES_MOVE_REFUSED` | a DTSTART move the series cannot follow exactly: the rule pins the old start (`suggestion` holds the rule to give, when there is one), or an existing `UNTIL`, `EXDATE` or `RDATE` cannot move with it; or an override cannot, or the switch to all-day would change what a value names | `same-call`; `rewrite-object` for an override or the switch to all-day |
-| `ORPHANED_EXCEPTIONS` | a new `RRULE` or `RDATE` leaves an override or `EXDATE` naming no occurrence | `same-call` |
-| `UNMATCHED_EXDATE` | an `EXDATE` added with `options.append` names no occurrence of the series, so it would exclude nothing | `fix-value` |
+| `ORPHANED_EXCEPTIONS` | a new `RRULE` or `RDATE` (or `RDATE`s removed) leaves an override or `EXDATE` naming no occurrence; or an `EXDATE` would exclude an overridden occurrence | `same-call`; `fix-value` for the `EXDATE` (or use `cancelOccurrences`) |
+| `UNMATCHED_EXDATE` | an `EXDATE` added (list mode `add`) names no occurrence of the series, so it would exclude nothing | `fix-value` |
+| `NOT_IN_LIST` | a value to remove (list mode `remove`, `restoreOccurrences`) is not in the list | `fix-value` |
+| `UNKNOWN_OCCURRENCE` | an id given to `cancelOccurrences` is no occurrence of the series | `fix-value` |
 | `DST_AMBIGUOUS` | a value of the series sits at a DST change, where the wall clock does not name one instant; or, under `absoluteTime: 'keep-zone'` or `zone`, an instant falls in the second pass of the repeated hour | `same-call` for `UNTIL`; `rewrite-object` for a value sharing its instant with a skipped occurrence, or an override; `fix-value` under `keep-zone` and `zone` |
-| `CHECK_LIMIT_EXCEEDED` | the series is too sparse, or the override or `EXDATE` furthest ahead too far, to check within the work limit | `rewrite-object` on a new rule; `same-call` on a move; `fix-value` for an added `EXDATE` (give the whole list instead) |
+| `CHECK_LIMIT_EXCEEDED` | the series is too sparse, or the override or `EXDATE` furthest ahead too far, to check within the work limit | `rewrite-object` on a new rule or an added `EXDATE`; `same-call` on a move |
 | `SERIES_UNVERIFIABLE` | whether the overrides and `EXDATE`s still name occurrences cannot be checked: the series has no DTSTART | `rewrite-object` |
 
 A refusal reported inside another keeps its code: an `UNTIL` in the repeated
