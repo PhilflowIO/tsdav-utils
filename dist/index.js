@@ -32,8 +32,13 @@ var index_exports = {};
 __export(index_exports, {
   UPDATE_FIELDS_ERROR_CODES: () => UPDATE_FIELDS_ERROR_CODES,
   UpdateFieldsError: () => UpdateFieldsError,
+  createRecurrenceBudget: () => createRecurrenceBudget,
+  expandOccurrences: () => expandOccurrences,
+  generateVtimezone: () => generateVtimezone,
   isUpdateFieldsError: () => isUpdateFieldsError,
   parseDateValue: () => parseDateValue,
+  resolvePropertyZone: () => resolvePropertyZone,
+  resolveZone: () => resolveZone,
   seriesMaster: () => seriesMaster,
   updateFields: () => updateFields
 });
@@ -88,6 +93,8 @@ var CODES = [
   "DUPLICATE_RULE_PART",
   /** a rule is otherwise invalid: a bad value, no FREQ, a combination RFC 5545 rules out, or unreadable in the object */
   "INVALID_RULE",
+  /** under options.zone, DTEND or DUE would lie before DTSTART */
+  "END_BEFORE_START",
   /** RECURRENCE-ID written on the series master */
   "RECURRENCE_ID_ON_MASTER",
   /** a DTSTART move the series (its rule, UNTIL, EXDATE, RDATE or overrides) cannot follow exactly */
@@ -282,9 +289,15 @@ function vtimezoneZone(vtimezone) {
     return list[lo].to;
   });
 }
+var ianaZones = /* @__PURE__ */ new Map();
 function ianaZone(tzid) {
-  if (/^[+-]/.test(tzid.trim())) {
+  if (typeof tzid !== "string" || /^[+-]/.test(tzid.trim())) {
     return null;
+  }
+  const key = tzid.toLowerCase();
+  const cached = ianaZones.get(key);
+  if (cached) {
+    return cached;
   }
   let format;
   try {
@@ -302,7 +315,7 @@ function ianaZone(tzid) {
   } catch {
     return null;
   }
-  return zoneFrom((utc) => {
+  const zone2 = zoneFrom((utc) => {
     const parts = Object.fromEntries(format.formatToParts(new Date(utc * 1e3)).map((p) => [p.type, p.value]));
     const year = parts.era === "BC" || parts.era === "B" ? 1 - Number(parts.year) : Number(parts.year);
     return wallOf(
@@ -314,6 +327,8 @@ function ianaZone(tzid) {
       Number(parts.second)
     ) - utc;
   });
+  ianaZones.set(key, zone2);
+  return zone2;
 }
 function zoneOf(component, tzid) {
   const vtimezone = vtimezoneOf(component, tzid);
@@ -323,6 +338,7 @@ function vtimezoneIn(component, tzid) {
   return vtimezoneOf(component, tzid);
 }
 var lowerNames = null;
+var properCase = (name) => name.split("/").every((part) => /^[A-Z]/.test(part));
 function ianaZoneName(name) {
   if (!ianaZone(name)) {
     return null;
@@ -335,8 +351,14 @@ function ianaZoneName(name) {
   if (listed) {
     return listed;
   }
+  return properCase(name) ? name : new Intl.DateTimeFormat("en-US", { timeZone: name }).resolvedOptions().timeZone;
+}
+function isUtcZone(name) {
+  if (!ianaZone(name)) {
+    return false;
+  }
   const resolved = new Intl.DateTimeFormat("en-US", { timeZone: name }).resolvedOptions().timeZone;
-  return resolved.toLowerCase() === name.toLowerCase() ? resolved : name;
+  return ["UTC", "Etc/UTC", "Etc/GMT", "GMT", "Etc/UCT", "Etc/Zulu", "Etc/Universal"].includes(resolved);
 }
 function unknownZone(tzid) {
   return `the zone "${tzid}" has no VTIMEZONE in the document and is no IANA time zone`;
@@ -486,6 +508,8 @@ function utcOfWall(component, upper, tzid, value) {
   const wall = wallOf(...[1, 2, 3, 4, 5, 6].map((i) => Number(m[i])));
   return { kind: "utc", jcal: toUtcJcal(new Date(zone2.toUtc(wall) * 1e3)) };
 }
+var asUtc = (value) => ({ kind: "utc", jcal: `${value.jcal}Z` });
+var anchorIs = (anchor, named) => named.utc ? anchor.form === "utc" : anchor.form === "tzid" && anchor.tzid === named.tzid;
 var anchorText = (anchor) => anchor.form === "tzid" ? `in "${anchor.tzid}"` : anchor.form === "utc" ? "in UTC" : anchor.form;
 function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime = "as-given", named = null) {
   const shape = dateProperty(component, name);
@@ -520,15 +544,16 @@ function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime 
   const own = existing?.getParameter("tzid");
   let zone2 = UTC_ONLY.has(lower) ? null : typeof own === "string" && own ? own : anchor?.form === "tzid" ? anchor.tzid : null;
   if (named && !isDate) {
-    if (UTC_ONLY.has(lower) || component.name === "vcard") {
-      parsed = parsed.map((p) => p.kind === "floating" ? utcOfWall(component, upper, named, p) : p);
+    const target = UTC_ONLY.has(lower) || component.name === "vcard";
+    if (!target && anchor && anchor.form !== "date" && !anchorIs(anchor, named)) {
+      throw new UpdateFieldsError("ZONE_MISMATCH", `${upper} follows DTSTART, which is ${anchorText(anchor)}, so it cannot be written in "${named.tzid}": give DTSTART in the same call to move the event into "${named.tzid}" (DTEND and DUE follow it then), or leave out zone`, { remedy: "same-call", property: upper });
+    }
+    if (target || named.utc) {
+      parsed = parsed.map((p) => p.kind !== "floating" ? p : named.utc ? asUtc(p) : utcOfWall(component, upper, named.tzid, p));
       zone2 = null;
     } else {
-      if (anchor && anchor.form !== "date" && !(anchor.form === "tzid" && anchor.tzid === named)) {
-        throw new UpdateFieldsError("ZONE_MISMATCH", `${upper} follows DTSTART, which is ${anchorText(anchor)}, so it cannot be written in "${named}": give DTSTART in the same call to move the event into "${named}", or leave out zone`, { remedy: "same-call", property: upper });
-      }
-      parsed = parsed.map((p) => p.kind === "utc" ? wallInZone(component, upper, named, p, true) : p);
-      zone2 = named;
+      parsed = parsed.map((p) => p.kind === "utc" ? wallInZone(component, upper, named.tzid, p, true) : p);
+      zone2 = named.tzid;
     }
   }
   if (absoluteTime === "keep-zone" && zone2 && !named) {
@@ -577,8 +602,8 @@ function intList(min, max, signed) {
     for (const v of value.split(",")) {
       const n = Math.abs(Number(v));
       if (!item.test(v) || n < min || n > max) {
-        const range = signed ? `${min} to ${max} or -${max} to -${min}` : `${min} to ${max}`;
-        return `"${v}" is not in ${range}`;
+        const range2 = signed ? `${min} to ${max} or -${max} to -${min}` : `${min} to ${max}`;
+        return `"${v}" is not in ${range2}`;
       }
     }
     return null;
@@ -686,11 +711,11 @@ function untilTime(component, ruleName, raw, floatingTime, named) {
     throw fail("ZONE_MISMATCH", 'must be a local time without a zone, like the floating DTSTART (RFC 5545 3.3.10), e.g. "2026-10-26T18:00:00"');
   }
   if (parsed.kind === "floating" && named && anchor?.form !== "date") {
-    if (anchor && !(anchor.form === "tzid" && anchor.tzid === named)) {
-      throw new UpdateFieldsError("ZONE_MISMATCH", `${ruleName} UNTIL follows DTSTART, which is ${anchorText(anchor)}, so it cannot be read in "${named}": give DTSTART in the same call to move the series into "${named}", give UNTIL with a zone, or leave out zone`, { remedy: "same-call", property: ruleName });
+    if (anchor && !anchorIs(anchor, named)) {
+      throw new UpdateFieldsError("ZONE_MISMATCH", `${ruleName} UNTIL follows DTSTART, which is ${anchorText(anchor)}, so it cannot be read in "${named.tzid}": give DTSTART in the same call to move the series into "${named.tzid}", give UNTIL with a zone, or leave out zone`, { remedy: "same-call", property: ruleName });
     }
-    if (!anchor) {
-      return import_ical2.default.Time.fromDateTimeString(utcOfWall(component, ruleName, named, parsed).jcal);
+    if (!anchor || named.utc) {
+      return import_ical2.default.Time.fromDateTimeString(named.utc ? asUtc(parsed).jcal : utcOfWall(component, ruleName, named.tzid, parsed).jcal);
     }
   }
   if (parsed.kind === "floating") {
@@ -1214,7 +1239,7 @@ function bounded(iterator, budget, recur, horizon) {
   }
   it.check_contracting_rules = function(...args) {
     expansionWork.steps++;
-    if ((budget.left -= cost) < 0) {
+    if ((budget.remaining -= cost) < 0) {
       throw new SeriesTooSparse("the rule is too sparse to expand within the work limit");
     }
     const last = this.last;
@@ -1225,7 +1250,7 @@ function bounded(iterator, budget, recur, horizon) {
   };
   return iterator;
 }
-function expand(master, until) {
+function expandWalls(master, until, budget) {
   const start = startOf(master);
   if (!start) {
     throw new SeriesUnverifiable("the series has no DTSTART");
@@ -1234,12 +1259,17 @@ function expand(master, until) {
   const day = frame.form === "date";
   const norm = (wall) => day ? dayOf(wall) : wall;
   const timeOf = (wall) => day ? import_ical3.default.Time.fromDateString(jcalOf(wall, frame)) : import_ical3.default.Time.fromDateTimeString(jcalOf(wall, "floating"));
-  const walls = /* @__PURE__ */ new Set([norm(start.wall)]);
-  const budget = { left: WORK_BUDGET };
+  const walls = /* @__PURE__ */ new Set();
+  if (norm(start.wall) <= until) {
+    walls.add(norm(start.wall));
+  }
   try {
     for (const rdate of master.getAllProperties("rdate")) {
       for (const stamp of propertyStamps(rdate)) {
-        walls.add(norm(wallIn(master, stamp, frame)));
+        const wall = norm(wallIn(master, stamp, frame));
+        if (wall <= until) {
+          walls.add(wall);
+        }
       }
     }
     for (const property of master.getAllProperties("rrule")) {
@@ -1271,9 +1301,17 @@ function expand(master, until) {
       throw error;
     }
     if (error instanceof SeriesTooSparse) {
-      throw new SeriesTooSparse(walls.size > 200 ? `the override or EXDATE furthest ahead (${icalForm(jcalOf(until, frame))}) lies too far ahead to check within the work limit` : error.message);
+      return { walls, complete: false };
     }
     throw new SeriesUnverifiable(error.message, error);
+  }
+  return { walls, complete: true };
+}
+function expand(master, until) {
+  const { walls, complete } = expandWalls(master, until, { remaining: WORK_BUDGET });
+  if (!complete) {
+    const frame = frameOf(master);
+    throw new SeriesTooSparse(walls.size > 200 ? `the override or EXDATE furthest ahead (${icalForm(jcalOf(until, frame))}) lies too far ahead to check within the work limit` : "the rule is too sparse to expand within the work limit");
   }
   return walls;
 }
@@ -1629,33 +1667,19 @@ function checkDatesOnly(master, move, properties) {
 // src/vtimezone.ts
 var import_ical4 = __toESM(require("ical.js"));
 var DAY3 = 86400;
-var FIRST_YEAR = 1970;
 var LAST_SCANNED_YEAR = 2045;
 var MIN_RUN = 3;
 var SCAN_STEP = 50;
 var SETTLED_YEARS = 10;
 var SCAN_LIMIT = 2300;
 var scans = /* @__PURE__ */ new Map();
-function scan(tzid, offsetAt, start, end) {
-  const key = `${tzid}|${start}|${end}`;
-  const cached = scans.get(key);
-  if (cached) {
-    return cached;
-  }
-  const samples = [];
-  const at = (utc) => {
-    const offset2 = offsetAt(utc);
-    samples.push([utc, offset2]);
-    return offset2;
-  };
+function changesBetween(offsetAt, start, end) {
   const changes = [];
-  const initial = at(start);
   let t = start;
-  let offset = initial;
+  let offset = offsetAt(start);
   while (t < end) {
     const next = Math.min(t + DAY3, end);
-    const after = at(next);
-    if (after === offset) {
+    if (offsetAt(next) === offset) {
       t = next;
       continue;
     }
@@ -1663,25 +1687,49 @@ function scan(tzid, offsetAt, start, end) {
     let hi = next;
     while (hi - lo > 1) {
       const mid = Math.floor((lo + hi) / 2);
-      if (at(mid) === offset) {
+      if (offsetAt(mid) === offset) {
         lo = mid;
       } else {
         hi = mid;
       }
     }
-    const to = at(hi);
-    at(hi - 1);
+    const to = offsetAt(hi);
     changes.push({ at: hi, from: offset, to });
     t = hi;
     offset = to;
   }
-  const result = { initial, start, end, changes, samples };
-  scans.set(key, result);
-  return result;
+  return changes;
+}
+function scan(tzid, offsetAt, start, end) {
+  let known = scans.get(tzid);
+  if (!known) {
+    known = { start, end, initial: offsetAt(start), changes: changesBetween(offsetAt, start, end) };
+  } else {
+    if (start < known.start) {
+      known = {
+        ...known,
+        start,
+        initial: offsetAt(start),
+        changes: [...changesBetween(offsetAt, start, known.start), ...known.changes]
+      };
+    }
+    if (end > known.end) {
+      known = { ...known, end, changes: [...known.changes, ...changesBetween(offsetAt, known.end, end)] };
+    }
+  }
+  scans.set(tzid, known);
+  const before = known.changes.filter((c) => c.at <= start);
+  return {
+    start,
+    end,
+    initial: before.length ? before[before.length - 1].to : known.initial,
+    changes: known.changes.filter((c) => c.at > start && c.at <= end)
+  };
 }
 function onsetOf(change) {
   const local = change.at + change.from;
   const f = fieldsOf(local);
+  const day = Math.floor(local / DAY3) * DAY3;
   return {
     change,
     local,
@@ -1689,41 +1737,54 @@ function onsetOf(change) {
     month: f.month,
     day: f.day,
     weekday: new Date(local * 1e3).getUTCDay(),
-    time: local - Math.floor(local / DAY3) * DAY3,
+    back: (day - wallOf(f.year + 1, 1, 1)) / DAY3,
+    time: local - day,
     up: change.to > change.from
   };
 }
 var WEEKDAYS2 = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
 var daysIn = (year, month) => fieldsOf(wallOf(year, month + 1, 1) - DAY3).day;
-var weekdayOf2 = (year, month, day) => new Date(wallOf(year, month, day) * 1e3).getUTCDay();
-var firstOnOrAfter = (year, month, from, weekday) => from + (weekday - weekdayOf2(year, month, from) + 7) % 7;
+var weekdayAt = (wall) => new Date(wall * 1e3).getUTCDay();
+var firstOnOrAfter = (year, month, from, weekday) => from + (weekday - weekdayAt(wallOf(year, month, from)) + 7) % 7;
+var firstOnOrAfterBack = (year, from, weekday) => from + (weekday - weekdayAt(wallOf(year + 1, 1, 1) + from * DAY3) + 7) % 7;
+var range = (from) => Array.from({ length: 7 }, (_, i) => from + i).join(",");
 function yearlyRule(onsets) {
   const [first] = onsets;
-  if (onsets.some((o) => o.month !== first.month || o.time !== first.time || o.change.from !== first.change.from || o.change.to !== first.change.to)) {
+  if (onsets.some((o) => o.time !== first.time || o.change.from !== first.change.from || o.change.to !== first.change.to)) {
     return null;
   }
-  const month = `BYMONTH=${first.month}`;
-  if (onsets.every((o) => o.weekday === first.weekday)) {
-    const wd = WEEKDAYS2[first.weekday];
-    if (onsets.every((o) => o.day + 7 > daysIn(o.year, o.month))) {
-      return `${month};BYDAY=-1${wd}`;
-    }
-    const shortest = first.month === 2 ? 28 : daysIn(2001, first.month);
-    const fits = (from) => onsets.every((o) => firstOnOrAfter(o.year, o.month, from, o.weekday) === o.day);
-    for (const from of [1, 8, 15, 22]) {
-      if (fits(from)) {
-        return `${month};BYDAY=${(from + 6) / 7}${wd}`;
+  const sameWeekday = onsets.every((o) => o.weekday === first.weekday);
+  const wd = WEEKDAYS2[first.weekday];
+  if (onsets.every((o) => o.month === first.month)) {
+    const month = `BYMONTH=${first.month}`;
+    if (sameWeekday) {
+      if (onsets.every((o) => o.day + 7 > daysIn(o.year, o.month))) {
+        return `${month};BYDAY=-1${wd}`;
+      }
+      const shortest = first.month === 2 ? 28 : daysIn(2001, first.month);
+      const fits = (from) => onsets.every((o) => firstOnOrAfter(o.year, o.month, from, o.weekday) === o.day);
+      for (const from of [1, 8, 15, 22]) {
+        if (fits(from)) {
+          return `${month};BYDAY=${(from + 6) / 7}${wd}`;
+        }
+      }
+      for (let from = 1; from + 6 <= shortest; from++) {
+        if (fits(from)) {
+          return `${month};BYMONTHDAY=${range(from)};BYDAY=${wd}`;
+        }
       }
     }
-    for (let from = 1; from + 6 <= shortest; from++) {
-      if (fits(from)) {
-        const days = Array.from({ length: 7 }, (_, i) => from + i).join(",");
-        return `${month};BYMONTHDAY=${days};BYDAY=${wd}`;
-      }
+    if (onsets.every((o) => o.day === first.day)) {
+      return `${month};BYMONTHDAY=${first.day}`;
     }
   }
-  if (onsets.every((o) => o.day === first.day)) {
-    return `${month};BYMONTHDAY=${first.day}`;
+  if (sameWeekday && onsets.every((o) => o.month >= 3)) {
+    const latest = Math.min(...onsets.map((o) => o.back));
+    for (let from = latest - 6; from <= latest && from + 6 <= -1; from++) {
+      if (onsets.every((o) => firstOnOrAfterBack(o.year, from, o.weekday) === o.back)) {
+        return `BYYEARDAY=${range(from)};BYDAY=${wd}`;
+      }
+    }
   }
   return null;
 }
@@ -1780,44 +1841,86 @@ var icalOffset = (seconds) => {
   const abs = Math.abs(seconds);
   return `${seconds < 0 ? "-" : "+"}${pad2(Math.floor(abs / 3600))}${pad2(Math.floor(abs / 60) % 60)}`;
 };
+var NAME_LOCALES = ["en-US", "en-GB", "en-AU", "en-IN", "en-NZ", "en-CA", "en-IE", "en-ZA"];
+function namer(tzid) {
+  const formats = /* @__PURE__ */ new Map();
+  return (utc, offset) => {
+    for (const locale of NAME_LOCALES) {
+      let format = formats.get(locale);
+      if (!format) {
+        format = new Intl.DateTimeFormat(locale, { timeZone: tzid, timeZoneName: "short" });
+        formats.set(locale, format);
+      }
+      const name = format.formatToParts(new Date(utc * 1e3)).find((p) => p.type === "timeZoneName")?.value ?? "";
+      if (/^[A-Z]{2,6}$/.test(name)) {
+        return name;
+      }
+    }
+    const text = icalOffset(offset);
+    return text.endsWith("00") ? text.slice(0, 3) : text;
+  };
+}
 function render(tzid, observances) {
+  const name = namer(tzid);
   const sorted = [...observances].sort((a, b) => a.start - b.start || a.kind.localeCompare(b.kind));
   return ["BEGIN:VTIMEZONE", `TZID:${tzid}`, ...sorted.flatMap((o) => [
     `BEGIN:${o.kind}`,
     `DTSTART:${icalLocal(o.start)}`,
     `TZOFFSETFROM:${icalOffset(o.from)}`,
     `TZOFFSETTO:${icalOffset(o.to)}`,
+    `TZNAME:${name(o.at, o.to)}`,
     ...o.lines,
     `END:${o.kind}`
   ]), "END:VTIMEZONE"];
 }
 function observancesOf(found, rules, lastYear) {
   const onsets = found.changes.map(onsetOf);
-  const { runs, single } = rules ? runsOf(onsets) : { runs: [], single: onsets };
+  const parts = rules ? runsOf(onsets) : { runs: [], single: onsets };
+  const runs = [...parts.runs];
+  let single = [...parts.single];
+  const last = runs[runs.length - 1];
+  const open = Boolean(last && Math.max(last.ups[last.ups.length - 1].year, last.downs[last.downs.length - 1].year) >= lastYear);
+  let final = null;
+  if (!open && onsets.length) {
+    final = onsets[onsets.length - 1];
+    single = single.filter((o) => o !== final);
+    if (last && (last.ups.includes(final) || last.downs.includes(final))) {
+      const ups = last.ups.filter((o) => o !== final);
+      const downs = last.downs.filter((o) => o !== final);
+      runs.pop();
+      if (ups.length && downs.length) {
+        runs.push({ ...last, ups, downs });
+      } else {
+        single.push(...ups, ...downs);
+      }
+    }
+  }
   const firstUp = onsets[0]?.up;
   const out = [{
     kind: firstUp === void 0 || firstUp ? "STANDARD" : "DAYLIGHT",
     from: found.initial,
     to: found.initial,
     start: found.start + found.initial,
+    at: found.start,
     lines: []
   }];
-  runs.forEach((run) => {
-    const open = run.ups[run.ups.length - 1].year >= lastYear || run.downs[run.downs.length - 1].year >= lastYear;
+  runs.forEach((run, i) => {
+    const isOpen = open && i === runs.length - 1;
     for (const [list, rule] of [[run.ups, run.upRule], [run.downs, run.downRule]]) {
-      const last = list[list.length - 1];
-      const until = open ? "" : `;UNTIL=${icalLocal(last.change.at)}Z`;
+      const end = list[list.length - 1];
+      const until = isOpen ? "" : `;UNTIL=${icalLocal(end.change.at)}Z`;
       out.push({
         kind: list[0].up ? "DAYLIGHT" : "STANDARD",
         from: list[0].change.from,
         to: list[0].change.to,
         start: list[0].local,
+        at: list[0].change.at,
         lines: [`RRULE:FREQ=YEARLY;${rule}${until}`]
       });
     }
   });
   const groups = /* @__PURE__ */ new Map();
-  for (const onset of single) {
+  for (const onset of single.sort((a, b) => a.local - b.local)) {
     const key = `${onset.up}|${onset.change.from}|${onset.change.to}`;
     groups.set(key, [...groups.get(key) ?? [], onset]);
   }
@@ -1828,7 +1931,18 @@ function observancesOf(found, rules, lastYear) {
       from: first.change.from,
       to: first.change.to,
       start: first.local,
+      at: first.change.at,
       lines: group.length > 1 ? group.map((o) => `RDATE:${icalLocal(o.local)}`) : []
+    });
+  }
+  if (final) {
+    out.push({
+      kind: "STANDARD",
+      from: final.change.from,
+      to: final.change.to,
+      start: final.local,
+      at: final.change.at,
+      lines: []
     });
   }
   return out;
@@ -1845,49 +1959,23 @@ function settled(found, endYear) {
 }
 function matches(vtimezone, found) {
   const zone2 = vtimezoneZone(vtimezone);
-  return found.samples.every(([utc, offset]) => zone2.offsetAt(utc) === offset);
+  const points = [[found.start, found.initial]];
+  let previous = found.start;
+  let offset = found.initial;
+  const last = found.changes.length ? found.changes[found.changes.length - 1].to : found.initial;
+  for (const change of [...found.changes, { at: found.end, from: last, to: last }]) {
+    points.push([Math.floor((previous + change.at) / 2), offset], [change.at - 1, change.from], [change.at, change.to]);
+    previous = change.at;
+    offset = change.to;
+  }
+  return points.every(([utc, expected]) => zone2.offsetAt(utc) === expected);
 }
-function yearsIn(calendar, tzid) {
-  const years = [];
-  const yearOf = (value) => {
-    const m = /^(\d{4,})-/.exec(String(value));
-    if (m) {
-      years.push(Number(m[1]));
-    }
-  };
-  const visit = (component) => {
-    if (component.name === "vtimezone") {
-      return;
-    }
-    for (const property of component.getAllProperties()) {
-      if (property.getParameter("tzid") === tzid) {
-        for (const value of property.toJSON().slice(3)) {
-          (Array.isArray(value) ? value : [value]).forEach(yearOf);
-        }
-      }
-    }
-    if (component.getFirstProperty("dtstart")?.getParameter("tzid") === tzid) {
-      for (const name of ["rrule", "exrule"]) {
-        for (const property of component.getAllProperties(name)) {
-          const until = property.toJSON()[3]?.until;
-          if (until !== void 0) {
-            yearOf(until);
-          }
-        }
-      }
-    }
-    component.getAllSubcomponents().forEach(visit);
-  };
-  visit(calendar);
-  return years.length ? [Math.min(...years), Math.max(...years)] : null;
-}
-function generateVtimezone(tzid, firstYear, lastYear) {
+function vtimezoneFor(tzid, firstYear, lastYear) {
   const zone2 = ianaZone(tzid);
   if (!zone2) {
     throw new UpdateFieldsError("UNKNOWN_TZID", `"${tzid}" is no IANA time zone`, { remedy: "fix-value" });
   }
-  const startYear = Math.min(FIRST_YEAR, firstYear - 1);
-  const local = wallOf(startYear, 1, 1);
+  const local = wallOf(firstYear - 1, 1, 1);
   const start = local - zone2.offsetAt(local);
   let endYear = Math.max(LAST_SCANNED_YEAR, lastYear + 2);
   let found;
@@ -1903,13 +1991,7 @@ function generateVtimezone(tzid, firstYear, lastYear) {
   const lastOdd = found.changes.reduce((last, change, i) => odd(change.from) ? i : last, -1);
   if (lastOdd >= 0 && found.changes[lastOdd].at <= wallOf(firstYear, 1, 1) - DAY3) {
     const resume = found.changes[lastOdd].at;
-    found = {
-      ...found,
-      start: resume,
-      initial: found.changes[lastOdd].to,
-      changes: found.changes.slice(lastOdd + 1),
-      samples: found.samples.filter(([utc]) => utc >= resume)
-    };
+    found = { ...found, start: resume, initial: found.changes[lastOdd].to, changes: found.changes.slice(lastOdd + 1) };
   }
   if (odd(found.initial) || found.changes.some((change) => odd(change.to))) {
     const end = lastOdd >= 0 ? found.changes[lastOdd] : null;
@@ -1925,19 +2007,97 @@ function generateVtimezone(tzid, firstYear, lastYear) {
   }
   throw new Error(`the VTIMEZONE generated for "${tzid}" does not match the time zone data`);
 }
-function ensureVtimezone(calendar, tzid) {
-  if (calendar.name !== "vcalendar" || vtimezoneIn(calendar, tzid)) {
-    return;
+function generateVtimezone(tzid, range2) {
+  const from = range2?.from;
+  const to = range2?.to ?? from;
+  if (typeof tzid !== "string" || !Number.isInteger(from) || !Number.isInteger(to) || to < from) {
+    throw new UpdateFieldsError("INVALID_INPUT", "generateVtimezone takes an IANA zone name and { from, to? }, integer years with from <= to", { remedy: "fix-value" });
   }
-  const years = yearsIn(calendar, tzid);
-  if (!years) {
-    return;
-  }
-  const vtimezone = generateVtimezone(tzid, years[0], years[1]);
+  return vtimezoneFor(tzid, from, to).toString();
+}
+function valuesIn(calendar, tzid) {
+  const walls = [];
+  const years = [];
+  const add = (value, list) => {
+    const m = /^(\d{4,})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2}))?/.exec(String(value));
+    if (!m) {
+      return;
+    }
+    const wall = wallOf(...[1, 2, 3, 4, 5, 6].map((i) => Number(m[i] ?? 0)));
+    (list === "walls" ? walls : years).push(list === "walls" ? wall : Number(m[1]));
+  };
+  const visit = (component) => {
+    if (component.name === "vtimezone") {
+      return;
+    }
+    for (const property of component.getAllProperties()) {
+      if (property.getParameter("tzid") === tzid) {
+        for (const value of property.toJSON().slice(3)) {
+          (Array.isArray(value) ? value : [value]).forEach((v) => add(v, "walls"));
+        }
+      }
+    }
+    if (component.getFirstProperty("dtstart")?.getParameter("tzid") === tzid) {
+      for (const name of ["rrule", "exrule"]) {
+        for (const property of component.getAllProperties(name)) {
+          const until = property.toJSON()[3]?.until;
+          if (until !== void 0) {
+            add(until, "years");
+          }
+        }
+      }
+    }
+    component.getAllSubcomponents().forEach(visit);
+  };
+  visit(calendar);
+  return { walls, years };
+}
+function coverageStart(vtimezone) {
+  const starts = vtimezone.getAllSubcomponents().map((o) => o.getFirstPropertyValue("dtstart")).filter((t) => Boolean(t)).map((t) => wallOf(t.year, t.month, t.day, t.hour, t.minute, t.second));
+  return starts.length ? Math.min(...starts) : null;
+}
+function place(calendar, vtimezone, replacing) {
   const all = [...calendar.getAllSubcomponents()];
-  const at = all.findIndex((c) => c.name !== "vtimezone");
+  const at = replacing ? all.indexOf(replacing) : all.findIndex((c) => c.name !== "vtimezone");
+  const next = replacing ? all.map((c) => c === replacing ? vtimezone : c) : [...all.slice(0, at < 0 ? all.length : at), vtimezone, ...at < 0 ? [] : all.slice(at)];
   calendar.removeAllSubcomponents();
-  [...all.slice(0, at < 0 ? all.length : at), vtimezone, ...at < 0 ? [] : all.slice(at)].forEach((c) => calendar.addSubcomponent(c));
+  next.forEach((c) => calendar.addSubcomponent(c));
+}
+function ensureVtimezone(calendar, tzid) {
+  if (calendar.name !== "vcalendar") {
+    return;
+  }
+  const { walls, years } = valuesIn(calendar, tzid);
+  if (!walls.length) {
+    return;
+  }
+  const firstYear = fieldsOf(Math.min(...walls)).year;
+  const lastYear = Math.max(fieldsOf(Math.max(...walls)).year, ...years);
+  const existing = vtimezoneIn(calendar, tzid);
+  if (!existing) {
+    place(calendar, vtimezoneFor(tzid, firstYear, lastYear), null);
+    return;
+  }
+  const start = coverageStart(existing);
+  const earliest = Math.min(...walls);
+  if (start === null || earliest >= start) {
+    return;
+  }
+  const generatedFrom = fieldsOf(start).year + 1;
+  let ours = false;
+  try {
+    ours = Boolean(ianaZone(tzid)) && vtimezoneFor(tzid, generatedFrom, generatedFrom).toString() === existing.toString();
+  } catch {
+    ours = false;
+  }
+  if (!ours) {
+    throw new UpdateFieldsError(
+      "UNSUPPORTED_VTIMEZONE",
+      `the object's VTIMEZONE "${tzid}" starts at ${icalLocal(start)}, after ${icalLocal(earliest)}, a value in that zone; readers (ical.js among them) do not read a time before a VTIMEZONE's first observance correctly, and this VTIMEZONE is not one updateFields generated, so it is not rewritten: rewrite the whole object with a VTIMEZONE that covers the value`,
+      { remedy: "rewrite-object" }
+    );
+  }
+  place(calendar, vtimezoneFor(tzid, Math.min(firstYear, generatedFrom), Math.max(lastYear, generatedFrom)), existing);
 }
 
 // src/updateFields.ts
@@ -1987,7 +2147,7 @@ function seriesMaster(calendar, type) {
 }
 function namedZone(root, zone2) {
   if (vtimezoneIn(root, zone2)) {
-    return zone2;
+    return { utc: false, tzid: zone2 };
   }
   const name = ianaZoneName(zone2);
   if (!name) {
@@ -1997,8 +2157,32 @@ function namedZone(root, zone2) {
       { remedy: "fix-value" }
     );
   }
-  return name;
+  return isUtcZone(name) ? { utc: true, tzid: name } : { utc: false, tzid: name };
 }
+function momentOf(component, name) {
+  const property = component.getFirstProperty(name);
+  if (!property || property.type === "date") {
+    return null;
+  }
+  const m = /^(\d{4,})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(Z)?$/i.exec(String(property.toJSON()[3]));
+  if (!m) {
+    return null;
+  }
+  const wall = wallOf(...[1, 2, 3, 4, 5, 6].map((i) => Number(m[i])));
+  const tzid = property.getParameter("tzid");
+  if (m[7]) {
+    return { wall, utc: wall, frame: "utc" };
+  }
+  if (typeof tzid === "string" && tzid) {
+    const zone2 = zoneOf(component, tzid);
+    return { wall, utc: zone2 ? zone2.toUtc(wall) : null, frame: `tzid:${tzid}` };
+  }
+  return { wall, utc: null, frame: "floating" };
+}
+var wallText = (wall) => {
+  const f = fieldsOf(wall);
+  return `${pad(f.year, 4)}-${pad(f.month)}-${pad(f.day)}T${pad(f.hour)}:${pad(f.minute)}:${pad(f.second)}`;
+};
 function updateFields(calendarObject, fields, options = {}) {
   const icalString = typeof calendarObject === "string" ? calendarObject : calendarObject !== null && typeof calendarObject === "object" ? calendarObject.data : void 0;
   if (!icalString || typeof icalString !== "string") {
@@ -2104,6 +2288,7 @@ function updateFields(calendarObject, fields, options = {}) {
   }
   const actualComponent = component.name === "vcalendar" ? seriesMaster(component, type) : component;
   const zone2 = options.zone === void 0 ? null : namedZone(component, options.zone.trim());
+  const isEvent = ["vevent", "vtodo", "vjournal"].includes(actualComponent.name);
   const entries = Object.entries(fields).sort(
     ([a], [b]) => Number(b.toLowerCase() === "dtstart") - Number(a.toLowerCase() === "dtstart")
   );
@@ -2114,23 +2299,306 @@ function updateFields(calendarObject, fields, options = {}) {
     written,
     icalString
   );
+  const ends = zone2 && isEvent && written.has("dtstart") ? ["dtend", "due"].filter((name) => !written.has(name)).flatMap((name) => {
+    const start2 = momentOf(actualComponent, "dtstart");
+    const end = momentOf(actualComponent, name);
+    if (!start2 || !end) {
+      return [];
+    }
+    const length = start2.frame === end.frame ? end.wall - start2.wall : start2.utc !== null && end.utc !== null ? end.utc - start2.utc : null;
+    return length === null ? [] : [{ name, length }];
+  }) : [];
   for (const [key, value] of entries) {
     if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, zone2) && !setRecurValue(actualComponent, key, value, floatingTime, zone2)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }
+  const start = ends.length ? momentOf(actualComponent, "dtstart") : null;
+  for (const { name, length } of start ? ends : []) {
+    setDateValue(actualComponent, name, wallText(start.wall + length), floatingTime, absoluteTime, zone2);
+  }
   series.finish();
-  if (zone2 && [...written].some((name) => actualComponent.getAllProperties(name).some((p) => p.getParameter("tzid") === zone2))) {
-    ensureVtimezone(component, zone2);
+  if (zone2 && isEvent && ["dtstart", "dtend", "due"].some((name) => written.has(name))) {
+    const begin = momentOf(actualComponent, "dtstart");
+    for (const name of ["dtend", "due"]) {
+      const end = momentOf(actualComponent, name);
+      const before = begin && end && (begin.utc !== null && end.utc !== null ? end.utc < begin.utc : begin.frame === end.frame && end.wall < begin.wall);
+      if (before) {
+        const upper = name.toUpperCase();
+        throw new UpdateFieldsError("END_BEFORE_START", `${upper} ${wallText(end.wall)} would lie before DTSTART ${wallText(begin.wall)}: give ${upper} after the start`, { remedy: "fix-value", property: upper });
+      }
+    }
+  }
+  if (zone2 && !zone2.utc && [...written, ...ends.map((e) => e.name)].some((name) => actualComponent.getAllProperties(name).some((p) => p.getParameter("tzid") === zone2.tzid))) {
+    ensureVtimezone(component, zone2.tzid);
   }
   return series.render(component.toString());
+}
+
+// src/timezone.ts
+var import_ical6 = __toESM(require("ical.js"));
+var invalid = (message) => new UpdateFieldsError("INVALID_VALUE", message, { remedy: "fix-value" });
+function instantOf(instant) {
+  if (instant instanceof Date) {
+    if (Number.isNaN(instant.getTime())) {
+      throw invalid("the instant is an invalid Date");
+    }
+    return Math.floor(instant.getTime() / 1e3);
+  }
+  const value = parseDateValue(instant);
+  if (value.kind !== "utc") {
+    throw invalid(`"${instant}" names no instant: give it with Z or an offset, e.g. "2026-10-26T18:00:00Z"`);
+  }
+  const [y, mo, d, h, mi, sec] = value.jcal.match(/\d+/g).map(Number);
+  return wallOf(y, mo, d, h, mi, sec);
+}
+function wallOfText(wallTime) {
+  const value = parseDateValue(wallTime);
+  if (value.kind !== "floating") {
+    throw invalid(`"${wallTime}" is no wall-clock time: give it without a zone, e.g. "2026-10-26T18:00:00"`);
+  }
+  const [y, mo, d, h, mi, s] = value.jcal.match(/\d+/g).map(Number);
+  return wallOf(y, mo, d, h, mi, s);
+}
+var pad3 = (n, width = 2) => String(n).padStart(width, "0");
+var wallText2 = (wall) => {
+  const f = fieldsOf(wall);
+  return `${pad3(f.year, 4)}-${pad3(f.month)}-${pad3(f.day)}T${pad3(f.hour)}:${pad3(f.minute)}:${pad3(f.second)}`;
+};
+function rootOf(source) {
+  if (typeof source === "string") {
+    try {
+      return new import_ical6.default.Component(import_ical6.default.parse(source));
+    } catch (error) {
+      throw new UpdateFieldsError(
+        "INVALID_ICALENDAR",
+        `Failed to parse iCal data: ${error.message}`,
+        { remedy: "rewrite-object", cause: error }
+      );
+    }
+  }
+  let root = source;
+  while (root.parent) {
+    root = root.parent;
+  }
+  return new import_ical6.default.Component(root.toJSON());
+}
+function converter(tzid, zone2, source) {
+  return {
+    tzid,
+    source,
+    offsetAt: (instant) => zone2.offsetAt(instantOf(instant)),
+    toWallTime: (instant) => wallText2(zone2.fromUtc(instantOf(instant))),
+    toInstant: (wallTime) => new Date(zone2.toUtc(wallOfText(wallTime)) * 1e3),
+    ambiguity: (wallTime) => zone2.ambiguity(wallOfText(wallTime))
+  };
+}
+function resolveZone(tzid, source) {
+  if (typeof tzid !== "string" || !tzid) {
+    return null;
+  }
+  if (source !== void 0) {
+    const root = rootOf(source);
+    const vtimezone = root.name === "vtimezone" ? root.getFirstPropertyValue("tzid") === tzid ? root : null : vtimezoneIn(root, tzid);
+    if (vtimezone) {
+      return converter(tzid, vtimezoneZone(vtimezone), "vtimezone");
+    }
+  }
+  const zone2 = ianaZone(tzid);
+  return zone2 ? converter(tzid, zone2, "iana") : null;
+}
+function resolvePropertyZone(property) {
+  const tzid = property.getParameter("tzid");
+  if (typeof tzid !== "string" || !tzid) {
+    return null;
+  }
+  return resolveZone(tzid, property.parent ?? void 0);
+}
+
+// src/expand.ts
+var import_ical7 = __toESM(require("ical.js"));
+function createRecurrenceBudget(units = WORK_BUDGET) {
+  if (!Number.isFinite(units) || units < 0) {
+    throw new UpdateFieldsError(
+      "INVALID_INPUT",
+      `a recurrence budget is a non-negative number of units, not ${units}`,
+      { remedy: "fix-value" }
+    );
+  }
+  return { remaining: units };
+}
+function boundIn(master, frame, bound, label) {
+  let utc = null;
+  let wall;
+  if (bound instanceof Date) {
+    if (Number.isNaN(bound.getTime())) {
+      throw new UpdateFieldsError("INVALID_VALUE", `${label} is an invalid Date`, { remedy: "fix-value" });
+    }
+    utc = Math.floor(bound.getTime() / 1e3);
+    wall = utc;
+  } else {
+    let value;
+    try {
+      value = parseDateValue(bound);
+    } catch (error) {
+      throw wrapped(error, `${label}: ${error.message}`);
+    }
+    const [y, mo, d, h, mi, s] = value.jcal.match(/\d+/g).map(Number);
+    wall = wallOf(y, mo, d, h ?? 0, mi ?? 0, s ?? 0);
+    utc = value.kind === "utc" ? wall : null;
+  }
+  if (utc !== null && frame.form === "tzid") {
+    const zone2 = zoneOf(master, frame.tzid);
+    if (!zone2) {
+      throw new UpdateFieldsError("UNKNOWN_TZID", `the series' zone "${frame.tzid}" has no VTIMEZONE in the object and is no IANA time zone`, { remedy: "rewrite-object" });
+    }
+    return zone2.fromUtc(utc);
+  }
+  return wall;
+}
+function timeIn(master, wall, kind, tzid) {
+  const value = jcalOf(wall, kind === "tzid" ? "floating" : kind);
+  let instant = null;
+  if (kind === "utc") {
+    instant = wall;
+  } else if (kind === "tzid" && tzid) {
+    instant = zoneOf(master, tzid)?.toUtc(wall) ?? null;
+  }
+  return { value, tzid: kind === "tzid" ? tzid : null, instant: instant === null ? null : new Date(instant * 1e3).toISOString() };
+}
+var frameKind = (frame) => frame.form;
+var frameTzid = (frame) => frame.form === "tzid" ? frame.tzid : null;
+function ownTime(master, property) {
+  const [stamp] = propertyStamps(property);
+  return timeIn(master, stamp.wall, stamp.kind, stamp.tzid ?? null);
+}
+function endOf(master, frame, startWall) {
+  const dtstart = master.getFirstProperty("dtstart");
+  const [start] = propertyStamps(dtstart);
+  for (const name of ["dtend", "due"]) {
+    const property = master.getFirstProperty(name);
+    if (property) {
+      const [end] = propertyStamps(property);
+      const length = wallIn(master, end, frame) - start.wall;
+      const wall = startWall + length;
+      if (end.kind === "tzid" && frame.form === "tzid" && end.tzid !== frame.tzid) {
+        const instant = zoneOf(master, frame.tzid).toUtc(wall);
+        const own = zoneOf(master, end.tzid);
+        return own ? timeIn(master, own.fromUtc(instant), "tzid", end.tzid) : null;
+      }
+      return timeIn(master, wall, frameKind(frame), frameTzid(frame));
+    }
+  }
+  const duration = master.getFirstPropertyValue("duration");
+  if (duration && typeof duration.toSeconds === "function") {
+    const days = (duration.weeks ?? 0) * 7 + (duration.days ?? 0);
+    const seconds = (duration.hours ?? 0) * 3600 + (duration.minutes ?? 0) * 60 + (duration.seconds ?? 0);
+    const sign = duration.isNegative ? -1 : 1;
+    return timeIn(master, startWall + sign * (days * 86400 + seconds), frameKind(frame), frameTzid(frame));
+  }
+  return null;
+}
+function expandOccurrences(calendarObject, options) {
+  const { budget, until } = options ?? {};
+  if (!budget || typeof budget.remaining !== "number") {
+    throw new UpdateFieldsError(
+      "INVALID_INPUT",
+      "expandOccurrences needs options.budget (see createRecurrenceBudget)",
+      { remedy: "fix-value" }
+    );
+  }
+  const limit = options.limit ?? 1e3;
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new UpdateFieldsError(
+      "INVALID_INPUT",
+      `options.limit must be a non-negative integer, not ${limit}`,
+      { remedy: "fix-value" }
+    );
+  }
+  let root;
+  if (calendarObject && typeof calendarObject.toJSON === "function" && typeof calendarObject.getAllSubcomponents === "function") {
+    root = new import_ical7.default.Component(calendarObject.toJSON());
+  } else {
+    const text = typeof calendarObject === "string" ? calendarObject : calendarObject?.data;
+    if (typeof text !== "string") {
+      throw new UpdateFieldsError("INVALID_INPUT", 'expandOccurrences takes iCalendar text, an object with "data", or an ICAL.Component', { remedy: "fix-value" });
+    }
+    try {
+      root = new import_ical7.default.Component(import_ical7.default.parse(text));
+    } catch (error) {
+      throw new UpdateFieldsError(
+        "INVALID_ICALENDAR",
+        `Failed to parse iCal data: ${error.message}`,
+        { remedy: "rewrite-object", cause: error }
+      );
+    }
+  }
+  const master = root.name === "vcalendar" ? seriesMaster(root, options.type) : root;
+  const frame = frameOf(master);
+  if (!frame) {
+    return { occurrences: [], complete: true, stoppedBy: null };
+  }
+  const norm = (wall) => frame.form === "date" ? dayOf(wall) : wall;
+  const end = boundIn(master, frame, until, "until");
+  const start = options.from === void 0 ? -Infinity : boundIn(master, frame, options.from, "from");
+  let found;
+  let excluded;
+  const overrides = /* @__PURE__ */ new Map();
+  try {
+    found = expandWalls(master, end - 1, budget);
+    excluded = new Set(master.getAllProperties("exdate").filter((p) => p.type !== "period").flatMap((p) => propertyStamps(p).map((stamp) => norm(wallIn(master, stamp, frame)))));
+    const uid = master.getFirstPropertyValue("uid");
+    for (const c of root.name === "vcalendar" ? root.getAllSubcomponents(master.name) : []) {
+      const rid = c.getFirstProperty("recurrence-id");
+      if (c !== master && rid && c.getFirstPropertyValue("uid") === uid) {
+        overrides.set(norm(wallIn(master, propertyStamps(rid)[0], frame)), c);
+      }
+    }
+  } catch (error) {
+    if (error instanceof SeriesUnverifiable) {
+      throw error.source instanceof UpdateFieldsError ? error.source : wrapped(error.source ?? error, `the series cannot be expanded: ${error.message}`);
+    }
+    throw error;
+  }
+  const occurrences2 = [];
+  let limited = false;
+  for (const wall of [...found.walls].sort((a, b) => a - b)) {
+    if (wall < norm(start) || excluded.has(wall)) {
+      continue;
+    }
+    if (occurrences2.length === limit) {
+      limited = true;
+      break;
+    }
+    const override = overrides.get(wall);
+    const recurrenceId = timeIn(master, wall, frameKind(frame), frameTzid(frame));
+    if (override) {
+      const own = override.getFirstProperty("dtstart");
+      const ownEnd = override.getFirstProperty("dtend") ?? override.getFirstProperty("due");
+      occurrences2.push({
+        recurrenceId,
+        start: own ? ownTime(master, own) : recurrenceId,
+        end: ownEnd ? ownTime(master, ownEnd) : endOf(master, frame, wall),
+        overridden: true
+      });
+    } else {
+      occurrences2.push({ recurrenceId, start: recurrenceId, end: endOf(master, frame, wall), overridden: false });
+    }
+  }
+  const complete = found.complete && !limited;
+  return { occurrences: occurrences2, complete, stoppedBy: complete ? null : !found.complete ? "budget" : "limit" };
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   UPDATE_FIELDS_ERROR_CODES,
   UpdateFieldsError,
+  createRecurrenceBudget,
+  expandOccurrences,
+  generateVtimezone,
   isUpdateFieldsError,
   parseDateValue,
+  resolvePropertyZone,
+  resolveZone,
   seriesMaster,
   updateFields
 });
