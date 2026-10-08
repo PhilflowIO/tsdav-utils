@@ -2,7 +2,8 @@ import ICAL from 'ical.js';
 import { UpdateFieldsError, wrapped } from './errors';
 import { frameOf, parseDateValue } from './typedValue';
 import type { Anchor } from './typedValue';
-import { dayOf, expandWalls, jcalOf, propertyStamps, SeriesUnverifiable, wallIn, WORK_BUDGET } from './series';
+import { dayOf, expandWalls, instantOf, jcalOf, occurrenceInstant, propertyStamps, SeriesUnverifiable, wallIn,
+  WORK_BUDGET } from './series';
 import type { RecurrenceBudget, Stamp } from './series';
 import { seriesMaster } from './updateFields';
 import type { CalendarObjectInput, ComponentType } from './types';
@@ -259,11 +260,23 @@ export function expandOccurrences(calendarObject: CalendarObjectInput | ICAL.Com
 
   let found: { walls: Set<number>; complete: boolean };
   let excluded: Set<number>;
+  // In a series with a zone an EXDATE excludes the occurrence starting at the
+  // instant it names (RFC 5545 3.3.5 in the hour a DST change shows twice); a
+  // floating EXDATE names none there. Elsewhere it is matched on the wall clock.
+  const zoned = frame.form === 'utc' || frame.form === 'tzid';
+  const occurrenceKey = (wall: number) => zoned ? occurrenceInstant(master, wall, frame) : wall;
   const overrides = new Map<number, ICAL.Component>();
   try {
     found = expandWalls(master, end - 1, budget);
     excluded = new Set(master.getAllProperties('exdate').filter((p) => p.type !== 'period')
-      .flatMap((p) => propertyStamps(p).map((stamp) => norm(wallIn(master, stamp, frame)))));
+      .flatMap((p) => propertyStamps(p).flatMap((stamp) => {
+        if (!zoned) {
+          return [norm(wallIn(master, stamp, frame))];
+        }
+        // a whole day excludes nothing a timed occurrence starts at
+        const instant = stamp.kind === 'date' ? null : instantOf(master, stamp, frame);
+        return instant === null ? [] : [instant];
+      })));
     const uid = master.getFirstPropertyValue('uid');
     for (const c of root.name === 'vcalendar' ? root.getAllSubcomponents(master.name) : []) {
       const rid = c.getFirstProperty('recurrence-id');
@@ -282,7 +295,7 @@ export function expandOccurrences(calendarObject: CalendarObjectInput | ICAL.Com
   const occurrences: Occurrence[] = [];
   let limited = false;
   for (const wall of [...found.walls].sort((a, b) => a - b)) {
-    if (wall < norm(start) || excluded.has(wall)) {
+    if (wall < norm(start) || excluded.has(occurrenceKey(wall))) {
       continue;
     }
     if (occurrences.length === limit) {

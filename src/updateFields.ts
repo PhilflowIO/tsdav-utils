@@ -1,9 +1,11 @@
 import ICAL from 'ical.js';
 import { COMPONENT_TYPES } from './types';
-import type { AppendableProperty, CalendarObjectInput, ComponentType, FieldUpdates, UpdateFieldsOptions } from './types';
+import type { CalendarObjectInput, ComponentType, DateListProperty, FieldUpdates, ListMode, UpdateFieldsOptions } from './types';
 import { beginSeriesEdit } from './series';
 import { UpdateFieldsError } from './errors';
-import { pad, setDateValue, setRecurValue } from './typedValue';
+import { isDateListProperty, pad, setDateValue, setRecurValue } from './typedValue';
+import { DateListEdit } from './dateLists';
+import type { ListPurpose } from './dateLists';
 import type { NamedZone } from './typedValue';
 import { fieldsOf, ianaZoneName, isUtcZone, vtimezoneIn, wallOf, zoneOf } from './zone';
 import { ensureVtimezone } from './vtimezone';
@@ -34,28 +36,33 @@ function componentType(type: unknown): ComponentType {
   return name as ComponentType;
 }
 
-const APPENDABLE: readonly AppendableProperty[] = ['EXDATE', 'RDATE'];
+const LISTS: readonly DateListProperty[] = ['EXDATE', 'RDATE'];
+const MODES: readonly ListMode[] = ['replace', 'add', 'remove'];
 
 /**
- * The properties options.append names, lower-cased. Anything but a list of
- * EXDATE and RDATE is refused: a name the option cannot apply to would
- * otherwise turn an intended addition into a replacement without a word.
+ * options.lists as lower-case list name to mode. Anything else is refused: a
+ * name or mode the option cannot apply would otherwise turn an intended
+ * addition into a replacement without a word.
  */
-function appendedNames(value: unknown): Set<string> {
+function listModes(value: unknown): Map<string, ListMode> {
   if (value === undefined) {
-    return new Set();
+    return new Map();
   }
-  if (!Array.isArray(value)) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new UpdateFieldsError('INVALID_INPUT',
-      `Invalid append: give a list of property names, e.g. ["EXDATE"], not ${describe(value)}`, { remedy: 'fix-value' });
+      `Invalid lists: give an object of list modes, e.g. { EXDATE: 'add' }, not ${describe(value)}`, { remedy: 'fix-value' });
   }
-  return new Set(value.map((name) => {
-    const upper = typeof name === 'string' ? name.toUpperCase() : '';
-    if (!(APPENDABLE as readonly string[]).includes(upper)) {
-      throw new UpdateFieldsError('INVALID_INPUT', `Invalid append entry ${typeof name === 'string' ? `"${name}"` : describe(name)}: ` +
-        `only ${APPENDABLE.join(' and ')} can be added to`, { remedy: 'fix-value', ...(upper ? { property: upper } : {}) });
+  return new Map(Object.entries(value).map(([name, mode]) => {
+    const upper = name.toUpperCase();
+    if (!(LISTS as readonly string[]).includes(upper)) {
+      throw new UpdateFieldsError('INVALID_INPUT', `Invalid lists entry "${name}": only ${LISTS.join(' and ')} are lists of dates`,
+        { remedy: 'fix-value', property: upper });
     }
-    return upper.toLowerCase();
+    if (!(MODES as readonly unknown[]).includes(mode)) {
+      throw new UpdateFieldsError('INVALID_INPUT', `Invalid list mode for ${upper}: ${typeof mode === 'string' ? `"${mode}"` : describe(mode)}; ` +
+        'use "replace", "add" or "remove"', { remedy: 'fix-value', property: upper });
+    }
+    return [upper.toLowerCase(), mode as ListMode];
   }));
 }
 
@@ -187,8 +194,9 @@ const wallText = (wall: number) => {
  * @param options.type - the component type to write into ("vevent", "vtodo",
  *   "vjournal"); by default the first type present, in that order. Throws if
  *   the object holds no component of that type, or is a vCard
- * @param options.append - EXDATE and RDATE to add the values given to,
- *   instead of replacing the whole list (see "Lists of dates" in the README)
+ * @param options.lists - per list of dates (EXDATE, RDATE) whether the values
+ *   replace the list (default), are added to it, or are removed from it (see
+ *   "Lists of dates" in the README)
  * @returns Updated iCal string ready for tsdav.updateCalendarObject()
  *
  * @example
@@ -204,6 +212,20 @@ export function updateFields(
   calendarObject: CalendarObjectInput,
   fields: FieldUpdates,
   options: UpdateFieldsOptions = {}
+): string {
+  return editFields(calendarObject, fields, options, null);
+}
+
+/**
+ * updateFields, for the occurrence helpers too, which word their refusals for
+ * occurrences rather than EXDATEs (see ListPurpose) and take the override of a
+ * cancelled occurrence along.
+ */
+export function editFields(
+  calendarObject: CalendarObjectInput,
+  fields: FieldUpdates,
+  options: UpdateFieldsOptions,
+  purpose: ListPurpose,
 ): string {
   // 1. Check the arguments' types (a JavaScript caller, or an LLM's tool
   //    call, can pass anything) and extract the iCal string
@@ -242,7 +264,7 @@ export function updateFields(
       `Invalid absoluteTime "${absoluteTime}": use "as-given" or "keep-zone"`, { remedy: 'fix-value' });
   }
   const type = options.type === undefined ? undefined : componentType(options.type);
-  const appended = appendedNames(options.append);
+  const modes = listModes(options.lists);
   if (options.zone !== undefined) {
     if (typeof options.zone !== 'string' || options.zone.trim() === '') {
       throw new UpdateFieldsError('INVALID_INPUT', `Invalid input: zone must be an IANA time zone name such as ` +
@@ -316,17 +338,22 @@ export function updateFields(
   //    UNTIL the call does not write itself — and a write that would change
   //    the series otherwise, or orphan an override or EXDATE, is refused (see
   //    beginSeriesEdit).
-  //    EXDATE and RDATE are each one list, whatever lines it is spread over:
-  //    a write replaces all of it, or with options.append adds to it, after
+  //    EXDATE and RDATE are each one list, whatever lines it is spread over,
+  //    which the call replaces, adds to or removes from (options.lists) once
   //    the series has moved, so the values given are the new series' (see
-  //    setDateValue). Added values do not replace what the series holds, so
-  //    they are not among the properties the series edit treats as written.
+  //    DateListEdit). Values added or removed leave the rest of the list to
+  //    move, so those lists are not among the properties the series edit
+  //    treats as written.
   const entries = Object.entries(fields).sort(
     ([a], [b]) => Number(b.toLowerCase() === 'dtstart') - Number(a.toLowerCase() === 'dtstart'));
-  const written = new Set(entries.map(([key]) => key.toLowerCase()).filter((name) => !appended.has(name)));
-  const added = new Set(entries.map(([key]) => key.toLowerCase()).filter((name) => appended.has(name)));
+  const lists = new Map(entries.map(([key]) => key.toLowerCase())
+    .filter((name) => isDateListProperty(actualComponent, name))
+    .map((name) => [name, modes.get(name) ?? 'replace'] as [string, ListMode]));
+  const written = new Set(entries.map(([key]) => key.toLowerCase())
+    .filter((name) => (lists.get(name) ?? 'replace') === 'replace'));
+  const listEdit = lists.size ? new DateListEdit(actualComponent, lists, purpose) : null;
   const series = beginSeriesEdit(component.name === 'vcalendar' ? component : null, actualComponent, written,
-    icalString, added);
+    icalString, listEdit);
   // A DTSTART written in a zone takes the end along that the call does not
   // write: an end left in the old zone would be read there, hours off, or
   // before the new start. The duration is kept on the wall clock (as measured
@@ -345,7 +372,7 @@ export function updateFields(
       return start.utc !== null && end.utc !== null ? [{ name, length: end.utc - start.utc, elapsed: true }] : [];
     }) : [];
   for (const [key, value] of entries) {
-    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, zone, appended.has(key.toLowerCase())) &&
+    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, zone) &&
         !setRecurValue(actualComponent, key, value, floatingTime, zone)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }

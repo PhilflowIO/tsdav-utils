@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import ICAL from 'ical.js';
 import {
+  cancelOccurrences,
+  restoreOccurrences,
   UPDATE_FIELDS_ERROR_CODES,
   UpdateFieldsError,
   isUpdateFieldsError,
@@ -43,11 +45,15 @@ const CASES = {
     { name: 'parseDateValue of a number', call: () => parseDateValue(5 as never), remedy: 'fix-value' },
     { name: 'two top-level components', call: () => updateFields(timed + timed, { SUMMARY: 'x' }), remedy: 'fix-value',
       message: /holds 2 top-level components/ },
-    { name: 'append not a list', call: () => updateFields(timed, {}, { append: 'EXDATE' as never }), remedy: 'fix-value',
-      message: /append: give a list of property names/ },
-    { name: 'append of a property that is no list of dates', remedy: 'fix-value', property: 'SUMMARY',
-      call: () => updateFields(timed, { SUMMARY: 'x' }, { append: ['SUMMARY' as never] }),
-      message: /append entry "SUMMARY": only EXDATE and RDATE/ },
+    { name: 'lists not an object', call: () => updateFields(timed, {}, { lists: ['EXDATE'] as never }), remedy: 'fix-value',
+      message: /lists: give an object of list modes/ },
+    { name: 'lists naming a property that is no list of dates', remedy: 'fix-value', property: 'SUMMARY',
+      call: () => updateFields(timed, { SUMMARY: 'x' }, { lists: { SUMMARY: 'add' } as never }),
+      message: /lists entry "SUMMARY": only EXDATE and RDATE/ },
+    { name: 'an unknown list mode', remedy: 'fix-value', property: 'EXDATE',
+      call: () => updateFields(timed, {}, { lists: { EXDATE: 'append' as never } }),
+      message: /list mode for EXDATE: "append"/ },
+    { name: 'cancelOccurrences without ids', remedy: 'fix-value', call: () => cancelOccurrences(timed, []) },
   ],
   INVALID_ICALENDAR: [
     { name: 'text that does not parse', call: () => updateFields('this is not iCalendar', { SUMMARY: 'x' }),
@@ -110,6 +116,10 @@ const CASES = {
       remedy: 'fix-value', property: 'RRULE' },
   ],
   ZONE_MISMATCH: [
+    { name: 'an EXDATE with Z on a floating series', remedy: 'fix-value', property: 'EXDATE',
+      call: () => updateFields(calendar(...event('DTSTART:20261005T090000', 'RRULE:FREQ=WEEKLY')),
+        { EXDATE: '2026-10-12T09:00:00Z' }, { lists: { EXDATE: 'add' } }),
+      message: /DTSTART is a local time without a zone \(floating\).*drop the zone.*"2026-10-12T09:00:00"/ },
     { name: 'a zoneless DTEND next to a UTC DTSTART', call: () => updateFields(timed, { DTEND: '2026-10-05T11:00:00' }),
       remedy: 'fix-value', property: 'DTEND' },
     { name: 'a zoneless DTSTAMP', call: () => updateFields(timed, { DTSTAMP: '2026-10-05T11:00:00' }),
@@ -186,11 +196,26 @@ const CASES = {
   ORPHANED_EXCEPTIONS: [
     { name: 'a new rule that drops an overridden occurrence', remedy: 'same-call', property: 'RRULE',
       call: () => updateFields(weekly(), { RRULE: 'FREQ=WEEKLY;COUNT=1' }) },
+    { name: 'an EXDATE that excludes an overridden occurrence', remedy: 'fix-value', property: 'EXDATE',
+      call: () => updateFields(weekly(), { EXDATE: '2026-10-12T09:00:00Z' }, { lists: { EXDATE: 'add' } }),
+      message: /^EXDATE would exclude the occurrence an override replaces \(RECURRENCE-ID:20261012T090000Z\).*cancelOccurrences/ },
   ],
   UNMATCHED_EXDATE: [
     { name: 'an added EXDATE at a time the series has no occurrence', remedy: 'fix-value', property: 'EXDATE',
-      call: () => updateFields(weekly('EXDATE:20261019T090000Z'), { EXDATE: '2026-10-26T10:00:00Z' }, { append: ['EXDATE'] }),
+      call: () => updateFields(weekly('EXDATE:20261019T090000Z'), { EXDATE: '2026-10-26T10:00:00Z' }, { lists: { EXDATE: 'add' } }),
       message: /^EXDATE 20261026T100000Z names no occurrence of the series/ },
+  ],
+  NOT_IN_LIST: [
+    { name: 'a value to remove the list does not hold', remedy: 'fix-value', property: 'EXDATE',
+      call: () => updateFields(weekly('EXDATE:20261019T090000Z'), { EXDATE: '2026-10-26T09:00:00Z' }, { lists: { EXDATE: 'remove' } }),
+      message: /^EXDATE 20261026T090000Z is not in the list/ },
+    { name: 'an occurrence to restore that is not cancelled', remedy: 'fix-value', property: 'EXDATE',
+      call: () => restoreOccurrences(weekly(), ['2026-10-26T09:00:00Z']), message: /^20261026T090000Z is not cancelled/ },
+  ],
+  UNKNOWN_OCCURRENCE: [
+    { name: 'an occurrence to cancel the series does not have', remedy: 'fix-value', property: 'EXDATE',
+      call: () => cancelOccurrences(weekly(), ['2026-10-26T10:00:00Z']),
+      message: /^20261026T100000Z names no occurrence of the series .*; that day it has one at 20261026T090000Z/ },
   ],
   DST_AMBIGUOUS: [
     // 2026-10-25 00:30Z is 02:30 CEST, a wall clock Berlin shows twice that night

@@ -1,5 +1,7 @@
 import ICAL from 'ical.js';
 import { frameOf, isDateListProperty, isRecurProperty, pad } from './typedValue';
+import { instantKey, lineKeys, listKeys } from './dateLists';
+import type { DateListEdit } from './dateLists';
 import type { Anchor } from './typedValue';
 import { fieldsOf, unknownZone, wallOf, zoneOf } from './zone';
 import { UpdateFieldsError, wrapped } from './errors';
@@ -65,7 +67,7 @@ function stampOf(jcal: string, tzid: unknown, name: string): Stamp {
 }
 
 /** The values of a property as jCal strings (PERIOD values are arrays) */
-const valuesOf = (property: ICAL.Property): unknown[] => (property.toJSON() as unknown[]).slice(3);
+export const valuesOf = (property: ICAL.Property): unknown[] => (property.toJSON() as unknown[]).slice(3);
 
 export const propertyStamps = (property: ICAL.Property) => {
   const tzid = property.getParameter('tzid');
@@ -106,7 +108,7 @@ export function jcalOf(wall: number, frame: Anchor | Stamp['kind']): string {
   return `${date}T${pad(f.hour)}:${pad(f.minute)}:${pad(f.second)}${form === 'utc' ? 'Z' : ''}`;
 }
 
-const icalForm = (jcal: string) => jcal.replace(/[-:]/g, '');
+export const icalForm = (jcal: string) => jcal.replace(/[-:]/g, '');
 
 function zone(component: ICAL.Component, tzid: string) {
   const resolved = zoneOf(component, tzid);
@@ -148,6 +150,28 @@ export function wallIn(component: ICAL.Component, stamp: Stamp, frame: Anchor): 
     return utc;
   }
   return zone(component, target).fromUtc(utc);
+}
+
+/**
+ * The instant a value names in a timed series with a zone (UTC or a TZID), as
+ * UTC seconds: a wall clock in a TZID is read with RFC 5545 3.3.5 (the first
+ * pass of a repeated hour, past a skipped one). Null where it names none — a
+ * date, a floating time, or any value of a floating or all-day series — so it
+ * is compared on the wall clock instead.
+ */
+export function instantOf(component: ICAL.Component, stamp: Stamp, frame: Anchor): number | null {
+  if (frame.form !== 'utc' && frame.form !== 'tzid') {
+    return null;
+  }
+  if (stamp.kind === 'utc') {
+    return stamp.wall;
+  }
+  return stamp.kind === 'tzid' ? zone(component, stamp.tzid!).toUtc(stamp.wall) : null;
+}
+
+/** An occurrence of a timed series with a zone (a wall clock of its frame) as the instant it starts */
+export function occurrenceInstant(component: ICAL.Component, wall: number, frame: Anchor): number {
+  return frame.form === 'tzid' ? zone(component, frame.tzid).toUtc(wall) : wall;
 }
 
 /**
@@ -694,7 +718,8 @@ function bounded(iterator: ICAL.RecurIterator, budget: RecurrenceBudget, recur: 
  * Throws SeriesUnverifiable when it cannot be told at all (a rule ical.js
  * cannot expand, a zone that cannot be read).
  */
-export function expandWalls(master: ICAL.Component, until: number, budget: RecurrenceBudget): { walls: Set<number>; complete: boolean } {
+export function expandWalls(master: ICAL.Component, until: number, budget: RecurrenceBudget,
+  skipUnplaced = false): { walls: Set<number>; complete: boolean } {
   const start = startOf(master);
   if (!start) {
     throw new SeriesUnverifiable('the series has no DTSTART');
@@ -711,8 +736,18 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
   }
   try {
     for (const rdate of master.getAllProperties('rdate')) {
-      for (const stamp of propertyStamps(rdate)) {
-        const wall = norm(wallIn(master, stamp, frame));
+      for (const [i, stamp] of propertyStamps(rdate).entries()) {
+        let wall: number;
+        try {
+          wall = norm(wallIn(master, stamp, frame));
+        } catch (error) {
+          // an instant a floating series has no place for is no occurrence a
+          // value of that series can name; elsewhere it stops the check
+          if (skipUnplaced && error instanceof UpdateFieldsError && error.code === 'ZONE_MISMATCH') {
+            continue;
+          }
+          throw new SeriesUnverifiable(`RDATE ${icalForm(String(valuesOf(rdate)[i]))}: ${(error as Error).message}`, error);
+        }
         if (wall <= until) {
           walls.add(wall);
         }
@@ -741,7 +776,7 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
       }
     }
   } catch (error) {
-    if (error instanceof BoundUnavailable) {
+    if (error instanceof BoundUnavailable || error instanceof SeriesUnverifiable) {
       throw error;
     }
     if (error instanceof SeriesTooSparse) {
@@ -752,9 +787,15 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
   return { walls, complete: true };
 }
 
-/** expandWalls with a budget of its own; throws SeriesTooSparse when it runs out */
+/**
+ * expandWalls with a budget of its own, for the checks of a write; throws
+ * SeriesTooSparse when it runs out. An RDATE in UTC in a floating series is
+ * left out: it has no place on the series' wall clock, so no override, EXDATE
+ * or RDATE of that series can name it, and it must not stop a check it cannot
+ * take part in.
+ */
 function expand(master: ICAL.Component, until: number): Set<number> {
-  const { walls, complete } = expandWalls(master, until, { remaining: WORK_BUDGET });
+  const { walls, complete } = expandWalls(master, until, { remaining: WORK_BUDGET }, true);
   if (!complete) {
     // a dense rule that runs out reaches far: the reason is the distance
     const frame = frameOf(master)!;
@@ -833,54 +874,14 @@ function suggestedRule(rule: ICAL.Recur, start: number, timed: boolean): string 
 /** Properties whose change decides which occurrences a series has */
 const SHAPING = ['dtstart', 'rrule', 'rdate'];
 
-/**
- * The lines a call added to an EXDATE or RDATE list (options.append): the ones
- * of those names the component did not hold before the write.
- */
-function addedLines(master: ICAL.Component, added: Set<string>, before: Set<ICAL.Property>): ICAL.Property[] {
-  return [...added].flatMap((name) => master.getAllProperties(name).filter((property) => !before.has(property)));
-}
-
-/**
- * Drop from each added line the values its list already holds, and repeats
- * within the line: the same instant (the same date, in an all-day series),
- * read in the series' frame, whatever zone each is written in. Where an
- * instant cannot be read there (no DTSTART, a zone without rules) values are
- * compared as written. A line left without values goes. Values already in the
- * object that do not parse are left to the checks that read them.
- */
-function dropDuplicates(master: ICAL.Component, lines: ICAL.Property[]) {
-  const frame = frameOf(master);
-  const keyOf = (stamp: Stamp): string => {
-    if (frame) {
-      try {
-        const wall = wallIn(master, stamp, frame);
-        // a whole day next to a timed series is not its midnight occurrence
-        const day = stamp.kind === 'date' && frame.form !== 'date' ? 'day ' : '';
-        return `${day}${frame.form === 'date' ? dayOf(wall) : wall}`;
-      } catch {
-        // its instant cannot be told in the series' frame: compared as written
-      }
-    }
-    return `${stamp.kind} ${stamp.tzid ?? ''} ${stamp.wall}`;
-  };
-  const keysOf = (property: ICAL.Property): string[] => {
-    try {
-      return propertyStamps(property).map(keyOf);
-    } catch {
-      return [];
-    }
-  };
-  for (const line of lines) {
-    const seen = new Set(master.getAllProperties(line.name).filter((p) => p !== line).flatMap(keysOf));
-    const values = valuesOf(line);
-    const keys = keysOf(line);
-    const kept = values.filter((_, i) => !seen.has(keys[i]) && Boolean(seen.add(keys[i])));
-    if (!kept.length) {
-      master.removeProperty(line);
-    } else if (kept.length < values.length) {
-      line.setValues(kept);
-    }
+/** How a value names an occurrence of the series, with one as the example */
+function occurrenceForm(frame: Anchor, example: number): string {
+  const value = jcalOf(example, frame);
+  switch (frame.form) {
+    case 'tzid': return `the wall-clock time in "${frame.tzid}", like DTSTART (e.g. "${value}"), or the instant with "Z" or an offset`;
+    case 'utc': return `the time in UTC with "Z", like DTSTART (e.g. "${value}")`;
+    case 'floating': return `the local time without a zone, like DTSTART (e.g. "${value}")`;
+    default: return `the date, like DTSTART (e.g. "${value}")`;
   }
 }
 
@@ -888,41 +889,71 @@ function dropDuplicates(master: ICAL.Component, lines: ICAL.Property[]) {
  * Each EXDATE value a call added has to name an occurrence of the series as it
  * comes out of the write: one that names none excludes nothing, and the
  * occurrence the caller meant to cancel would silently stay (most often a
- * time given in the wrong zone). An EXDATE that replaces the whole list is the
- * caller's to state, as any value written, and is not checked.
+ * time given in the wrong zone). An EXDATE list given whole (mode replace) is
+ * the caller's to state, as any value written, and is not checked.
  */
-function checkAddedExdates(master: ICAL.Component, lines: ICAL.Property[]) {
-  const exdates = lines.filter((line) => line.name === 'exdate' && master.getAllProperties('exdate').includes(line));
-  const labels = exdates.flatMap((line) => valuesOf(line).map((v) => `EXDATE ${icalForm(String(v))}`));
-  if (!labels.length) {
+function checkAddedExdates(master: ICAL.Component, added: { stamp: Stamp; label: string; value: unknown }[],
+  cancel: boolean) {
+  if (!added.length) {
     return;
   }
-  let found: boolean[];
+  const frame = frameOf(master);
+  if (!frame) {
+    throw new SeriesUnverifiable('the series has no DTSTART');
+  }
+  const targets = added.map(({ stamp, label }) => {
+    try {
+      const wall = wallIn(master, stamp, frame);
+      return frame.form === 'date' ? dayOf(wall) : wall;
+    } catch (error) {
+      throw new SeriesUnverifiable(`${label}: ${(error as Error).message}`, error);
+    }
+  });
+  let walls: Set<number>;
   try {
-    found = occurrences(master, exdates.flatMap(propertyStamps), labels);
+    // a day further, to name an occurrence on the same day in a refusal
+    walls = expand(master, Math.max(...targets) + DAY);
   } catch (error) {
     if (!(error instanceof SeriesTooSparse)) {
       throw error;
     }
-    throw new UpdateFieldsError('CHECK_LIMIT_EXCEEDED', 'Cannot check that the EXDATE added names an occurrence of the ' +
-      `series: ${error.message}. Give the complete EXDATE list without append instead`,
-    { remedy: 'fix-value', property: 'EXDATE' });
+    throw new UpdateFieldsError('CHECK_LIMIT_EXCEEDED', `Cannot verify that ${added.map((a) => a.label).join(', ')} ` +
+      `names an occurrence of the series: ${error.message}. Rewrite the whole iCalendar object with the ` +
+      'exclusions it should have', { remedy: 'rewrite-object', property: 'EXDATE' });
   }
-  const lost = labels.filter((_, i) => !found[i]);
-  if (lost.length) {
-    const series = ['dtstart', 'rrule', 'rdate'].flatMap((name) => master.getAllProperties(name))
-      .map((property) => property.toICALString()).join(', ');
-    throw new UpdateFieldsError('UNMATCHED_EXDATE', `${lost.join(', ')} names no occurrence of the series ` +
-      `(${series}), so it would exclude nothing. Give the start of the occurrence to cancel, at the time the ` +
-      'series has it: in the zone of DTSTART, or in UTC', { remedy: 'fix-value', property: 'EXDATE' });
+  // Matched by instant where the series has a zone: in the hour a DST change
+  // shows twice only the first pass names the occurrence (RFC 5545 3.3.5)
+  const instants = frame.form === 'utc' || frame.form === 'tzid'
+    ? new Set([...walls].map((wall) => occurrenceInstant(master, wall, frame))) : null;
+  const lost = added.filter(({ stamp }, i) => {
+    if (!instants) {
+      return !walls.has(targets[i]);
+    }
+    const instant = instantOf(master, stamp, frame);
+    return instant === null || !instants.has(instant);
+  });
+  if (!lost.length) {
+    return;
   }
+  const target = targets[added.indexOf(lost[0])];
+  const sameDay = [...walls].filter((wall) => dayOf(wall) === dayOf(target)).sort((x, y) => x - y)[0];
+  const first = Math.min(...walls);
+  const series = ['dtstart', 'rrule', 'rdate'].flatMap((name) => master.getAllProperties(name))
+    .map((property) => property.toICALString()).join(', ');
+  const what = lost.map((a) => cancel ? icalForm(String(a.value)) : a.label).join(', ');
+  const hint = sameDay !== undefined ? `; that day it has one at ${icalForm(jcalOf(sameDay, frame))}` : '';
+  throw new UpdateFieldsError(cancel ? 'UNKNOWN_OCCURRENCE' : 'UNMATCHED_EXDATE', `${what} ${lost.length > 1 ? 'name' : 'names'} ` +
+    `no occurrence of the series (${series})${hint}, so ${cancel ? 'there is nothing to cancel' : 'it would exclude nothing'}. ` +
+    `Give the original start of an occurrence as ${occurrenceForm(frame, sameDay ?? first)}`,
+  { remedy: 'fix-value', property: 'EXDATE' });
 }
 
-/** A write on something that is no series master: an added line is only deduplicated */
-function noSeries(master: ICAL.Component, added: Set<string>) {
-  const held = new Set(master.getAllProperties());
+/** A write on something that is no series master: its lists are merged, nothing is checked */
+function noSeries(lists: DateListEdit | null) {
   return {
-    finish: () => dropDuplicates(master, addedLines(master, added, held)),
+    finish: () => {
+      lists?.apply();
+    },
     render: (text: string) => text,
   };
 }
@@ -936,14 +967,16 @@ function noSeries(master: ICAL.Component, added: Set<string>) {
  * @param calendar - the VCALENDAR, to find the overrides in; null for a bare
  *   component, which has none
  * @param master - the component updateFields writes (see seriesMaster)
- * @param written - the lower-case property names the call writes, replacing them
- * @param added - the lower-case names of the lists the call adds to (EXDATE,
- *   RDATE with options.append): their values join the series' after it has
- *   moved, without the ones it holds already, and an added EXDATE has to name
- *   an occurrence (see checkAddedExdates)
+ * @param written - the lower-case property names the call writes, replacing
+ *   them; a list of dates only in mode replace
+ * @param lists - the call's list edits (EXDATE, RDATE): applied once the series
+ *   has moved, so values added or removed meet the moved ones; an added EXDATE
+ *   has to name an occurrence (see checkAddedExdates)
  */
 export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component, written: Set<string>,
-  source: string | null = null, added: Set<string> = new Set()) {
+  source: string | null = null, lists: DateListEdit | null = null) {
+  // Removing RDATEs changes the occurrences as a new RDATE does
+  const shapes = written.has('rrule') || written.has('rdate') || lists?.modes.get('rdate') === 'remove';
   // A check that cannot be completed fails closed, with what the caller can do
   const failClosed = (error: unknown) => {
     if (error instanceof SeriesUnverifiable) {
@@ -964,7 +997,7 @@ export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Co
       return error;
     }
     const rule = master.getFirstProperty('rrule')?.toICALString() ?? 'The rule';
-    return written.has('rrule') || written.has('rdate')
+    return shapes
       ? new UpdateFieldsError('CHECK_LIMIT_EXCEEDED', `Cannot check that the overrides and EXDATEs still name occurrences of the series: ${rule}: ` +
         `${error.message}. Rewrite the whole iCalendar object instead`, { remedy: 'rewrite-object' })
       : new UpdateFieldsError('CHECK_LIMIT_EXCEEDED', `Cannot check that moving DTSTART keeps the series' occurrences: ${rule}: ${error.message}. ` +
@@ -972,7 +1005,7 @@ export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Co
       { remedy: 'same-call' });
   };
   try {
-    const edit = startSeriesEdit(calendar, master, written, source, added);
+    const edit = startSeriesEdit(calendar, master, written, source, lists, shapes);
     return {
       finish() {
         try {
@@ -989,9 +1022,9 @@ export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Co
 }
 
 function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component, written: Set<string>,
-  source: string | null, added: Set<string>) {
+  source: string | null, lists: DateListEdit | null, shapes: boolean) {
   if (!['vevent', 'vtodo', 'vjournal'].includes(master.name) || master.hasProperty('recurrence-id')) {
-    return noSeries(master, added);
+    return noSeries(lists);
   }
   if (written.has('recurrence-id')) {
     throw new UpdateFieldsError('RECURRENCE_ID_ON_MASTER', 'RECURRENCE-ID cannot be written on the series master: it would turn the master into an ' +
@@ -1002,10 +1035,10 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
 
   // A property the call writes itself is the caller's, for the new series: the
   // first line of its name is the one replaced, or every line of a list of
-  // dates (see setDateValue/setRecurValue)
+  // dates given whole, which DateListEdit merges with the values given rather
+  // than move (see setDateValue/setRecurValue)
   const replaced = new Set([...written].flatMap((name) => isDateListProperty(master, name)
     ? master.getAllProperties(name) : [master.getFirstProperty(name)]).filter(Boolean));
-  const held = new Set(master.getAllProperties());
   const own = (name: string) => master.getAllProperties(name).filter((p) => !replaced.has(p));
 
   const uid = master.getFirstPropertyValue('uid');
@@ -1027,10 +1060,19 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
       property, index, label: `EXDATE ${icalForm(String(v))}`,
     }))),
   ];
-  const shaping = SHAPING.filter((name) => written.has(name));
+  const shaping = SHAPING.filter((name) => written.has(name) || (name === 'rdate' && lists?.modes.get('rdate') === 'remove'));
   // A move alone keeps every occurrence or is refused (checkMove); only a new
-  // rule can leave an override or EXDATE without its occurrence
-  const ruleWritten = written.has('rrule') || written.has('rdate');
+  // rule (or RDATEs removed) can leave an override or EXDATE without its occurrence
+  const ruleWritten = shapes;
+  // An override replaces an occurrence; an EXDATE the call makes name it would
+  // take the occurrence away and leave the override applying to nothing. One
+  // excluded already is not this call's doing.
+  const overrideKey = (c: ICAL.Component) => lineKeys(master, c.getFirstProperty('recurrence-id')!)?.[0] ?? null;
+  const exdateBefore = lists?.modes.has('exdate') ? listKeys(master, 'exdate') : null;
+  const excludedBefore = new Set(exdateBefore ? overrides.filter((c) => {
+    const key = overrideKey(c);
+    return key !== null && exdateBefore.has(key);
+  }) : []);
   // Only what names an occurrence now has to keep naming one; an override that
   // was already stale is not this call's doing
   const before = ruleWritten && references.length
@@ -1040,8 +1082,9 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
   // Without a new rule the series has to come out the same, moved
   const keepsRule = !['rrule', 'exrule', 'rdate'].some((name) => written.has(name));
   const texts = new RuleTexts(source, calendar, master);
+  const removed = new Set<ICAL.Component>();
   const named = () => [...master.getAllProperties('exdate'), ...master.getAllProperties('rdate'),
-    ...overrides.map((c) => c.getFirstProperty('recurrence-id')!)];
+    ...overrides.filter((c) => !removed.has(c)).map((c) => c.getFirstProperty('recurrence-id')!)];
   // Found now, on the series as it was, but reported only if the write does
   // change its occurrences (a DTSTART written with the same value does not)
   let twinBefore: string | null = null;
@@ -1102,10 +1145,44 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
           checkMove(master, move, start.text, now.text, texts);
         }
       }
-      // Added values are the new series': compared with the moved ones
-      const appended = addedLines(master, added, held);
-      dropDuplicates(master, appended);
-      checkAddedExdates(master, appended);
+      // What has to keep naming an occurrence, read before the lists change
+      // under it (a value removed from a line shifts the others)
+      let watchedStamps = watched.length ? referenceStamps(watched) : [];
+      let stillWatched = watched;
+      // The lists' values are the new series': merged with the moved ones
+      if (lists) {
+        const outcome = lists.apply();
+        checkAddedExdates(master, outcome.addedExdates, lists.purpose === 'cancel');
+        // Cancelling an overridden occurrence takes its override along
+        if (lists.purpose === 'cancel') {
+          for (const override of overrides) {
+            const key = overrideKey(override);
+            if (key !== null && outcome.givenExdates.has(key)) {
+              calendar!.removeSubcomponent(override);
+              removed.add(override);
+            }
+          }
+        }
+        // An EXDATE the call removed, or an override it removed, is no longer watched
+        const exdatesNow = listKeys(master, 'exdate');
+        const keep = watched.map((ref, i) => ref.property.name === 'recurrence-id'
+          ? !removed.has(ref.property.parent as ICAL.Component)
+          : exdatesNow.has(instantKey(master, watchedStamps[i])));
+        stillWatched = watched.filter((_, i) => keep[i]);
+        watchedStamps = watchedStamps.filter((_, i) => keep[i]);
+        if (exdateBefore) {
+          const after = exdatesNow;
+          const hit = overrides.filter((c) => !removed.has(c) && !excludedBefore.has(c) &&
+            after.has(overrideKey(c) ?? ''));
+          if (hit.length) {
+            const ids = hit.map((c) => c.getFirstProperty('recurrence-id')!.toICALString()).join(', ');
+            throw new UpdateFieldsError('ORPHANED_EXCEPTIONS', `EXDATE would exclude the occurrence ${hit.length > 1
+              ? 'overrides replace' : 'an override replaces'} (${ids}), so the override would silently stop applying ` +
+              '(RFC 5545 3.8.4.4). Leave that occurrence out of EXDATE, or cancel it with cancelOccurrences, which ' +
+              'removes the override too', { remedy: 'fix-value', property: 'EXDATE' });
+          }
+        }
+      }
       const moving = Boolean(start && now && start.text !== now.text);
       if (moving || ruleWritten) {
         const cause = moving ? 'Moving DTSTART' : `Writing ${shaping.filter((n) => n !== 'dtstart')
@@ -1131,19 +1208,24 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
       }
       texts.mark();
 
-      if (!watched.length) {
+      if (!stillWatched.length) {
         return;
       }
-      const after = occurrences(master, referenceStamps(watched), watched.map((ref) => ref.label));
-      const lost = watched.filter((_, i) => after[i] === false);
+      const after = occurrences(master, watchedStamps, stillWatched.map((ref) => ref.label));
+      const lost = stillWatched.filter((_, i) => after[i] === false);
       if (lost.length) {
-        const what = shaping.map((n) => n.toUpperCase()).join(' and ');
+        const what = shaping.filter((n) => n !== 'dtstart').map((n) => n.toUpperCase()).join(' and ');
+        const these = lost.length > 1 ? 'these occurrences' : 'this occurrence';
+        const overridden = lost.some((ref) => ref.property.name === 'recurrence-id');
         throw new UpdateFieldsError('ORPHANED_EXCEPTIONS', `The new ${what} leaves ${lost.map((ref) => ref.label).join(', ')} naming no ` +
           `occurrence of the series, so ${lost.length > 1 ? 'they' : 'it'} would silently stop applying ` +
-          '(RFC 5545 3.8.4.4, 3.8.5.1). Give RRULE (or RDATE) in the same call so the series still has ' +
-          `${lost.length > 1 ? 'these occurrences' : 'this occurrence'}, and EXDATE in the same call with the ` +
-          'exclusions the new series should have; or rewrite the whole iCalendar object to move or remove ' +
-          'the override', { remedy: 'same-call', property: written.has('rrule') ? 'RRULE' : 'RDATE' });
+          `(RFC 5545 ${overridden ? '3.8.4.4, ' : ''}3.8.5.1). ` + (overridden
+          ? `Give RRULE (or RDATE) in the same call so the series still has ${these}, and the complete EXDATE ` +
+            'list (list mode "replace") in the same call with the exclusions the new series should have; or ' +
+            'rewrite the whole iCalendar object to move or remove the override'
+          : 'Give the complete EXDATE list (list mode "replace") in the same call with the exclusions the new ' +
+            `series should have, or an RRULE (or RDATE) that keeps ${these}`),
+        { remedy: 'same-call', property: written.has('rrule') ? 'RRULE' : 'RDATE' });
       }
     },
   };

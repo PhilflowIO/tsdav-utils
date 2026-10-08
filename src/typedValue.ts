@@ -331,11 +331,10 @@ const anchorText = (anchor: Anchor) => anchor.form === 'tzid' ? `in "${anchor.tz
  * Updates the first occurrence (creating it when missing), which is the same
  * occurrence updatePropertyWithValue would touch, so only the encoding changes
  * and not which line is written. A list of dates (EXDATE, RDATE; see
- * isDateListProperty) is one set however many lines it is spread over, so the
- * values given become the whole set: the first line takes them and the other
- * lines go. With `append` they are added instead, on a line of their own,
- * which takes the zone and value type a new line would (duplicates of values
- * already there are dropped once the series is final; see beginSeriesEdit).
+ * isDateListProperty) is the exception: its values always go on a line of
+ * their own, in the zone and value type a new line takes (DTSTART's, never an
+ * old line's), and DateListEdit then merges that line into the list as the
+ * call's list mode says (replace, add, remove).
  *
  * A value without a zone is a wall-clock time. It is read in the property's
  * own TZID if it has one ("18:00" on DTEND;TZID=Europe/Berlin is 18:00 in
@@ -364,7 +363,6 @@ export function setDateValue(
   floatingTime: FloatingTime = 'keep',
   absoluteTime: AbsoluteTime = 'as-given',
   named: NamedZone | null = null,
-  append = false,
 ): boolean {
   const shape = dateProperty(component, name);
   if (!shape) {
@@ -390,7 +388,7 @@ export function setDateValue(
     throw refuse('VALUE_TYPE_MISMATCH', `${upper} needs a date-time, not a date. Accepted forms: ${DATE_TIME_FORMS}`, upper);
   }
 
-  const existing = append && shape.multiValue ? null : component.getFirstProperty(lower);
+  const existing = shape.multiValue ? null : component.getFirstProperty(lower);
   const anchor = anchorOf(component, lower);
   // RFC 5545 requires it for DTEND, DUE and RECURRENCE-ID; for EXDATE and
   // RDATE a different type names no occurrence of the series
@@ -402,6 +400,12 @@ export function setDateValue(
   }
   if (anchor && anchor.form !== 'date' && isDate) {
     throw refuse('VALUE_TYPE_MISMATCH', `${upper} needs a time: DTSTART has one, and ${why}`, upper);
+  }
+  // A floating series has no zone: an instant names no occurrence of it
+  if (shape.multiValue && anchor?.form === 'floating' && !named && parsed.some((p) => p.kind === 'utc')) {
+    throw refuse('ZONE_MISMATCH', `${upper}: DTSTART is a local time without a zone (floating), so a value with "Z" ` +
+      'or an offset names no occurrence of the series: drop the zone and give the wall-clock time, e.g. ' +
+      `"${parsed.find((p) => p.kind === 'utc')!.jcal.replace(/Z$/, '')}"`, upper);
   }
 
   // The zone a wall-clock value is read in: the zone the call names, else the
@@ -454,8 +458,13 @@ export function setDateValue(
       ? `${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"`
       : `${upper} has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"`, upper);
   }
-  // One line has one zone: wall-clock values that stay wall-clock (in a
-  // TZID, or floating) cannot share it with UTC values
+  // One line has one zone. In a list each value only names an instant, so a
+  // UTC value joins wall-clock values in a TZID as its wall clock there
+  if (shape.multiValue && floating && wallClock === 'tzid' && zone) {
+    parsed = parsed.map((p) => p.kind === 'utc' ? wallInZone(component, upper, zone!, p) : p);
+  }
+  // Elsewhere wall-clock values that stay wall-clock (in a TZID, or
+  // floating) cannot share it with UTC values
   if (floating && wallClock !== 'utc' && parsed.some((p) => p.kind === 'utc')) {
     throw refuse('ZONE_MISMATCH',
       `${upper} mixes values with and without a zone; give all of them a zone, or none`, upper);
@@ -486,13 +495,6 @@ export function setDateValue(
   property.resetType(type);
   if (shape.multiValue) {
     property.setValues(values);
-    if (!append) {
-      for (const other of component.getAllProperties(lower)) {
-        if (other !== property) {
-          component.removeProperty(other);
-        }
-      }
-    }
   } else {
     property.setValue(values[0]);
   }
