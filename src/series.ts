@@ -575,6 +575,13 @@ export const expansionWork = { steps: 0 };
 /** An expansion that ran out of WORK_BUDGET: the check cannot be made, so it fails closed */
 class SeriesTooSparse extends Error {}
 
+/**
+ * The installed ical.js lacks the step the work limit hooks into: a failure of
+ * the library, not of the call, so it stays a plain Error and is never turned
+ * into a refusal (CI's install smoke test catches it against a fresh ical.js).
+ */
+class BoundUnavailable extends Error {}
+
 /** The iterator has passed the furthest wall clock the expansion needs */
 class HorizonReached extends Error {}
 
@@ -595,7 +602,7 @@ function bounded(iterator: ICAL.RecurIterator, budget: { left: number }, recur: 
   };
   const check = it.check_contracting_rules;
   if (typeof check !== 'function') {
-    throw new SeriesTooSparse('ical.js no longer exposes the step a rule expansion can be bounded at');
+    throw new BoundUnavailable('ical.js no longer exposes the step a rule expansion can be bounded at');
   }
   it.check_contracting_rules = function (this: typeof it, ...args: unknown[]) {
     expansionWork.steps++;
@@ -660,6 +667,9 @@ function expand(master: ICAL.Component, until: number): Set<number> {
       }
     }
   } catch (error) {
+    if (error instanceof BoundUnavailable) {
+      throw error;
+    }
     if (error instanceof SeriesTooSparse) {
       // a dense rule that runs out reaches far: the reason is the distance
       throw new SeriesTooSparse(walls.size > 200

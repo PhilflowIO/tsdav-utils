@@ -1022,6 +1022,8 @@ function stepCost(recur) {
 var expansionWork = { steps: 0 };
 var SeriesTooSparse = class extends Error {
 };
+var BoundUnavailable = class extends Error {
+};
 var HorizonReached = class extends Error {
 };
 var SeriesUnverifiable = class extends Error {
@@ -1031,7 +1033,7 @@ function bounded(iterator, budget, recur, horizon) {
   const it = iterator;
   const check = it.check_contracting_rules;
   if (typeof check !== "function") {
-    throw new SeriesTooSparse("ical.js no longer exposes the step a rule expansion can be bounded at");
+    throw new BoundUnavailable("ical.js no longer exposes the step a rule expansion can be bounded at");
   }
   it.check_contracting_rules = function(...args) {
     expansionWork.steps++;
@@ -1084,6 +1086,9 @@ function expand(master, until) {
       }
     }
   } catch (error) {
+    if (error instanceof BoundUnavailable) {
+      throw error;
+    }
     if (error instanceof SeriesTooSparse) {
       throw new SeriesTooSparse(walls.size > 200 ? `the override or EXDATE furthest ahead (${icalForm(jcalOf(until, frame))}) lies too far ahead to check within the work limit` : error.message);
     }

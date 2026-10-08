@@ -189,6 +189,26 @@ describe('UpdateFieldsError codes', () => {
   });
 });
 
+describe('a failure of the library is no refusal', () => {
+  it('throws a plain Error when ical.js lacks the step the work limit hooks into', () => {
+    const proto = (ICAL as unknown as { RecurIterator: { prototype: Record<string, unknown> } }).RecurIterator.prototype;
+    const hook = proto.check_contracting_rules;
+    delete proto.check_contracting_rules;
+    let thrown: unknown;
+    try {
+      updateFields(weekly(), { RRULE: 'FREQ=WEEKLY;COUNT=12' });
+    } catch (error) {
+      thrown = error;
+    } finally {
+      proto.check_contracting_rules = hook;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown).not.toBeInstanceOf(UpdateFieldsError);
+    expect(isUpdateFieldsError(thrown)).toBe(false);
+    expect((thrown as Error).message).toBe('ical.js no longer exposes the step a rule expansion can be bounded at');
+  });
+});
+
 describe('isUpdateFieldsError', () => {
   it('is false for a plain Error, a lookalike without a known code, and non-errors', () => {
     expect(isUpdateFieldsError(new Error('x'))).toBe(false);
