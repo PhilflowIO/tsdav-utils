@@ -1004,7 +1004,23 @@ var RuleTexts = class {
     this.changed.set(next, line);
     return next;
   }
-  /** Before serialising: tag each rewritten rule so render() can find its line */
+  /**
+   * Keep a rule the call does not change as the object spells it: ical.js
+   * writes a rule back normalised, and one it cannot read (UNTIL=garbage)
+   * mangled. False when its text could not be found.
+   */
+  keep(property) {
+    if (this.changed.has(property)) {
+      return true;
+    }
+    const text = this.texts.get(property);
+    if (!text) {
+      return false;
+    }
+    this.changed.set(property, text);
+    return true;
+  }
+  /** Before serialising: tag each rewritten or kept rule so render() can find its line */
   mark() {
     [...this.changed.keys()].forEach((property, i) => property.setParameter("x-tsdav-utils-rule", String(i)));
   }
@@ -1266,6 +1282,11 @@ function beginSeriesEdit(calendar, master, written, source = null) {
       }
       return wrapped(error.source, message, { remedy: "rewrite-object" });
     }
+    if (error instanceof BoundUnavailable) {
+      const plain = new Error(`Cannot check the series: ${error.message}`);
+      plain.cause = error;
+      return plain;
+    }
     if (!(error instanceof SeriesTooSparse)) {
       return error;
     }
@@ -1407,6 +1428,11 @@ function startSeriesEdit(calendar, master, written, source) {
         if (twin) {
           const verb = twinBefore ? "names" : moving ? "would name, moved," : "would name";
           throw new UpdateFieldsError("DST_AMBIGUOUS", `${cause} is refused: ${twin.replace("%NAMES%", verb)}. Rewrite the whole iCalendar object with the values it should have`, { remedy: "rewrite-object" });
+        }
+      }
+      for (const property of master.getAllProperties()) {
+        if (kept.includes(property) && !texts.keep(property)) {
+          recurOf(property);
         }
       }
       texts.mark();
@@ -1650,7 +1676,7 @@ function updateFields(calendarObject, fields, options = {}) {
     throw new UpdateFieldsError(
       "INVALID_ICALENDAR",
       `Failed to parse iCal data: ${error.message}`,
-      { remedy: "rewrite-object" }
+      { remedy: "rewrite-object", cause: error }
     );
   }
   if (Array.isArray(jcalData) && Array.isArray(jcalData[0])) {
@@ -1662,7 +1688,7 @@ function updateFields(calendarObject, fields, options = {}) {
     throw new UpdateFieldsError(
       "INVALID_ICALENDAR",
       `Failed to parse iCal data: ${error.message}`,
-      { remedy: "rewrite-object" }
+      { remedy: "rewrite-object", cause: error }
     );
   }
   if (type && component.name !== "vcalendar" && component.name !== type) {

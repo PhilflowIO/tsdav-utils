@@ -440,7 +440,24 @@ class RuleTexts {
     return next;
   }
 
-  /** Before serialising: tag each rewritten rule so render() can find its line */
+  /**
+   * Keep a rule the call does not change as the object spells it: ical.js
+   * writes a rule back normalised, and one it cannot read (UNTIL=garbage)
+   * mangled. False when its text could not be found.
+   */
+  keep(property: ICAL.Property): boolean {
+    if (this.changed.has(property)) {
+      return true;
+    }
+    const text = this.texts.get(property);
+    if (!text) {
+      return false;
+    }
+    this.changed.set(property, text);
+    return true;
+  }
+
+  /** Before serialising: tag each rewritten or kept rule so render() can find its line */
   mark() {
     [...this.changed.keys()].forEach((property, i) => property.setParameter('x-tsdav-utils-rule', String(i)));
   }
@@ -815,6 +832,12 @@ export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Co
       }
       return wrapped(error.source, message, { remedy: 'rewrite-object' });
     }
+    if (error instanceof BoundUnavailable) {
+      // a failure of the library, not of the call: a plain Error, with context
+      const plain = new Error(`Cannot check the series: ${error.message}`);
+      (plain as { cause?: unknown }).cause = error;
+      return plain;
+    }
     if (!(error instanceof SeriesTooSparse)) {
       return error;
     }
@@ -967,6 +990,14 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
           const verb = twinBefore ? 'names' : moving ? 'would name, moved,' : 'would name';
           throw new UpdateFieldsError('DST_AMBIGUOUS', `${cause} is refused: ${twin.replace('%NAMES%', verb)}. ` +
             'Rewrite the whole iCalendar object with the values it should have', { remedy: 'rewrite-object' });
+        }
+      }
+      // A rule the call leaves alone goes back byte for byte; one whose text
+      // cannot be found is written by ical.js, which only a readable rule
+      // survives unchanged in meaning, so an unreadable one is refused
+      for (const property of master.getAllProperties()) {
+        if (kept.includes(property) && !texts.keep(property)) {
+          recurOf(property);
         }
       }
       texts.mark();

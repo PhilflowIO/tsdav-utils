@@ -261,10 +261,23 @@ describe('UpdateFieldsError codes', () => {
     });
   });
 
-  it('leaves a write that does not need a malformed rule in the object alone', () => {
+  it('leaves a malformed rule the write does not touch as it was, byte for byte', () => {
     const out = updateFields(calendar(...event('DTSTART:20261005T090000Z', 'RRULE:FREQ=DAILY;UNTIL=garbage')),
       { SUMMARY: 'renamed' });
     expect(out).toContain('SUMMARY:renamed');
+    expect(out.split('\r\n')).toContain('RRULE:FREQ=DAILY;UNTIL=garbage');
+  });
+
+  it('leaves a rule the write does not touch as the object spells it', () => {
+    const out = updateFields(calendar(...event('DTSTART:20261005T090000Z', 'RRULE:COUNT=5;BYHOUR=9;FREQ=DAILY')),
+      { SUMMARY: 'renamed' });
+    expect(out.split('\r\n')).toContain('RRULE:COUNT=5;BYHOUR=9;FREQ=DAILY');
+    expect(out).not.toContain('X-TSDAV-UTILS-RULE');
+  });
+
+  it('carries the ical.js parse error as cause', () => {
+    const error = thrown(() => updateFields('this is not iCalendar', { SUMMARY: 'x' })) as UpdateFieldsError;
+    expect(error.cause).toBeInstanceOf(Error);
   });
 });
 
@@ -291,7 +304,8 @@ describe('a failure of the library is no refusal', () => {
       delete it.check_contracting_rules;
       return () => { it.check_contracting_rules = hook; };
     });
-    expect(error.message).toBe('ical.js no longer exposes the step a rule expansion can be bounded at');
+    expect(error.message).toBe('Cannot check the series: ical.js no longer exposes the step a rule expansion can be bounded at');
+    expect((error as { cause?: unknown }).cause).toBeInstanceOf(Error);
   });
 
   it('throws a plain Error when ical.js fails while moving an EXDATE', () => {
