@@ -856,6 +856,11 @@ var DateListEdit = class {
     this.master = master;
     this.modes = modes;
     this.purpose = purpose;
+    /**
+     * Refuses values that are no occurrence of the series (UNKNOWN_OCCURRENCE);
+     * set by the series edit for restoreOccurrences, run before the list is read
+     */
+    this.checkOccurrences = null;
     this.held = new Set(master.getAllProperties());
   }
   apply() {
@@ -939,6 +944,9 @@ var DateListEdit = class {
     const upper = name.toUpperCase();
     const held = new Set(oldKeys.flat());
     const restore = this.purpose === "restore";
+    if (restore) {
+      this.checkOccurrences?.(given);
+    }
     const missing = given.filter((g) => restore ? !covers(held, g) : !held.has(g.key));
     if (missing.length) {
       const list = old.map((property) => property.toICALString()).join(", ");
@@ -1610,7 +1618,8 @@ function occurrenceForm(frame, example) {
       return `the date, like DTSTART (e.g. "${value}")`;
   }
 }
-function checkAddedExdates(master, added, cancel) {
+function checkAddedExdates(master, added, purpose) {
+  const cancel = purpose !== null;
   if (!added.length) {
     return;
   }
@@ -1641,7 +1650,7 @@ function checkAddedExdates(master, added, cancel) {
   const hint = sameDay !== void 0 ? `; that day it has one at ${icalForm(jcalOf(sameDay, frame))}` : "";
   throw new UpdateFieldsError(
     cancel ? "UNKNOWN_OCCURRENCE" : "UNMATCHED_EXDATE",
-    `${what} ${lost.length > 1 ? "name" : "names"} no occurrence of the series (${series})${hint}, so ${cancel ? "there is nothing to cancel" : "it would exclude nothing"}. Give the original start of an occurrence as ${occurrenceForm(frame, sameDay ?? first)}`,
+    `${what} ${lost.length > 1 ? "name" : "names"} no occurrence of the series (${series})${hint}, so ${cancel ? `there is nothing to ${purpose}` : "it would exclude nothing"}. Give the original start of an occurrence as ${occurrenceForm(frame, sameDay ?? first)}`,
     { remedy: "fix-value", property: "EXDATE" }
   );
 }
@@ -1781,6 +1790,9 @@ function beginSeriesEdit(calendar, master, written, source = null, lists = null)
   }
 }
 function startSeriesEdit(calendar, master, written, source, lists, shapes) {
+  if (lists?.purpose === "restore" && ["vevent", "vtodo", "vjournal"].includes(master.name) && !master.hasProperty("recurrence-id")) {
+    lists.checkOccurrences = (given) => checkAddedExdates(master, given, "restore");
+  }
   if (!["vevent", "vtodo", "vjournal"].includes(master.name) || master.hasProperty("recurrence-id")) {
     return noSeries(lists);
   }
@@ -1892,7 +1904,7 @@ function startSeriesEdit(calendar, master, written, source, lists, shapes) {
       let stillWatched = watched;
       if (lists) {
         const outcome = lists.apply();
-        checkAddedExdates(master, outcome.addedExdates, lists.purpose === "cancel");
+        checkAddedExdates(master, outcome.addedExdates, lists.purpose === "cancel" ? "cancel" : null);
         settleGapTwins(master, outcome);
         keepDayExclusions(master, outcome);
         if (lists.purpose === "cancel") {
@@ -2791,15 +2803,14 @@ function editFields(calendarObject, fields, options, purpose) {
     return start2.utc !== null && end.utc !== null ? [{ name, length: end.utc - start2.utc, elapsed: true }] : [];
   }) : [];
   for (const [key, value] of entries) {
-    if (!setDateValue(
-      actualComponent,
-      key,
-      value,
-      floatingTime,
-      absoluteTime,
-      zone2,
-      lists.get(key.toLowerCase()) === "remove"
-    ) && !setRecurValue(actualComponent, key, value, floatingTime, zone2)) {
+    if (lists.get(key.toLowerCase()) === "remove") {
+      const parts = value.split(",").filter((part) => part.trim() !== "");
+      for (const part of parts.length ? parts : [value]) {
+        setDateValue(actualComponent, key, part, floatingTime, absoluteTime, zone2, true);
+      }
+      continue;
+    }
+    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, zone2) && !setRecurValue(actualComponent, key, value, floatingTime, zone2)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }

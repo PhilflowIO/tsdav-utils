@@ -161,6 +161,12 @@ export class DateListEdit {
     this.held = new Set(master.getAllProperties());
   }
 
+  /**
+   * Refuses values that are no occurrence of the series (UNKNOWN_OCCURRENCE);
+   * set by the series edit for restoreOccurrences, run before the list is read
+   */
+  checkOccurrences: ((given: Given[]) => void) | null = null;
+
   apply(): ListOutcome {
     const outcome: ListOutcome = { addedExdates: [], givenExdates: [], written: new Map(), liftedDays: new Map() };
     for (const [name, mode] of this.modes) {
@@ -243,6 +249,9 @@ export class DateListEdit {
     const upper = name.toUpperCase();
     const held = new Set(oldKeys.flat());
     const restore = this.purpose === 'restore';
+    if (restore) {
+      this.checkOccurrences?.(given);
+    }
     const missing = given.filter((g) => restore ? !covers(held, g) : !held.has(g.key));
     if (missing.length) {
       const list = old.map((property) => property.toICALString()).join(', ');

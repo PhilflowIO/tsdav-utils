@@ -946,7 +946,8 @@ function occurrenceForm(frame: Anchor, example: number): string {
  * the caller's to state, as any value written, and is not checked.
  */
 function checkAddedExdates(master: ICAL.Component, added: { stamp: Stamp; label: string; value: unknown }[],
-  cancel: boolean) {
+  purpose: 'cancel' | 'restore' | null) {
+  const cancel = purpose !== null;
   if (!added.length) {
     return;
   }
@@ -981,7 +982,7 @@ function checkAddedExdates(master: ICAL.Component, added: { stamp: Stamp; label:
   const what = lost.map((a) => cancel ? icalForm(String(a.value)) : a.label).join(', ');
   const hint = sameDay !== undefined ? `; that day it has one at ${icalForm(jcalOf(sameDay, frame))}` : '';
   throw new UpdateFieldsError(cancel ? 'UNKNOWN_OCCURRENCE' : 'UNMATCHED_EXDATE', `${what} ${lost.length > 1 ? 'name' : 'names'} ` +
-    `no occurrence of the series (${series})${hint}, so ${cancel ? 'there is nothing to cancel' : 'it would exclude nothing'}. ` +
+    `no occurrence of the series (${series})${hint}, so ${cancel ? `there is nothing to ${purpose}` : 'it would exclude nothing'}. ` +
     `Give the original start of an occurrence as ${occurrenceForm(frame, sameDay ?? first)}`,
   { remedy: 'fix-value', property: 'EXDATE' });
 }
@@ -994,7 +995,11 @@ function checkAddedExdates(master: ICAL.Component, added: { stamp: Stamp; label:
  * the wall clock (ical.js, Thunderbird) would still show the occurrence, and
  * a later move could not tell which one it names.
  *  - an EXDATE is written as the occurrence's own wall clock, in the series'
- *    zone, which names it for every reader: the call asked to exclude it;
+ *    zone, which names it without a twin for this library and for readers
+ *    that match on the wall clock: the call asked to exclude it. (Where the
+ *    rule itself has occurrences on both wall clocks of that instant — a
+ *    BYHOUR spanning the skipped hour — expandOccurrences lists both, an
+ *    EXDATE at the instant excludes both, and wall-clock readers differ);
  *  - an RDATE would add an occurrence the series has already, under another
  *    name, so it is refused (DST_AMBIGUOUS, fix-value).
  */
@@ -1180,6 +1185,12 @@ export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Co
 
 function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component, written: Set<string>,
   source: string | null, lists: DateListEdit | null, shapes: boolean) {
+  // restoreOccurrences takes occurrences: one that is none is refused before
+  // the list is read, so a date that holds its day is not taken for it
+  if (lists?.purpose === 'restore' && ['vevent', 'vtodo', 'vjournal'].includes(master.name) &&
+      !master.hasProperty('recurrence-id')) {
+    lists.checkOccurrences = (given) => checkAddedExdates(master, given, 'restore');
+  }
   if (!['vevent', 'vtodo', 'vjournal'].includes(master.name) || master.hasProperty('recurrence-id')) {
     return noSeries(lists);
   }
@@ -1306,7 +1317,7 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
       // The lists' values are the new series': merged with the moved ones
       if (lists) {
         const outcome = lists.apply();
-        checkAddedExdates(master, outcome.addedExdates, lists.purpose === 'cancel');
+        checkAddedExdates(master, outcome.addedExdates, lists.purpose === 'cancel' ? 'cancel' : null);
         settleGapTwins(master, outcome);
         keepDayExclusions(master, outcome);
         if (lists.purpose === 'cancel') {

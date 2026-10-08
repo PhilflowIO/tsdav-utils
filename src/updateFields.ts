@@ -372,9 +372,17 @@ export function editFields(
       return start.utc !== null && end.utc !== null ? [{ name, length: end.utc - start.utc, elapsed: true }] : [];
     }) : [];
   for (const [key, value] of entries) {
-    // values to remove are only matched against the list, in whatever form it holds them
-    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, zone,
-      lists.get(key.toLowerCase()) === 'remove') &&
+    // Values to remove are only matched against the list, each in whatever
+    // form the list holds it, so each is read on its own: one call may name a
+    // date and a time, or a time with and one without a zone
+    if (lists.get(key.toLowerCase()) === 'remove') {
+      const parts = value.split(',').filter((part) => part.trim() !== '');
+      for (const part of parts.length ? parts : [value]) {
+        setDateValue(actualComponent, key, part, floatingTime, absoluteTime, zone, true);
+      }
+      continue;
+    }
+    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, zone) &&
         !setRecurValue(actualComponent, key, value, floatingTime, zone)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }

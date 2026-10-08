@@ -294,9 +294,11 @@ describe('remove and restore match the values held directly', () => {
     expect(error).toMatchObject({ remedy: 'fix-value' });
   });
 
-  it('restore removes an EXDATE in the second pass of a repeated hour by its UTC value', () => {
-    expect(lines(restoreOccurrences(fold('EXDATE:20261025T013000Z', 'EXDATE:20261024T003000Z'),
-      ['2026-10-25T01:30:00Z']), 'EXDATE')).toEqual(['EXDATE:20261024T003000Z']);
+  it('remove takes away an EXDATE in the second pass of a repeated hour by its UTC value; restore refuses it, as it names no occurrence', () => {
+    const input = fold('EXDATE:20261025T013000Z', 'EXDATE:20261024T003000Z');
+    expect(lines(updateFields(input, { EXDATE: '2026-10-25T01:30:00Z' }, { lists: { EXDATE: 'remove' } }), 'EXDATE'))
+      .toEqual(['EXDATE:20261024T003000Z']);
+    expect(isUpdateFieldsError(thrown(() => restoreOccurrences(input, ['2026-10-25T01:30:00Z'])), 'UNKNOWN_OCCURRENCE')).toBe(true);
   });
 
   it('a floating EXDATE in a zoned series names nothing: it blocks no rule change, and is kept', () => {
@@ -358,6 +360,22 @@ describe('a date in the list of a timed series holds every occurrence that day (
     const also = restoreOccurrences(calendar(...event('DTSTART;TZID=Europe/Berlin:20261220T090000',
       'RRULE:FREQ=DAILY;BYHOUR=9,17;COUNT=20', 'EXDATE;VALUE=DATE:20261224', 'EXDATE:20261224T160000Z')), ['2026-12-24T09:00:00']);
     expect(lines(also, 'EXDATE')).toEqual(['EXDATE:20261224T160000Z']);
+  });
+
+  it('restore refuses a time that is no occurrence, though a date holds its day', () => {
+    const thrice = calendar(...event('DTSTART;TZID=Europe/Berlin:20261205T090000', 'RRULE:FREQ=DAILY;BYHOUR=9,12,15;COUNT=30',
+      'EXDATE;VALUE=DATE:20261209'));
+    const error = thrown(() => restoreOccurrences(thrice, ['2026-12-09T13:00:00']));
+    expect(isUpdateFieldsError(error, 'UNKNOWN_OCCURRENCE')).toBe(true);
+    expect(error).toMatchObject({ remedy: 'fix-value' });
+    expect(error.message).toMatch(/nothing to restore/);
+  });
+
+  it('remove takes values of mixed forms in one call, each matched on its own', () => {
+    expect(lines(updateFields(floating('EXDATE:20261210T100000', 'EXDATE:20261217T090000Z'),
+      { EXDATE: '2026-12-10T10:00:00,2026-12-17T09:00:00Z' }, { lists: { EXDATE: 'remove' } }), 'EXDATE')).toEqual([]);
+    expect(lines(updateFields(berlin('EXDATE;VALUE=DATE:20261210', 'EXDATE:20261217T090000Z'),
+      { EXDATE: '2026-12-10,2026-12-17T10:00:00' }, { lists: { EXDATE: 'remove' } }), 'EXDATE')).toEqual([]);
   });
 
   it('remove takes the date given as a date', () => {
