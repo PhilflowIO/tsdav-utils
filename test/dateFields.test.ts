@@ -155,11 +155,16 @@ describe('date-times without a zone', () => {
     expect(lines(out, 'EXDATE')[0]).toMatch(/^EXDATE:\d{8}T\d{6}Z,20261027T180000Z$/);
   });
 
-  it('cannot be mixed with zoned values on a zoned property', () => {
-    expect(() => updateFields(
-      vevent('EXDATE;TZID=Europe/Berlin:20260101T100000'),
-      { EXDATE: '2026-10-26T18:00:00,2026-10-27T18:00:00Z' },
-    )).toThrow(/with and without a zone/);
+  it('join zoned values in a list in a TZID as the instants they name, written as UTC', () => {
+    const out = updateFields(vtodo('DTSTART;TZID=Europe/Berlin:20260101T100000'),
+      { EXDATE: '2026-10-26T18:00:00,2026-10-27T18:00:00Z' });
+    expect(lines(out, 'EXDATE')).toEqual(['EXDATE:20261026T170000Z,20261027T180000Z']);
+  });
+
+  it('in a list are read in DTSTART\'s zone, not in the zone of a line the list holds', () => {
+    // a line in New York on a UTC series: the new value is the series' (UTC)
+    expect(() => updateFields(vevent('EXDATE;TZID=America/New_York:20260101T050000'), { EXDATE: '2026-01-02T10:00:00' }))
+      .toThrow(/DTSTART is in UTC/);
   });
 });
 

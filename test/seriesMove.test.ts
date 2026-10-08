@@ -350,11 +350,20 @@ describe('moving DTSTART moves EXDATE and RDATE with the series', () => {
     expect(prop(masterOf(out), 'EXDATE')).toEqual(['EXDATE:20261026T100000Z']);
   });
 
-  it('only the EXDATE line the call replaces is left alone, the others move', () => {
+  it('an EXDATE the call writes replaces every line, none of which moves', () => {
     const lines = calendar(master('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;COUNT=4',
       'EXDATE:20261012T090000Z', 'EXDATE:20261019T090000Z'));
     const out = updateFields(lines, { DTSTART: '20261005T100000Z', EXDATE: '20261026T100000Z' });
-    expect(prop(masterOf(out), 'EXDATE')).toEqual(['EXDATE:20261026T100000Z', 'EXDATE:20261019T100000Z']);
+    expect(prop(masterOf(out), 'EXDATE')).toEqual(['EXDATE:20261026T100000Z']);
+  });
+
+  it('an EXDATE the call adds is the moved series\', the lines already there move', () => {
+    const lines = calendar(master('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;COUNT=4',
+      'EXDATE:20261012T090000Z', 'EXDATE:20261019T090000Z'));
+    const out = updateFields(lines, { DTSTART: '20261005T100000Z', EXDATE: '20261026T100000Z,20261019T100000Z' },
+      { lists: { EXDATE: 'add' } });
+    expect(prop(masterOf(out), 'EXDATE'))
+      .toEqual(['EXDATE:20261012T100000Z', 'EXDATE:20261019T100000Z', 'EXDATE:20261026T100000Z']);
   });
 
   it('an RDATE of periods is not moved: it throws and asks for RDATE', () => {
@@ -387,7 +396,22 @@ describe('a rule change that would orphan an override or EXDATE is refused', () 
       .toThrow('The new RRULE leaves the override for RECURRENCE-ID:20261012T090000Z, EXDATE 20261026T090000Z ' +
         'naming no occurrence of the series, so they would silently stop applying');
     expect(() => updateFields(weekly, { RRULE: 'FREQ=DAILY;INTERVAL=2;COUNT=20' }))
-      .toThrow(/Give RRULE \(or RDATE\) in the same call .* EXDATE in the same call .*; or rewrite the whole iCalendar object/);
+      .toThrow(/Give RRULE \(or RDATE\) in the same call .* the complete EXDATE list \(list mode "replace"\) in the same call .*; or rewrite the whole iCalendar object/);
+  });
+
+  it('names only EXDATEs, and the complete list, when no override is affected', () => {
+    const exdateOnly = calendar(master('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;COUNT=4', 'EXDATE:20261026T090000Z'));
+    const error = (() => {
+      try {
+        updateFields(exdateOnly, { RRULE: 'FREQ=WEEKLY;COUNT=2' });
+      } catch (e) {
+        return e as Error;
+      }
+      throw new Error('not refused');
+    })();
+    expect(error.message).toMatch(/^The new RRULE leaves EXDATE 20261026T090000Z naming no occurrence/);
+    expect(error.message).toMatch(/Give the complete EXDATE list \(list mode "replace"\) in the same call/);
+    expect(error.message).not.toMatch(/override/);
   });
 
   it('a shorter series that drops the override\'s occurrence is refused too', () => {

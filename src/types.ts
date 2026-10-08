@@ -42,6 +42,22 @@ export const COMPONENT_TYPES = ['vevent', 'vtodo', 'vjournal'] as const;
  */
 export type ComponentType = typeof COMPONENT_TYPES[number];
 
+/**
+ * The lists of dates, which an object may spread over several lines: a write
+ * replaces, adds to or removes from them (see ListMode).
+ */
+export type DateListProperty = 'EXDATE' | 'RDATE';
+
+/**
+ * What a write does with a list of dates (EXDATE, RDATE), matching values by
+ * instant (by date in an all-day series), whatever zone each is written in:
+ * - "replace": the values given are the whole list (default). Values already
+ *   there and among them stay as written; the others go
+ * - "add": the values join the list; one already there is not written twice
+ * - "remove": the values leave the list; one the list does not hold is refused
+ */
+export type ListMode = 'replace' | 'add' | 'remove';
+
 export interface UpdateFieldsOptions {
   floatingTime?: FloatingTime;
   /**
@@ -63,4 +79,13 @@ export interface UpdateFieldsOptions {
    * taken, VEVENT before VTODO before VJOURNAL (see seriesMaster).
    */
   type?: ComponentType;
+  /**
+   * The mode for each list of dates the call writes ("replace" when not
+   * named; see ListMode), e.g. { EXDATE: 'add' }. An EXDATE added has to name
+   * an occurrence of the series (UNMATCHED_EXDATE); a value removed has to be
+   * in the list (NOT_IN_LIST). Names are case-insensitive. To cancel or
+   * restore occurrences, cancelOccurrences and restoreOccurrences say it
+   * more directly.
+   */
+  lists?: Partial<Record<DateListProperty, ListMode>>;
 }

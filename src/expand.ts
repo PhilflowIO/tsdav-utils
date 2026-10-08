@@ -2,7 +2,8 @@ import ICAL from 'ical.js';
 import { UpdateFieldsError, wrapped } from './errors';
 import { frameOf, parseDateValue } from './typedValue';
 import type { Anchor } from './typedValue';
-import { dayOf, expandWalls, jcalOf, propertyStamps, SeriesUnverifiable, wallIn, WORK_BUDGET } from './series';
+import { dayOf, expandWalls, instantOf, jcalOf, occurrenceInstant, propertyStamps, SeriesUnverifiable, wallIn,
+  WORK_BUDGET } from './series';
 import type { RecurrenceBudget, Stamp } from './series';
 import { seriesMaster } from './updateFields';
 import type { CalendarObjectInput, ComponentType } from './types';
@@ -258,12 +259,35 @@ export function expandOccurrences(calendarObject: CalendarObjectInput | ICAL.Com
   const start = options.from === undefined ? -Infinity : boundIn(master, frame, options.from, 'from');
 
   let found: { walls: Set<number>; complete: boolean };
-  let excluded: Set<number>;
+  // Which occurrences an EXDATE excludes, by the rule every check uses (see
+  // namesOccurrence): in a series with a zone the occurrence starting at the
+  // instant it names (RFC 5545 3.3.5 in the hour a DST change shows twice),
+  // none for a floating EXDATE there; a date in a timed series every
+  // occurrence that day, as ical.js and Thunderbird read it; elsewhere by
+  // date or wall clock
+  const zoned = frame.form === 'utc' || frame.form === 'tzid';
+  const excludedInstants = new Set<number>();
+  const excludedDays = new Set<number>();
+  const excludedWalls = new Set<number>();
+  const excluded = (wall: number) => excludedDays.has(dayOf(wall)) ||
+    (zoned ? excludedInstants.has(occurrenceInstant(master, wall, frame)) : excludedWalls.has(wall));
   const overrides = new Map<number, ICAL.Component>();
   try {
     found = expandWalls(master, end - 1, budget);
-    excluded = new Set(master.getAllProperties('exdate').filter((p) => p.type !== 'period')
-      .flatMap((p) => propertyStamps(p).map((stamp) => norm(wallIn(master, stamp, frame)))));
+    for (const stamp of master.getAllProperties('exdate').filter((p) => p.type !== 'period').flatMap(propertyStamps)) {
+      if (frame.form === 'date') {
+        excludedDays.add(dayOf(wallIn(master, stamp, frame)));
+      } else if (stamp.kind === 'date') {
+        excludedDays.add(dayOf(stamp.wall));
+      } else if (zoned) {
+        const instant = instantOf(master, stamp, frame);
+        if (instant !== null) {
+          excludedInstants.add(instant);
+        }
+      } else if (stamp.kind === 'floating') {
+        excludedWalls.add(stamp.wall);
+      }
+    }
     const uid = master.getFirstPropertyValue('uid');
     for (const c of root.name === 'vcalendar' ? root.getAllSubcomponents(master.name) : []) {
       const rid = c.getFirstProperty('recurrence-id');
@@ -282,7 +306,7 @@ export function expandOccurrences(calendarObject: CalendarObjectInput | ICAL.Com
   const occurrences: Occurrence[] = [];
   let limited = false;
   for (const wall of [...found.walls].sort((a, b) => a - b)) {
-    if (wall < norm(start) || excluded.has(wall)) {
+    if (wall < norm(start) || excluded(wall)) {
       continue;
     }
     if (occurrences.length === limit) {

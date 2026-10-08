@@ -50,6 +50,12 @@ const CODES = [
   'SERIES_MOVE_REFUSED',
   /** a new RRULE or RDATE leaves an override or EXDATE naming no occurrence */
   'ORPHANED_EXCEPTIONS',
+  /** an EXDATE added (list mode "add") names no occurrence of the series, so it would exclude nothing */
+  'UNMATCHED_EXDATE',
+  /** a value to remove (list mode "remove", restoreOccurrences) is not in the list */
+  'NOT_IN_LIST',
+  /** an occurrence given to cancelOccurrences is no occurrence of the series */
+  'UNKNOWN_OCCURRENCE',
   /** a value sits at a DST change, where the wall clock does not name one instant */
   'DST_AMBIGUOUS',
   /** the series is too sparse, or what has to be checked too far ahead, to check within the work limit */

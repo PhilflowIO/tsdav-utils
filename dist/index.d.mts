@@ -38,6 +38,20 @@ declare const COMPONENT_TYPES: readonly ["vevent", "vtodo", "vjournal"];
  * An iCalendar component type a write can be aimed at.
  */
 type ComponentType = typeof COMPONENT_TYPES[number];
+/**
+ * The lists of dates, which an object may spread over several lines: a write
+ * replaces, adds to or removes from them (see ListMode).
+ */
+type DateListProperty = 'EXDATE' | 'RDATE';
+/**
+ * What a write does with a list of dates (EXDATE, RDATE), matching values by
+ * instant (by date in an all-day series), whatever zone each is written in:
+ * - "replace": the values given are the whole list (default). Values already
+ *   there and among them stay as written; the others go
+ * - "add": the values join the list; one already there is not written twice
+ * - "remove": the values leave the list; one the list does not hold is refused
+ */
+type ListMode = 'replace' | 'add' | 'remove';
 interface UpdateFieldsOptions {
     floatingTime?: FloatingTime;
     /**
@@ -59,6 +73,55 @@ interface UpdateFieldsOptions {
      * taken, VEVENT before VTODO before VJOURNAL (see seriesMaster).
      */
     type?: ComponentType;
+    /**
+     * The mode for each list of dates the call writes ("replace" when not
+     * named; see ListMode), e.g. { EXDATE: 'add' }. An EXDATE added has to name
+     * an occurrence of the series (UNMATCHED_EXDATE); a value removed has to be
+     * in the list (NOT_IN_LIST). Names are case-insensitive. To cancel or
+     * restore occurrences, cancelOccurrences and restoreOccurrences say it
+     * more directly.
+     */
+    lists?: Partial<Record<DateListProperty, ListMode>>;
+}
+
+/**
+ * One parsed value, in the jCal form ("2026-10-26", "2026-10-26T18:00:00Z",
+ * "2026-10-26T18:00:00"). "floating" is a wall-clock time without a zone; what
+ * it becomes on write depends on where it lands (see setDateValue), and
+ * `local` is the instant it names when read in the host timezone.
+ */
+type DateValue = {
+    kind: 'date';
+    jcal: string;
+} | {
+    kind: 'utc';
+    jcal: string;
+} | {
+    kind: 'floating';
+    jcal: string;
+    local: Date;
+};
+/**
+ * Parse one date or date-time value as a caller would write it — the grammar
+ * updateFields accepts for every date-typed property, exported so a caller
+ * can validate input with exactly the same rules.
+ *
+ * A zoned value is converted to UTC: the instant is what matters, and UTC is
+ * the only zone that needs no VTIMEZONE. A value without a zone stays a
+ * wall-clock time here; setDateValue decides what it means.
+ *
+ * @throws {UpdateFieldsError} INVALID_VALUE, naming the accepted forms, when the
+ *   value is none of them; INVALID_INPUT when it is no string
+ */
+declare function parseDateValue(raw: string): DateValue;
+
+/**
+ * Work left for rule expansion, in the units of WORK_BUDGET. Spent as ical.js
+ * tests candidates; one object can be shared by several expansions, so a
+ * caller bounds all of them together.
+ */
+interface RecurrenceBudget {
+    remaining: number;
 }
 
 /**
@@ -110,6 +173,9 @@ declare function seriesMaster(calendar: ICAL.Component, type?: ComponentType): I
  * @param options.type - the component type to write into ("vevent", "vtodo",
  *   "vjournal"); by default the first type present, in that order. Throws if
  *   the object holds no component of that type, or is a vCard
+ * @param options.lists - per list of dates (EXDATE, RDATE) whether the values
+ *   replace the list (default), are added to it, or are removed from it (see
+ *   "Lists of dates" in the README)
  * @returns Updated iCal string ready for tsdav.updateCalendarObject()
  *
  * @example
@@ -124,37 +190,6 @@ declare function seriesMaster(calendar: ICAL.Component, type?: ComponentType): I
 declare function updateFields(calendarObject: CalendarObjectInput, fields: FieldUpdates, options?: UpdateFieldsOptions): string;
 
 /**
- * One parsed value, in the jCal form ("2026-10-26", "2026-10-26T18:00:00Z",
- * "2026-10-26T18:00:00"). "floating" is a wall-clock time without a zone; what
- * it becomes on write depends on where it lands (see setDateValue), and
- * `local` is the instant it names when read in the host timezone.
- */
-type DateValue = {
-    kind: 'date';
-    jcal: string;
-} | {
-    kind: 'utc';
-    jcal: string;
-} | {
-    kind: 'floating';
-    jcal: string;
-    local: Date;
-};
-/**
- * Parse one date or date-time value as a caller would write it — the grammar
- * updateFields accepts for every date-typed property, exported so a caller
- * can validate input with exactly the same rules.
- *
- * A zoned value is converted to UTC: the instant is what matters, and UTC is
- * the only zone that needs no VTIMEZONE. A value without a zone stays a
- * wall-clock time here; setDateValue decides what it means.
- *
- * @throws {UpdateFieldsError} INVALID_VALUE, naming the accepted forms, when the
- *   value is none of them; INVALID_INPUT when it is no string
- */
-declare function parseDateValue(raw: string): DateValue;
-
-/**
  * Why updateFields (or seriesMaster, or parseDateValue) refused a call.
  *
  * Every code names a mistake in what the caller gave — the arguments, the
@@ -165,7 +200,7 @@ declare function parseDateValue(raw: string): DateValue;
  *
  * See "Errors" in the README for when each code occurs.
  */
-declare const CODES: readonly ["INVALID_INPUT", "INVALID_ICALENDAR", "INVALID_TYPE", "INVALID_FLOATING_TIME", "INVALID_ABSOLUTE_TIME", "COMPONENT_NOT_FOUND", "WRONG_OBJECT_KIND", "NO_MASTER", "INVALID_VALUE", "VALUE_TYPE_MISMATCH", "ZONE_MISMATCH", "UNKNOWN_TZID", "UNSUPPORTED_VTIMEZONE", "UNKNOWN_RULE_PART", "DUPLICATE_RULE_PART", "INVALID_RULE", "END_BEFORE_START", "RECURRENCE_ID_ON_MASTER", "SERIES_MOVE_REFUSED", "ORPHANED_EXCEPTIONS", "DST_AMBIGUOUS", "CHECK_LIMIT_EXCEEDED", "SERIES_UNVERIFIABLE"];
+declare const CODES: readonly ["INVALID_INPUT", "INVALID_ICALENDAR", "INVALID_TYPE", "INVALID_FLOATING_TIME", "INVALID_ABSOLUTE_TIME", "COMPONENT_NOT_FOUND", "WRONG_OBJECT_KIND", "NO_MASTER", "INVALID_VALUE", "VALUE_TYPE_MISMATCH", "ZONE_MISMATCH", "UNKNOWN_TZID", "UNSUPPORTED_VTIMEZONE", "UNKNOWN_RULE_PART", "DUPLICATE_RULE_PART", "INVALID_RULE", "END_BEFORE_START", "RECURRENCE_ID_ON_MASTER", "SERIES_MOVE_REFUSED", "ORPHANED_EXCEPTIONS", "UNMATCHED_EXDATE", "NOT_IN_LIST", "UNKNOWN_OCCURRENCE", "DST_AMBIGUOUS", "CHECK_LIMIT_EXCEEDED", "SERIES_UNVERIFIABLE"];
 /** Every code, frozen */
 declare const UPDATE_FIELDS_ERROR_CODES: typeof CODES;
 /** A stable reason for a refusal; see UPDATE_FIELDS_ERROR_CODES */
@@ -229,6 +264,38 @@ declare function isUpdateFieldsError<C extends UpdateFieldsErrorCode = UpdateFie
     code: C;
 };
 
+interface OccurrenceEditOptions {
+    /** the component type, as for updateFields */
+    type?: ComponentType;
+}
+/**
+ * Cancel occurrences of a series: each is excluded with an EXDATE, written in
+ * the series' own form and zone, and its override (the component with that
+ * RECURRENCE-ID), if any, goes too, so nothing is left that applies to
+ * nothing. An occurrence cancelled already is left as it is.
+ *
+ * @param ids - the original starts of the occurrences: as expandOccurrences
+ *   gives them (Occurrence.recurrenceId.value — for an override the original
+ *   start, not where it was moved to), or with "Z" or an offset; matched by
+ *   instant, by date in an all-day series
+ * @throws {UpdateFieldsError} UNKNOWN_OCCURRENCE for an id that is no
+ *   occurrence of the series; otherwise as updateFields
+ */
+declare function cancelOccurrences(calendarObject: CalendarObjectInput, ids: readonly string[], options?: OccurrenceEditOptions): string;
+/**
+ * Restore cancelled occurrences: the EXDATE values naming them are removed,
+ * whatever line and zone each is written in, matched by instant directly (an
+ * EXDATE in the second pass of a repeated hour can be removed by its UTC
+ * value), and a date in a timed series that excludes the occurrence's day
+ * goes too. An override removed when the occurrence was cancelled does not
+ * come back; the occurrence is the series'.
+ *
+ * @param ids - the original starts, in the same forms as for cancelOccurrences
+ * @throws {UpdateFieldsError} NOT_IN_LIST for an id no EXDATE names; otherwise
+ *   as updateFields
+ */
+declare function restoreOccurrences(calendarObject: CalendarObjectInput, ids: readonly string[], options?: OccurrenceEditOptions): string;
+
 /** The range of years a generated VTIMEZONE is asked to cover */
 interface VtimezoneRange {
     /** the earliest year a value lies in; the VTIMEZONE starts on 1 January of the year before */
@@ -290,15 +357,6 @@ declare function resolveZone(tzid: string, source?: ZoneSource): ZoneConverter |
  * (UTC, floating, a date) or the TZID is unknown.
  */
 declare function resolvePropertyZone(property: ICAL.Property): ZoneConverter | null;
-
-/**
- * Work left for rule expansion, in the units of WORK_BUDGET. Spent as ical.js
- * tests candidates; one object can be shared by several expansions, so a
- * caller bounds all of them together.
- */
-interface RecurrenceBudget {
-    remaining: number;
-}
 
 /**
  * A budget for expandOccurrences, in work units (about a microsecond of
@@ -372,4 +430,4 @@ interface ExpandOptions {
  */
 declare function expandOccurrences(calendarObject: CalendarObjectInput | ICAL.Component, options: ExpandOptions): ExpansionResult;
 
-export { type AbsoluteTime, type CalendarObjectInput, type ComponentType, type DateValue, type ExpandOptions, type ExpansionResult, type FieldUpdates, type FloatingTime, type Occurrence, type OccurrenceTime, type RecurrenceBudget, UPDATE_FIELDS_ERROR_CODES, UpdateFieldsError, type UpdateFieldsErrorCode, type UpdateFieldsErrorDetails, type UpdateFieldsOptions, type UpdateFieldsRemedy, type VtimezoneRange, type WallTime, type ZoneConverter, type ZoneSource, createRecurrenceBudget, expandOccurrences, generateVtimezone, isUpdateFieldsError, parseDateValue, resolvePropertyZone, resolveZone, seriesMaster, updateFields };
+export { type AbsoluteTime, type CalendarObjectInput, type ComponentType, type DateListProperty, type DateValue, type ExpandOptions, type ExpansionResult, type FieldUpdates, type FloatingTime, type ListMode, type Occurrence, type OccurrenceEditOptions, type OccurrenceTime, type RecurrenceBudget, UPDATE_FIELDS_ERROR_CODES, UpdateFieldsError, type UpdateFieldsErrorCode, type UpdateFieldsErrorDetails, type UpdateFieldsOptions, type UpdateFieldsRemedy, type VtimezoneRange, type WallTime, type ZoneConverter, type ZoneSource, cancelOccurrences, createRecurrenceBudget, expandOccurrences, generateVtimezone, isUpdateFieldsError, parseDateValue, resolvePropertyZone, resolveZone, restoreOccurrences, seriesMaster, updateFields };
