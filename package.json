@@ -1,6 +1,6 @@
 {
   "name": "@philflow/tsdav-utils",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Field-agnostic utility layer for tsdav CalDAV/CardDAV operations",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
