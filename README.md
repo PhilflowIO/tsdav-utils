@@ -256,8 +256,9 @@ updateFields(event, { DTSTART: '2026-10-06T08:00:00Z' }, { absoluteTime: 'keep-z
   clock of its own there (that wall-clock time reads as the first pass, RFC 5545
   3.3.5), so it throws (`DST_AMBIGUOUS`). The first pass is written as is; no
   instant falls in a skipped hour.
-- Where no zone applies — a UTC or floating DTSTART, a value without DTSTART, the
-  UTC-only `COMPLETED`/`CREATED`/`DTSTAMP`/`LAST-MODIFIED` — the instant is written
+- Where no zone applies — a value with no `TZID` of its own next to a UTC or
+  floating DTSTART or no DTSTART at all (a `DUE` with its own `TZID` is
+  converted, DTSTART or not), the UTC-only `COMPLETED`/`CREATED`/`DTSTAMP`/`LAST-MODIFIED` — the instant is written
   as UTC, as by default. All-day rules are unchanged: a date-time next to an
   all-day DTSTART still throws.
 - Values without a zone, and dates, are not affected; `floatingTime` governs those.
@@ -474,7 +475,8 @@ Error` holds) with:
 - `suggestion` — a value that would be accepted, where the library can tell: for
   `SERIES_MOVE_REFUSED`, the rule to give with the new start;
 - `cause` — when a refusal is reported with a longer message (`DTEND: ...`,
-  `DTSTART changed, and ...`), the refusal it reports.
+  `DTSTART changed, and ...`), the refusal it reports; for `INVALID_ICALENDAR`,
+  the ical.js parse error.
 
 Branch on `code` and `remedy`, not on the message: the messages explain and may
 be reworded. **Anything else thrown is a plain `Error`**: a failure of the library
@@ -505,12 +507,15 @@ the union types.
 A value already in the object that cannot be read (`EXDATE:garbage`,
 `RRULE:...;UNTIL=garbage`) is refused with the same code whichever check finds
 it — `INVALID_VALUE` or `INVALID_RULE`, `property` naming it — but only when the
-write needs it: a SUMMARY write next to a broken RRULE goes through.
+write needs it: a SUMMARY write next to a broken RRULE goes through. A rule the
+call does not write goes back byte for byte as the object spells it, broken or
+not; where its line cannot be found in the text, ical.js writes it, and an
+unreadable one is refused (`INVALID_RULE`) rather than rewritten.
 
 | Code | When | Remedy |
 |---|---|---|
 | `INVALID_INPUT` | an argument has the wrong type: `calendarObject` not a string or `{ data: string }`, `fields` or `options` not an object, a non-string to `parseDateValue`, several top-level components in one text | `fix-value` |
-| `INVALID_ICALENDAR` | the iCalendar or vCard text does not parse | `rewrite-object` |
+| `INVALID_ICALENDAR` | the iCalendar or vCard text does not parse (`cause`: the ical.js error) | `rewrite-object` |
 | `INVALID_TYPE` | `options.type` (or `seriesMaster`'s type) is not `vevent`, `vtodo` or `vjournal` | `fix-value` |
 | `INVALID_FLOATING_TIME` | `options.floatingTime` is not `keep` or `local` | `fix-value` |
 | `INVALID_ABSOLUTE_TIME` | `options.absoluteTime` is not `as-given` or `keep-zone` | `fix-value` |
@@ -519,8 +524,8 @@ write needs it: a SUMMARY write next to a broken RRULE goes through.
 | `NO_MASTER` | several instances with `RECURRENCE-ID` and no master, so which one is meant cannot be told | `rewrite-object` |
 | `INVALID_VALUE` | a date or date-time value (also a rule's `UNTIL`) does not parse, names no real date, time or offset, or is no string; or such a value already in the object | `fix-value`; `rewrite-object` or `same-call` for a value in the object, as the message says |
 | `VALUE_TYPE_MISMATCH` | a date where a date-time is needed or the other way round: next to DTSTART, on a property that takes no date, or mixed in one list | `fix-value` |
-| `ZONE_MISMATCH` | a value lacks the zone it needs (next to a UTC DTSTART, on `DTSTAMP`/`CREATED`/...), has one it must not have (`UNTIL` of a floating series), or a list mixes both | `fix-value`; `rewrite-object` for a value in the object |
-| `UNKNOWN_TZID` | a TZID whose rules are needed (a time converted to or from it, `absoluteTime: 'keep-zone'`) has no `VTIMEZONE` in the object and is no IANA zone — the same code whether a move or a new rule needs it | `fix-value` for a value given; `rewrite-object` for a zone in the object |
+| `ZONE_MISMATCH` | a value lacks the zone it needs (next to a UTC DTSTART, on `DTSTAMP`/`CREATED`/...), has one it must not have (`UNTIL` of a floating series), or a list mixes both | `fix-value`; for a value in the object `same-call` where a DTSTART move would carry it, else `rewrite-object` |
+| `UNKNOWN_TZID` | a TZID whose rules are needed (a time converted to or from it, `absoluteTime: 'keep-zone'`) has no `VTIMEZONE` in the object and is no IANA zone — the same code whether a move or a new rule needs it | `fix-value` for a value given; for a zone in the object `same-call` where a DTSTART move would carry the value, else `rewrite-object` |
 | `UNSUPPORTED_VTIMEZONE` | a `VTIMEZONE` in the object repeats more often than monthly, or its rule cannot be read | `rewrite-object` |
 | `UNKNOWN_RULE_PART` | a rule given has a part RFC 5545 3.3.10 does not define, `RSCALE`/`SKIP`, or an `RRULE:` prefix | `fix-value` |
 | `DUPLICATE_RULE_PART` | a rule given names a part twice | `fix-value` |

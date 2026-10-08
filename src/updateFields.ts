@@ -164,7 +164,7 @@ export function updateFields(
     jcalData = ICAL.parse(icalString);
   } catch (error: any) {
     throw new UpdateFieldsError('INVALID_ICALENDAR', `Failed to parse iCal data: ${error.message}`,
-      { remedy: 'rewrite-object' });
+      { remedy: 'rewrite-object', cause: error });
   }
   // several top-level components parse into a list of them
   if (Array.isArray(jcalData) && Array.isArray(jcalData[0])) {
@@ -175,7 +175,7 @@ export function updateFields(
     component = new ICAL.Component(jcalData);
   } catch (error: any) {
     throw new UpdateFieldsError('INVALID_ICALENDAR', `Failed to parse iCal data: ${error.message}`,
-      { remedy: 'rewrite-object' });
+      { remedy: 'rewrite-object', cause: error });
   }
 
   // 3. Find the component to update: the master of a VCALENDAR (see
