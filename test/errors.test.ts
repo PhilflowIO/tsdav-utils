@@ -59,6 +59,10 @@ describe('UpdateFieldsError codes', () => {
     refusal('INVALID_FLOATING_TIME', () => updateFields(timed, { SUMMARY: 'x' }, { floatingTime: 'utc' as never }));
   });
 
+  it('INVALID_ABSOLUTE_TIME: an unknown absoluteTime', () => {
+    refusal('INVALID_ABSOLUTE_TIME', () => updateFields(timed, { SUMMARY: 'x' }, { absoluteTime: 'utc' as never }));
+  });
+
   it('COMPONENT_NOT_FOUND: a type the object does not hold, or a type on a vCard', () => {
     refusal('COMPONENT_NOT_FOUND', () => updateFields(timed, { SUMMARY: 'x' }, { type: 'vtodo' }));
     const card = ['BEGIN:VCARD', 'VERSION:4.0', 'FN:A', 'END:VCARD', ''].join('\r\n');

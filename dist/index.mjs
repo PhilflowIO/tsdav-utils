@@ -23,6 +23,8 @@ var UPDATE_FIELDS_ERROR_CODES = [
   "INVALID_TYPE",
   /** options.floatingTime is not "keep" or "local" */
   "INVALID_FLOATING_TIME",
+  /** options.absoluteTime is not "as-given" or "keep-zone" */
+  "INVALID_ABSOLUTE_TIME",
   /** the object holds no component of the type asked for (or is a vCard) */
   "COMPONENT_NOT_FOUND",
   /** several instances with RECURRENCE-ID and no master: which one is meant cannot be told */
@@ -358,7 +360,26 @@ function frameOf(component) {
   const value = dtstart.toJSON()[3];
   return typeof value === "string" && /Z$/i.test(value) ? { form: "utc" } : { form: "floating" };
 }
-function setDateValue(component, name, raw, floatingTime = "keep") {
+function wallInZone(component, upper, tzid, value) {
+  const zone2 = zoneOf(component, tzid);
+  if (!zone2) {
+    throw new UpdateFieldsError(
+      "UNKNOWN_TZID",
+      `${upper}: ${unknownZone(tzid)}, so the instant cannot be written as its wall-clock time there: give a time without a zone, or leave absoluteTime "as-given"`,
+      { property: upper }
+    );
+  }
+  const m = /^(\d{4,})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/.exec(value.jcal);
+  const utc = wallOf(...[1, 2, 3, 4, 5, 6].map((i) => Number(m[i])));
+  const wall = zone2.fromUtc(utc);
+  const f = fieldsOf(wall);
+  const jcal = `${pad(f.year, 4)}-${pad(f.month)}-${pad(f.day)}T${pad(f.hour)}:${pad(f.minute)}:${pad(f.second)}`;
+  if (zone2.toUtc(wall) !== utc) {
+    throw new UpdateFieldsError("DST_AMBIGUOUS", `${upper}: ${value.jcal.replace(/[-:]/g, "")} is ${jcal.replace(/[-:]/g, "")} in "${tzid}", in the second pass of the hour the DST change shows twice, where that wall-clock time reads as the first pass: give the time in UTC with absoluteTime "as-given", or another time`, { property: upper });
+  }
+  return { kind: "floating", jcal, local: new Date(utc * 1e3) };
+}
+function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime = "as-given") {
   const shape = dateProperty(component, name);
   if (!shape) {
     return false;
@@ -406,6 +427,9 @@ function setDateValue(component, name, raw, floatingTime = "keep") {
   }
   const own = existing?.getParameter("tzid");
   const zone2 = UTC_ONLY.has(lower) ? null : typeof own === "string" && own ? own : anchor?.form === "tzid" ? anchor.tzid : null;
+  if (absoluteTime === "keep-zone" && zone2) {
+    parsed = parsed.map((p) => p.kind === "utc" ? wallInZone(component, upper, zone2, p) : p);
+  }
   const floating = parsed.some((p) => p.kind === "floating");
   const wallClock = !floating ? null : zone2 ? "tzid" : anchor?.form === "floating" ? "floating" : floatingTime === "local" ? "utc" : anchor?.form === "utc" || UTC_ONLY.has(lower) ? null : "floating";
   if (floating && wallClock === null) {
@@ -1439,6 +1463,13 @@ function updateFields(calendarObject, fields, options = {}) {
   if (floatingTime !== "keep" && floatingTime !== "local") {
     throw new UpdateFieldsError("INVALID_FLOATING_TIME", `Invalid floatingTime "${floatingTime}": use "keep" or "local"`);
   }
+  const absoluteTime = options.absoluteTime ?? "as-given";
+  if (absoluteTime !== "as-given" && absoluteTime !== "keep-zone") {
+    throw new UpdateFieldsError(
+      "INVALID_ABSOLUTE_TIME",
+      `Invalid absoluteTime "${absoluteTime}": use "as-given" or "keep-zone"`
+    );
+  }
   const type = options.type === void 0 ? void 0 : componentType(options.type);
   let jcalData;
   let component;
@@ -1464,7 +1495,7 @@ function updateFields(calendarObject, fields, options = {}) {
     icalString
   );
   for (const [key, value] of entries) {
-    if (!setDateValue(actualComponent, key, value, floatingTime) && !setRecurValue(actualComponent, key, value, floatingTime)) {
+    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime) && !setRecurValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }

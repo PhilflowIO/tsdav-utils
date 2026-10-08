@@ -1,6 +1,6 @@
 import ICAL from 'ical.js';
-import type { FloatingTime } from './types';
-import { fieldsOf, wallOf, zoneOf } from './zone';
+import type { AbsoluteTime, FloatingTime } from './types';
+import { fieldsOf, unknownZone, wallOf, zoneOf } from './zone';
 import { UpdateFieldsError, wrapped } from './errors';
 import type { UpdateFieldsErrorCode } from './errors';
 
@@ -252,6 +252,34 @@ export function frameOf(component: ICAL.Component): Anchor | null {
 }
 
 /**
+ * A UTC value as the wall clock of its instant in a zone, for "keep-zone".
+ * Refused when the zone's rules are unknown, or when the instant falls in the
+ * second pass of the hour a DST change shows twice: that wall clock reads as
+ * the first pass (RFC 5545 3.3.5), so the instant has none of its own there.
+ * An instant always has a wall clock outside a gap, so none lands in one.
+ */
+function wallInZone(component: ICAL.Component, upper: string, tzid: string, value: DateValue): DateValue {
+  const zone = zoneOf(component, tzid);
+  if (!zone) {
+    throw new UpdateFieldsError('UNKNOWN_TZID', `${upper}: ${unknownZone(tzid)}, so the instant cannot be ` +
+      'written as its wall-clock time there: give a time without a zone, or leave absoluteTime "as-given"',
+    { property: upper });
+  }
+  const m = /^(\d{4,})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/.exec(value.jcal)!;
+  const utc = wallOf(...([1, 2, 3, 4, 5, 6].map((i) => Number(m[i])) as [number, number, number, number, number, number]));
+  const wall = zone.fromUtc(utc);
+  const f = fieldsOf(wall);
+  const jcal = `${pad(f.year, 4)}-${pad(f.month)}-${pad(f.day)}T${pad(f.hour)}:${pad(f.minute)}:${pad(f.second)}`;
+  if (zone.toUtc(wall) !== utc) {
+    throw new UpdateFieldsError('DST_AMBIGUOUS', `${upper}: ${value.jcal.replace(/[-:]/g, '')} is ` +
+      `${jcal.replace(/[-:]/g, '')} in "${tzid}", in the second pass of the hour the DST change shows twice, ` +
+      'where that wall-clock time reads as the first pass: give the time in UTC with absoluteTime "as-given", ' +
+      'or another time', { property: upper });
+  }
+  return { kind: 'floating', jcal, local: new Date(utc * 1000) };
+}
+
+/**
  * Write a date or date-time property from a caller-supplied string.
  *
  * Updates the first occurrence (creating it when missing), which is the same
@@ -267,7 +295,9 @@ export function frameOf(component: ICAL.Component): Anchor | null {
  * throws. With no anchor at all it stays floating, or with "local" the host's
  * wall clock is written as UTC. A value that names its zone is written as UTC
  * and drops the TZID, which RFC 5545 3.2.19 forbids on a UTC value and which
- * a DATE cannot carry. Other parameters (RANGE on RECURRENCE-ID, X-
+ * a DATE cannot carry — unless absoluteTime is "keep-zone": then, where the
+ * zone above applies (the property's TZID, else DTSTART's), the instant is
+ * written as its wall clock in that zone and the TZID stays (see wallInZone). Other parameters (RANGE on RECURRENCE-ID, X-
  * parameters) survive.
  *
  * An anchored property also takes DTSTART's value type: a date next to an
@@ -281,6 +311,7 @@ export function setDateValue(
   name: string,
   raw: string,
   floatingTime: FloatingTime = 'keep',
+  absoluteTime: AbsoluteTime = 'as-given',
 ): boolean {
   const shape = dateProperty(component, name);
   if (!shape) {
@@ -331,6 +362,12 @@ export function setDateValue(
     : typeof own === 'string' && own ? own
     : anchor?.form === 'tzid' ? anchor.tzid
     : null;
+
+  // Under "keep-zone" an instant is written as its wall clock in that zone, so
+  // the TZID stays: a series keeps its local time across DST changes
+  if (absoluteTime === 'keep-zone' && zone) {
+    parsed = parsed.map((p) => p.kind === 'utc' ? wallInZone(component, upper, zone, p) : p);
+  }
 
   const floating = parsed.some((p) => p.kind === 'floating');
   // Where a wall-clock value ends up: in a TZID, floating, or converted to UTC

@@ -23,6 +23,15 @@ export type CalendarObjectInput = string | {
 export type FloatingTime = 'keep' | 'local';
 
 /**
+ * How a date-time with a zone ("2026-10-06T10:00:00Z", "...+02:00") is
+ * written where the property, or the DTSTART it follows, has a TZID.
+ * - "as-given": as UTC, dropping the TZID (default)
+ * - "keep-zone": as the wall-clock time of that instant in the TZID, which
+ *   stays, so a series keeps its local time across DST changes
+ */
+export type AbsoluteTime = 'as-given' | 'keep-zone';
+
+/**
  * The iCalendar component types a write can be aimed at, in the order
  * updateFields tries them when no type is named.
  */
@@ -35,6 +44,11 @@ export type ComponentType = typeof COMPONENT_TYPES[number];
 
 export interface UpdateFieldsOptions {
   floatingTime?: FloatingTime;
+  /**
+   * How a date-time with a zone is written where a TZID applies: as UTC
+   * ("as-given", the default) or converted into that TZID ("keep-zone").
+   */
+  absoluteTime?: AbsoluteTime;
   /**
    * The component type to write into. Without it the first type present is
    * taken, VEVENT before VTODO before VJOURNAL (see seriesMaster).

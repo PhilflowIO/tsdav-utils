@@ -18,6 +18,8 @@ export const UPDATE_FIELDS_ERROR_CODES = [
   'INVALID_TYPE',
   /** options.floatingTime is not "keep" or "local" */
   'INVALID_FLOATING_TIME',
+  /** options.absoluteTime is not "as-given" or "keep-zone" */
+  'INVALID_ABSOLUTE_TIME',
   /** the object holds no component of the type asked for (or is a vCard) */
   'COMPONENT_NOT_FOUND',
   /** several instances with RECURRENCE-ID and no master: which one is meant cannot be told */

@@ -22,6 +22,14 @@ type CalendarObjectInput = string | {
  */
 type FloatingTime = 'keep' | 'local';
 /**
+ * How a date-time with a zone ("2026-10-06T10:00:00Z", "...+02:00") is
+ * written where the property, or the DTSTART it follows, has a TZID.
+ * - "as-given": as UTC, dropping the TZID (default)
+ * - "keep-zone": as the wall-clock time of that instant in the TZID, which
+ *   stays, so a series keeps its local time across DST changes
+ */
+type AbsoluteTime = 'as-given' | 'keep-zone';
+/**
  * The iCalendar component types a write can be aimed at, in the order
  * updateFields tries them when no type is named.
  */
@@ -32,6 +40,11 @@ declare const COMPONENT_TYPES: readonly ["vevent", "vtodo", "vjournal"];
 type ComponentType = typeof COMPONENT_TYPES[number];
 interface UpdateFieldsOptions {
     floatingTime?: FloatingTime;
+    /**
+     * How a date-time with a zone is written where a TZID applies: as UTC
+     * ("as-given", the default) or converted into that TZID ("keep-zone").
+     */
+    absoluteTime?: AbsoluteTime;
     /**
      * The component type to write into. Without it the first type present is
      * taken, VEVENT before VTODO before VJOURNAL (see seriesMaster).
@@ -79,6 +92,9 @@ declare function seriesMaster(calendar: ICAL.Component, type?: ComponentType): I
  * @param fields - Key-value pairs of iCal properties to update (e.g., {'SUMMARY': 'New Title'})
  * @param options.floatingTime - how a date-time without a zone is written:
  *   "keep" (floating, the default) or "local" (host timezone, written as UTC)
+ * @param options.absoluteTime - how a date-time with a zone is written where
+ *   the property or its DTSTART has a TZID: as UTC ("as-given", the default) or
+ *   converted into that TZID, which stays ("keep-zone")
  * @param options.type - the component type to write into ("vevent", "vtodo",
  *   "vjournal"); by default the first type present, in that order. Throws if
  *   the object holds no component of that type, or is a vCard
@@ -137,7 +153,7 @@ declare function parseDateValue(raw: string): DateValue;
  *
  * See "Errors" in the README for when each code occurs.
  */
-declare const UPDATE_FIELDS_ERROR_CODES: readonly ["INVALID_INPUT", "INVALID_ICALENDAR", "INVALID_TYPE", "INVALID_FLOATING_TIME", "COMPONENT_NOT_FOUND", "NO_MASTER", "INVALID_VALUE", "VALUE_TYPE_MISMATCH", "ZONE_MISMATCH", "UNKNOWN_TZID", "UNSUPPORTED_VTIMEZONE", "UNKNOWN_RULE_PART", "DUPLICATE_RULE_PART", "INVALID_RULE", "RECURRENCE_ID_ON_MASTER", "SERIES_MOVE_REFUSED", "ORPHANS_OVERRIDES", "DST_AMBIGUOUS", "CHECK_LIMIT_EXCEEDED", "SERIES_UNVERIFIABLE"];
+declare const UPDATE_FIELDS_ERROR_CODES: readonly ["INVALID_INPUT", "INVALID_ICALENDAR", "INVALID_TYPE", "INVALID_FLOATING_TIME", "INVALID_ABSOLUTE_TIME", "COMPONENT_NOT_FOUND", "NO_MASTER", "INVALID_VALUE", "VALUE_TYPE_MISMATCH", "ZONE_MISMATCH", "UNKNOWN_TZID", "UNSUPPORTED_VTIMEZONE", "UNKNOWN_RULE_PART", "DUPLICATE_RULE_PART", "INVALID_RULE", "RECURRENCE_ID_ON_MASTER", "SERIES_MOVE_REFUSED", "ORPHANS_OVERRIDES", "DST_AMBIGUOUS", "CHECK_LIMIT_EXCEEDED", "SERIES_UNVERIFIABLE"];
 /** A stable reason for a refusal; see UPDATE_FIELDS_ERROR_CODES */
 type UpdateFieldsErrorCode = typeof UPDATE_FIELDS_ERROR_CODES[number];
 interface UpdateFieldsErrorDetails {
@@ -167,4 +183,4 @@ declare class UpdateFieldsError extends Error {
  */
 declare function isUpdateFieldsError(error: unknown, code?: UpdateFieldsErrorCode): error is UpdateFieldsError;
 
-export { type CalendarObjectInput, type ComponentType, type DateValue, type FieldUpdates, type FloatingTime, UPDATE_FIELDS_ERROR_CODES, UpdateFieldsError, type UpdateFieldsErrorCode, type UpdateFieldsErrorDetails, type UpdateFieldsOptions, isUpdateFieldsError, parseDateValue, seriesMaster, updateFields };
+export { type AbsoluteTime, type CalendarObjectInput, type ComponentType, type DateValue, type FieldUpdates, type FloatingTime, UPDATE_FIELDS_ERROR_CODES, UpdateFieldsError, type UpdateFieldsErrorCode, type UpdateFieldsErrorDetails, type UpdateFieldsOptions, isUpdateFieldsError, parseDateValue, seriesMaster, updateFields };

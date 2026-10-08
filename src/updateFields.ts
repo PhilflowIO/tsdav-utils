@@ -83,6 +83,9 @@ export function seriesMaster(calendar: ICAL.Component, type?: ComponentType): IC
  * @param fields - Key-value pairs of iCal properties to update (e.g., {'SUMMARY': 'New Title'})
  * @param options.floatingTime - how a date-time without a zone is written:
  *   "keep" (floating, the default) or "local" (host timezone, written as UTC)
+ * @param options.absoluteTime - how a date-time with a zone is written where
+ *   the property or its DTSTART has a TZID: as UTC ("as-given", the default) or
+ *   converted into that TZID, which stays ("keep-zone")
  * @param options.type - the component type to write into ("vevent", "vtodo",
  *   "vjournal"); by default the first type present, in that order. Throws if
  *   the object holds no component of that type, or is a vCard
@@ -114,6 +117,11 @@ export function updateFields(
   const floatingTime = options.floatingTime ?? 'keep';
   if (floatingTime !== 'keep' && floatingTime !== 'local') {
     throw new UpdateFieldsError('INVALID_FLOATING_TIME', `Invalid floatingTime "${floatingTime}": use "keep" or "local"`);
+  }
+  const absoluteTime = options.absoluteTime ?? 'as-given';
+  if (absoluteTime !== 'as-given' && absoluteTime !== 'keep-zone') {
+    throw new UpdateFieldsError('INVALID_ABSOLUTE_TIME',
+      `Invalid absoluteTime "${absoluteTime}": use "as-given" or "keep-zone"`);
   }
   const type = options.type === undefined ? undefined : componentType(options.type);
 
@@ -162,7 +170,7 @@ export function updateFields(
   const series = beginSeriesEdit(component.name === 'vcalendar' ? component : null, actualComponent, written,
     icalString);
   for (const [key, value] of entries) {
-    if (!setDateValue(actualComponent, key, value, floatingTime) &&
+    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime) &&
         !setRecurValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
