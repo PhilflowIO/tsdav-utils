@@ -84,3 +84,29 @@ if (!(cjsError instanceof cjs.UpdateFieldsError) || !isUpdateFieldsError(cjsErro
   fail(`the CommonJS build threw no typed refusal, or the guard does not hold across builds: ${cjsError}`);
 }
 console.log('✅ typed refusals in ESM and CommonJS');
+
+// 6. a named zone writes the TZID and a VTIMEZONE that the resolved ical.js
+//    reads back, in both builds, the same text from each
+const named = (build) => build.updateFields(calendar(...event()),
+  { DTSTART: '2026-10-05T07:00:00Z', RRULE: 'FREQ=WEEKLY;COUNT=5' }, { zone: 'Europe/Berlin' });
+const [esmNamed, cjsNamed] = [named({ updateFields }), named(cjs)];
+if (!esmNamed.includes('DTSTART;TZID=Europe/Berlin:20261005T090000') || !esmNamed.includes('TZID:Europe/Berlin')) {
+  fail(`a zone write did not produce the TZID and its VTIMEZONE:\n${esmNamed}`);
+}
+if (esmNamed !== cjsNamed) {
+  fail('the ESM and CommonJS builds wrote a zone differently');
+}
+console.log('✅ named zone with generated VTIMEZONE');
+
+// 7. the helpers for consumers are exported by both builds and work on the
+//    resolved ical.js: a VTIMEZONE, a zone conversion, a bounded expansion
+for (const [name, build] of [['ESM', await import('tsdav-utils')], ['CommonJS', cjs]]) {
+  const vtimezone = build.generateVtimezone('Europe/Berlin', { from: 2026 });
+  const wall = build.resolveZone('Europe/Berlin', calendar(vtimezone)).toWallTime('2026-10-25T01:30:00Z');
+  const sparse = build.expandOccurrences(calendar(...event('DTSTART:19500101T000000Z',
+    'RRULE:FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0')), { budget: build.createRecurrenceBudget(), until: '2027-01-01T00:00:00Z' });
+  if (!vtimezone.startsWith('BEGIN:VTIMEZONE') || wall !== '2026-10-25T02:30:00' || sparse.stoppedBy !== 'budget') {
+    fail(`the ${name} helpers misbehave: ${wall}, ${sparse.stoppedBy}`);
+  }
+}
+console.log('✅ helpers for consumers in ESM and CommonJS');

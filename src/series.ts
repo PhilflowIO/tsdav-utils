@@ -37,7 +37,7 @@ const DAY = 86400;
  * One date or date-time value: its wall clock as naive seconds (see zone.ts),
  * and where that wall clock lives.
  */
-interface Stamp {
+export interface Stamp {
   wall: number;
   kind: 'date' | 'utc' | 'floating' | 'tzid';
   tzid?: string;
@@ -67,7 +67,7 @@ function stampOf(jcal: string, tzid: unknown, name: string): Stamp {
 /** The values of a property as jCal strings (PERIOD values are arrays) */
 const valuesOf = (property: ICAL.Property): unknown[] => (property.toJSON() as unknown[]).slice(3);
 
-const propertyStamps = (property: ICAL.Property) => {
+export const propertyStamps = (property: ICAL.Property) => {
   const tzid = property.getParameter('tzid');
   return valuesOf(property).map((v) => stampOf(String(Array.isArray(v) ? v[0] : v), tzid, property.name.toUpperCase()));
 };
@@ -93,10 +93,10 @@ function recurOf(property: ICAL.Property): ICAL.Recur {
   return recur;
 }
 
-const dayOf = (wall: number) => Math.floor(wall / DAY) * DAY;
+export const dayOf = (wall: number) => Math.floor(wall / DAY) * DAY;
 
 /** A wall clock as jCal in a frame's form: a date, UTC with "Z", or zoneless */
-function jcalOf(wall: number, frame: Anchor | Stamp['kind']): string {
+export function jcalOf(wall: number, frame: Anchor | Stamp['kind']): string {
   const form = typeof frame === 'string' ? frame : frame.form;
   const f = fieldsOf(wall);
   const date = `${pad(f.year, 4)}-${pad(f.month)}-${pad(f.day)}`;
@@ -127,7 +127,7 @@ function convert(component: ICAL.Component, wall: number, from: string | null, t
  * there (or has no zone), converted when it is in UTC or another zone. Against
  * an all-day series a timed value keeps its own wall clock, whose date counts.
  */
-function wallIn(component: ICAL.Component, stamp: Stamp, frame: Anchor): number {
+export function wallIn(component: ICAL.Component, stamp: Stamp, frame: Anchor): number {
   if (stamp.kind === 'date' || stamp.kind === 'floating' || frame.form === 'date') {
     return stamp.wall;
   }
@@ -599,7 +599,16 @@ function startOf(master: ICAL.Component): { frame: Anchor; wall: number; text: s
  * caps that work deterministically. A write expands at most twice, so the
  * worst case stays well under a second even on a loaded machine.
  */
-const WORK_BUDGET = 150000;
+export const WORK_BUDGET = 150000;
+
+/**
+ * Work left for rule expansion, in the units of WORK_BUDGET. Spent as ical.js
+ * tests candidates; one object can be shared by several expansions, so a
+ * caller bounds all of them together.
+ */
+export interface RecurrenceBudget {
+  remaining: number;
+}
 
 /**
  * What testing one candidate costs, in the units of WORK_BUDGET (measured with
@@ -639,7 +648,7 @@ class HorizonReached extends Error {}
  * (a zone that cannot be read, a malformed value) whose code is kept, or any
  * other error, which is a failure of the library and stays a plain Error.
  */
-class SeriesUnverifiable extends Error {
+export class SeriesUnverifiable extends Error {
   constructor(message: string, readonly source: unknown = null) {
     super(message);
   }
@@ -651,7 +660,7 @@ class SeriesUnverifiable extends Error {
  * charged against the budget, and where a search past `horizon` (a wall
  * clock) is cut short: nothing beyond it is needed.
  */
-function bounded(iterator: ICAL.RecurIterator, budget: { left: number }, recur: ICAL.Recur, horizon: number): ICAL.RecurIterator {
+function bounded(iterator: ICAL.RecurIterator, budget: RecurrenceBudget, recur: ICAL.Recur, horizon: number): ICAL.RecurIterator {
   const cost = stepCost(recur);
   const it = iterator as unknown as {
     check_contracting_rules?: (...args: unknown[]) => unknown;
@@ -663,7 +672,7 @@ function bounded(iterator: ICAL.RecurIterator, budget: { left: number }, recur: 
   }
   it.check_contracting_rules = function (this: typeof it, ...args: unknown[]) {
     expansionWork.steps++;
-    if ((budget.left -= cost) < 0) {
+    if ((budget.remaining -= cost) < 0) {
       throw new SeriesTooSparse('the rule is too sparse to expand within the work limit');
     }
     const last = this.last;
@@ -679,11 +688,13 @@ function bounded(iterator: ICAL.RecurIterator, budget: { left: number }, recur: 
  * The occurrences of the series as it stands up to `until` (a wall clock of the
  * series' frame) — DTSTART, the instances of each RRULE and the RDATEs (EXDATE
  * does not count: an override of an excluded instance still names it), on the
- * series' wall clock with UNTIL read on it too. Throws SeriesTooSparse when
- * the budget runs out first, and SeriesUnverifiable when it cannot be told at
- * all (a rule ical.js cannot expand, a zone that cannot be read).
+ * series' wall clock with UNTIL read on it too — spending `budget`. When the
+ * budget runs out, the occurrences found so far and complete false (with
+ * several RRULEs, an earlier occurrence of a later rule may be missing).
+ * Throws SeriesUnverifiable when it cannot be told at all (a rule ical.js
+ * cannot expand, a zone that cannot be read).
  */
-function expand(master: ICAL.Component, until: number): Set<number> {
+export function expandWalls(master: ICAL.Component, until: number, budget: RecurrenceBudget): { walls: Set<number>; complete: boolean } {
   const start = startOf(master);
   if (!start) {
     throw new SeriesUnverifiable('the series has no DTSTART');
@@ -694,12 +705,17 @@ function expand(master: ICAL.Component, until: number): Set<number> {
   const timeOf = (wall: number) => day
     ? ICAL.Time.fromDateString(jcalOf(wall, frame))
     : ICAL.Time.fromDateTimeString(jcalOf(wall, 'floating'));
-  const walls = new Set([norm(start.wall)]);
-  const budget = { left: WORK_BUDGET };
+  const walls = new Set<number>();
+  if (norm(start.wall) <= until) {
+    walls.add(norm(start.wall));
+  }
   try {
     for (const rdate of master.getAllProperties('rdate')) {
       for (const stamp of propertyStamps(rdate)) {
-        walls.add(norm(wallIn(master, stamp, frame)));
+        const wall = norm(wallIn(master, stamp, frame));
+        if (wall <= until) {
+          walls.add(wall);
+        }
       }
     }
     for (const property of master.getAllProperties('rrule')) {
@@ -729,13 +745,23 @@ function expand(master: ICAL.Component, until: number): Set<number> {
       throw error;
     }
     if (error instanceof SeriesTooSparse) {
-      // a dense rule that runs out reaches far: the reason is the distance
-      throw new SeriesTooSparse(walls.size > 200
-        ? `the override or EXDATE furthest ahead (${icalForm(jcalOf(until, frame))}) lies too far ahead to check ` +
-          'within the work limit'
-        : error.message);
+      return { walls, complete: false };
     }
     throw new SeriesUnverifiable((error as Error).message, error);
+  }
+  return { walls, complete: true };
+}
+
+/** expandWalls with a budget of its own; throws SeriesTooSparse when it runs out */
+function expand(master: ICAL.Component, until: number): Set<number> {
+  const { walls, complete } = expandWalls(master, until, { remaining: WORK_BUDGET });
+  if (!complete) {
+    // a dense rule that runs out reaches far: the reason is the distance
+    const frame = frameOf(master)!;
+    throw new SeriesTooSparse(walls.size > 200
+      ? `the override or EXDATE furthest ahead (${icalForm(jcalOf(until, frame))}) lies too far ahead to check ` +
+        'within the work limit'
+      : 'the rule is too sparse to expand within the work limit');
   }
   return walls;
 }

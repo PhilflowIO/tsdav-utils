@@ -56,6 +56,15 @@ export interface UpdateFieldsOptions {
    */
   absoluteTime?: AbsoluteTime;
   /**
+   * An IANA time zone ("Europe/Berlin") to write the call's date-times in:
+   * a value with Z or an offset becomes its wall-clock time there, one without
+   * a zone is read as wall clock there, and both are written with that TZID;
+   * the VCALENDAR gets a VTIMEZONE for it if it has none. Replaces
+   * floatingTime and absoluteTime ("keep-zone" may be given, it agrees). See
+   * "Writing in a named zone" in the README.
+   */
+  zone?: string;
+  /**
    * The component type to write into. Without it the first type present is
    * taken, VEVENT before VTODO before VJOURNAL (see seriesMaster).
    */

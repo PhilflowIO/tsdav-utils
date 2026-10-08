@@ -6,3 +6,9 @@ export type { UpdateFieldsErrorCode, UpdateFieldsErrorDetails, UpdateFieldsRemed
 export type { DateValue } from './typedValue';
 export type { FieldUpdates, CalendarObjectInput, FloatingTime, AbsoluteTime, UpdateFieldsOptions, ComponentType,
   AppendableProperty } from './types';
+export { generateVtimezone } from './vtimezone';
+export type { VtimezoneRange } from './vtimezone';
+export { resolveZone, resolvePropertyZone } from './timezone';
+export type { ZoneConverter, ZoneSource, WallTime } from './timezone';
+export { expandOccurrences, createRecurrenceBudget } from './expand';
+export type { RecurrenceBudget, Occurrence, OccurrenceTime, ExpansionResult, ExpandOptions } from './expand';

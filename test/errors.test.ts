@@ -161,6 +161,11 @@ const CASES = {
       call: () => updateFields(calendar(...event('DTSTART:20261005T090000Z', 'RRULE:FREQ=DAILY;UNTIL=garbage')),
         { DTSTART: '2026-10-05T10:00:00Z' }) },
   ],
+  END_BEFORE_START: [
+    { name: 'a DTEND before DTSTART, in a zone', remedy: 'fix-value', property: 'DTEND',
+      call: () => updateFields(timed, { DTSTART: '2026-10-05T11:00:00', DTEND: '2026-10-05T10:00:00' },
+        { zone: 'Europe/Berlin' }) },
+  ],
   RECURRENCE_ID_ON_MASTER: [
     { name: 'RECURRENCE-ID on the master', call: () => updateFields(timed, { 'RECURRENCE-ID': '2026-10-05T09:00:00Z' }),
       remedy: 'rewrite-object', property: 'RECURRENCE-ID' },
