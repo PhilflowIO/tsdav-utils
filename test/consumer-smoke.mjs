@@ -33,11 +33,11 @@ if (!moved.includes('RECURRENCE-ID:20261012T100000Z') || !moved.includes('DTSTAR
 }
 console.log('✅ series move');
 
-// 2. a rule that pins the old weekday is refused
-const pinned = refusal(() => updateFields(calendar(...event('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3')),
+// 2. a rule that pins weekdays the move does not keep is refused
+const pinned = refusal(() => updateFields(calendar(...event('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;BYDAY=MO,WE;COUNT=6')),
   { DTSTART: '2026-10-06T09:00:00Z' }));
 if (!/does not move the whole series/.test(pinned ?? '')) {
-  fail(`a BYDAY=MO series moved to Tuesday was not refused: ${pinned}`);
+  fail(`a BYDAY=MO,WE series moved to Tuesday was not refused: ${pinned}`);
 }
 console.log('✅ pinned rule refused');
 
