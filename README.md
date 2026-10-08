@@ -154,6 +154,11 @@ Updates arbitrary properties on a calendar/todo/contact object.
 - **options.floatingTime**: `'keep' | 'local'` (default `'keep'`)
   - How a date-time without a zone is written: floating, or host timezone converted to UTC
 
+- **options.absoluteTime**: `'as-given' | 'keep-zone'` (default `'as-given'`)
+  - How a date-time with `Z` or an offset is written where the property or its
+    DTSTART has a `TZID`: as UTC, or converted into that `TZID`, which stays (see
+    [Keeping the zone](#keeping-the-zone-absolutetime))
+
 - **options.type**: `'vevent' | 'vtodo' | 'vjournal'` (optional)
   - The component type to write into. Without it the first type present is taken
     (`VEVENT`, then `VTODO`, then `VJOURNAL`, see [Recurring events and todos](#recurring-events-and-todos))
@@ -199,7 +204,8 @@ updateFields(todo, { DUE: '2026-10-26T18:00:00' });       // DUE:20261026T180000
 updateFields(event, { EXDATE: '2026-10-26T18:00:00Z,2026-11-02T18:00:00Z' });
 ```
 
-- A value with `Z` or an offset is converted to UTC; any `TZID` on the old value is removed.
+- A value with `Z` or an offset is converted to UTC; any `TZID` on the old value is
+  removed — unless `{ absoluteTime: 'keep-zone' }` is given (see below).
 - A date (`YYYY-MM-DD` or `YYYYMMDD`) becomes `VALUE=DATE`, and back again.
 - A value without a zone is a wall-clock time. On a property that already has a
   `TZID` it is read in that zone and the `TZID` stays
@@ -222,6 +228,41 @@ updateFields(event, { EXDATE: '2026-10-26T18:00:00Z,2026-11-02T18:00:00Z' });
   reject a floating value; properties that only allow a date-time reject a date.
 - Anything else (`tomorrow`, `26.10.2026`) throws, naming the accepted forms.
 - vCard `BDAY`/`ANNIVERSARY` (DATE-AND-OR-TIME in vCard 4, which allows `--0501`) are written as given.
+
+### Keeping the zone: `absoluteTime`
+
+By default (`absoluteTime: 'as-given'`) an instant is written as the caller gave
+it, in UTC. On a series in a zone that is often not what was meant: an LLM that
+moves a weekly 09:00 Europe/Berlin series with `2026-10-06T08:00:00Z` turns the
+whole series into UTC, and after the DST change every occurrence sits an hour
+earlier in Berlin. With `{ absoluteTime: 'keep-zone' }` the instant is written as
+its wall-clock time in the zone that applies, and the `TZID` stays:
+
+```typescript
+// DTSTART;TZID=Europe/Berlin:20261005T090000 + RRULE:FREQ=WEEKLY
+updateFields(event, { DTSTART: '2026-10-06T08:00:00Z' });
+// DTSTART:20261006T080000Z — 10:00 in October, 09:00 in Berlin from 25 October on
+updateFields(event, { DTSTART: '2026-10-06T08:00:00Z' }, { absoluteTime: 'keep-zone' });
+// DTSTART;TZID=Europe/Berlin:20261006T100000 — 10:00 in Berlin, every week
+```
+
+- The zone that applies is the one a value without a zone would be read in: the
+  property's own `TZID`, else (for DTEND, DUE, EXDATE, RDATE, RECURRENCE-ID) the
+  `TZID` of DTSTART. The zone's rules come from the object's `VTIMEZONE`, else the
+  IANA zone of that name; a `TZID` that is neither throws (`UNKNOWN_TZID`)
+  instead of falling back to UTC.
+- An instant in the second pass of the hour a DST change shows twice has no wall
+  clock of its own there (that wall-clock time reads as the first pass, RFC 5545
+  3.3.5), so it throws (`DST_AMBIGUOUS`). The first pass is written as is; no
+  instant falls in a skipped hour.
+- Where no zone applies — a UTC or floating DTSTART, a value without DTSTART, the
+  UTC-only `COMPLETED`/`CREATED`/`DTSTAMP`/`LAST-MODIFIED` — the instant is written
+  as UTC, as by default. All-day rules are unchanged: a date-time next to an
+  all-day DTSTART still throws.
+- Values without a zone, and dates, are not affected; `floatingTime` governs those.
+- The rest of a series follows a moved DTSTART as always (see
+  [Recurring events and todos](#recurring-events-and-todos)); kept in its zone,
+  the move is measured on that zone's wall clock.
 
 To validate input before calling `updateFields`, use the same grammar:
 `parseDateValue(value)` returns `{ kind: 'date' | 'utc' | 'floating', jcal }` or
@@ -447,12 +488,13 @@ is their union.
 | `INVALID_ICALENDAR` | the iCalendar or vCard text does not parse |
 | `INVALID_TYPE` | `options.type` (or `seriesMaster`'s type) is not `vevent`, `vtodo` or `vjournal` |
 | `INVALID_FLOATING_TIME` | `options.floatingTime` is not `keep` or `local` |
+| `INVALID_ABSOLUTE_TIME` | `options.absoluteTime` is not `as-given` or `keep-zone` |
 | `COMPONENT_NOT_FOUND` | the object holds no component of the type asked for, is a bare component of another type, or is a vCard |
 | `NO_MASTER` | several instances with `RECURRENCE-ID` and no master, so which one is meant cannot be told |
 | `INVALID_VALUE` | a date or date-time value (also a rule's `UNTIL`) does not parse, or names no real date, time or UTC offset |
 | `VALUE_TYPE_MISMATCH` | a date where a date-time is needed or the other way round: next to DTSTART, on a property that takes no date, or mixed in one list |
 | `ZONE_MISMATCH` | a value lacks the zone it needs (next to a UTC DTSTART, on `DTSTAMP`/`CREATED`/...), has one it must not have (`UNTIL` of a floating series), or a list mixes both |
-| `UNKNOWN_TZID` | a TZID whose rules are needed has no `VTIMEZONE` in the object and is no IANA zone |
+| `UNKNOWN_TZID` | a TZID whose rules are needed (a time converted to or from it, `absoluteTime: 'keep-zone'`) has no `VTIMEZONE` in the object and is no IANA zone |
 | `UNSUPPORTED_VTIMEZONE` | a `VTIMEZONE` in the object repeats more often than monthly, which no time zone does |
 | `UNKNOWN_RULE_PART` | a rule given has a part RFC 5545 3.3.10 does not define, `RSCALE`/`SKIP`, or an `RRULE:` prefix |
 | `DUPLICATE_RULE_PART` | a rule given names a part twice |
@@ -460,7 +502,7 @@ is their union.
 | `RECURRENCE_ID_ON_MASTER` | `RECURRENCE-ID` written on the series master |
 | `SERIES_MOVE_REFUSED` | a DTSTART move the series cannot follow exactly: the rule pins the old start (`suggestion` holds the rule to give, when there is one), or an existing `UNTIL`, `EXDATE`, `RDATE` or override cannot move with it |
 | `ORPHANS_OVERRIDES` | a new `RRULE` or `RDATE` leaves an override or `EXDATE` naming no occurrence |
-| `DST_AMBIGUOUS` | a value of the series sits at a DST change, where the wall clock does not name one instant |
+| `DST_AMBIGUOUS` | a value of the series sits at a DST change, where the wall clock does not name one instant; or, under `absoluteTime: 'keep-zone'`, an instant falls in the second pass of the repeated hour |
 | `CHECK_LIMIT_EXCEEDED` | the series is too sparse, or the override or `EXDATE` furthest ahead too far, to check within the work limit |
 | `SERIES_UNVERIFIABLE` | whether the overrides and `EXDATE`s still name occurrences cannot be checked at all (no DTSTART, a rule ical.js cannot expand) |
 
