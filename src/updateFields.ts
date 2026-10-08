@@ -158,7 +158,8 @@ export function updateFields(
   const entries = Object.entries(fields).sort(
     ([a], [b]) => Number(b.toLowerCase() === 'dtstart') - Number(a.toLowerCase() === 'dtstart'));
   const written = new Set(entries.map(([key]) => key.toLowerCase()));
-  const series = beginSeriesEdit(component.name === 'vcalendar' ? component : null, actualComponent, written);
+  const series = beginSeriesEdit(component.name === 'vcalendar' ? component : null, actualComponent, written,
+    icalString);
   for (const [key, value] of entries) {
     if (!setDateValue(actualComponent, key, value, floatingTime) &&
         !setRecurValue(actualComponent, key, value, floatingTime)) {
@@ -169,5 +170,7 @@ export function updateFields(
 
   // 5. Serialize back to iCal string
   //    All unmodified properties are automatically preserved by ical.js
-  return component.toString();
+  //    A rule the series edit rewrote part by part goes back as written,
+  //    with only those parts changed (see RuleTexts)
+  return series.render(component.toString());
 }

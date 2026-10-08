@@ -640,24 +640,21 @@ function gapTwin(component, stamp, frame) {
   const wall = inSeries ? stamp.wall : real;
   return { wall, other: wall === skipped ? real : skipped };
 }
-function checkGapTwins(master, properties, after) {
+function findGapTwin(master, properties) {
   const frame = frameOf(master);
   if (!frame || frame.form !== "tzid" || !zoneOf(master, frame.tzid)) {
-    return;
+    return null;
   }
   const twins = properties.filter((property) => property.type !== "period").flatMap((property) => propertyStamps(property).flatMap((stamp) => {
     const twin = gapTwin(master, stamp, frame);
     return twin ? [{ property, twin }] : [];
   }));
   if (!twins.length) {
-    return;
+    return null;
   }
   const walls = expand(master, Math.max(...twins.map(({ twin }) => twin.other)));
   const clash = twins.find(({ twin }) => walls.has(twin.other));
-  if (clash) {
-    const line = clash.property.toICALString();
-    throw new Error(`DTSTART changed, and ${after ? "moved, " : ""}${line} ${after ? "would name" : "names"} the same instant as the occurrence at ${icalForm(jcalOf(clash.twin.other, "floating"))} in "${frame.form === "tzid" ? frame.tzid : ""}", a wall-clock time the DST change skips, so which occurrence it names cannot be told: rewrite the whole iCalendar object with the values it should have`);
-  }
+  return clash ? `${clash.property.toICALString()} %NAMES% the same instant as the occurrence at ${icalForm(jcalOf(clash.twin.other, "floating"))} in "${frame.tzid}", a wall-clock time the DST change skips, so which occurrence it names cannot be told` : null;
 }
 var byDays = (move) => move.from.form === "date" || move.to.form === "date";
 function moved(stamp, move) {
@@ -703,7 +700,19 @@ function wallOut(component, wall, frame, own) {
   }
   const from = frame.form === "utc" ? null : frame.tzid;
   const to = own.kind === "utc" ? null : own.tzid;
-  return from === to ? wall : convert(component, wall, from, to);
+  if (from === to) {
+    return wall;
+  }
+  const utc = from === null ? wall : zone(component, from).toUtc(wall);
+  if (to === null) {
+    return utc;
+  }
+  const own2 = zone(component, to);
+  const out = own2.fromUtc(utc);
+  if (own2.toUtc(out) !== utc) {
+    throw new Error(`moved, it would be ${icalForm(jcalOf(utc, "utc"))}, which in "${to}" falls in the second pass of the hour the DST change shows twice, where ${icalForm(jcalOf(out, "floating"))} reads as the first`);
+  }
+  return out;
 }
 function moveOverrideTimes(override, before, after, move) {
   const component = move.component;
@@ -746,6 +755,119 @@ function unknownRuleParts(property) {
   const raw = property.toJSON()[3];
   return raw && typeof raw === "object" ? Object.keys(raw).filter((key) => !RULE_KEYS.has(key.toLowerCase())).map((key) => key.toUpperCase()) : [];
 }
+var RuleTexts = class {
+  constructor(source, calendar, master) {
+    this.texts = /* @__PURE__ */ new Map();
+    this.changed = /* @__PURE__ */ new Map();
+    if (source === null) {
+      return;
+    }
+    const lines = source.replace(/\r?\n[ \t]/g, "").split(/\r?\n/);
+    const type = master.name.toUpperCase();
+    const index = calendar ? calendar.getAllSubcomponents(master.name).indexOf(master) : 0;
+    const level = calendar ? 2 : 1;
+    const own = [];
+    let depth = 0;
+    let seen = -1;
+    let inside = false;
+    for (const line of lines) {
+      const boundary = /^(BEGIN|END):(.+)$/i.exec(line.trim());
+      if (boundary && boundary[1].toUpperCase() === "BEGIN") {
+        depth++;
+        if (!inside && depth === level && boundary[2].trim().toUpperCase() === type && ++seen === index) {
+          inside = true;
+        }
+      } else if (boundary) {
+        if (inside && depth === level) {
+          break;
+        }
+        depth--;
+      } else if (inside && depth === level) {
+        own.push(line);
+      }
+    }
+    for (const name of ["rrule", "exrule"]) {
+      const written = own.filter((line) => new RegExp(`^${name}[;:]`, "i").test(line));
+      const properties = master.getAllProperties(name);
+      if (written.length !== properties.length) {
+        continue;
+      }
+      properties.forEach((property, i) => {
+        const colon = colonOf(written[i]);
+        this.texts.set(property, { head: written[i].slice(0, colon), parts: written[i].slice(colon + 1).split(";") });
+      });
+    }
+  }
+  /** The rule part names given more than once (RFC 5545 3.3.10 allows each once) */
+  repeated(property) {
+    const names = (this.texts.get(property)?.parts ?? []).map((part) => part.split("=")[0].trim().toUpperCase());
+    return [...new Set(names.filter((name, i) => names.indexOf(name) !== i))];
+  }
+  /**
+   * Change rule parts: in the rule as parsed (so the rest of the write sees
+   * it), and in the rule as written, token by token, the part names matched
+   * case-insensitively and everything else kept as it was.
+   */
+  rewrite(component, property, parsed, written) {
+    const text = this.texts.get(property);
+    if (!text) {
+      throw new Error("its text could not be found in the object, so it cannot be rewritten part by part");
+    }
+    const parts = text.parts.map((part) => {
+      const eq = part.indexOf("=");
+      const name = eq < 0 ? part : part.slice(0, eq);
+      const value = written[name.trim().toUpperCase()];
+      return value === void 0 ? part : `${name}=${value}`;
+    });
+    const next = rewriteRule(component, property, parsed);
+    const line = { head: text.head, parts };
+    this.texts.delete(property);
+    this.changed.delete(property);
+    this.texts.set(next, line);
+    this.changed.set(next, line);
+    return next;
+  }
+  /** Before serialising: tag each rewritten rule so render() can find its line */
+  mark() {
+    [...this.changed.keys()].forEach((property, i) => property.setParameter("x-tsdav-utils-rule", String(i)));
+  }
+  /** After serialising: put each tagged rule back as written, with only its changed parts */
+  render(text) {
+    if (!this.changed.size) {
+      return text;
+    }
+    const lines = [...this.changed.values()];
+    const physical = text.split("\r\n");
+    const out = [];
+    for (let i = 0; i < physical.length; ) {
+      let j = i + 1;
+      while (j < physical.length && /^[ \t]/.test(physical[j])) {
+        j++;
+      }
+      const logical = physical[i] + physical.slice(i + 1, j).map((l) => l.slice(1)).join("");
+      const tag = /;X-TSDAV-UTILS-RULE=(\d+)/i.exec(logical.slice(0, colonOf(logical)));
+      if (tag) {
+        const line = lines[Number(tag[1])];
+        out.push(import_ical3.default.helpers.foldline(`${line.head}:${line.parts.join(";")}`));
+      } else {
+        out.push(...physical.slice(i, j));
+      }
+      i = j;
+    }
+    return out.join("\r\n");
+  }
+};
+function colonOf(line) {
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '"') {
+      quoted = !quoted;
+    } else if (line[i] === ":" && !quoted) {
+      return i;
+    }
+  }
+  return line.length;
+}
 function rewriteRule(component, property, changes) {
   const [name, params, type, value] = property.toJSON();
   const next = new import_ical3.default.Property([name, params, type, { ...value, ...changes }], component);
@@ -756,7 +878,11 @@ function rewriteRule(component, property, changes) {
   }
   return next;
 }
-function moveUntil(property, move) {
+function moveUntil(property, move, texts) {
+  const repeated = texts.repeated(property);
+  if (repeated.length) {
+    throw new Error(`the rule gives ${repeated.join(", ")} more than once, which RFC 5545 3.3.10 does not allow and clients read differently`);
+  }
   const unknown = unknownRuleParts(property);
   if (unknown.length) {
     throw new Error(`the rule has ${unknown.join(", ")}, which updateFields would lose rewriting it`);
@@ -786,7 +912,7 @@ function moveUntil(property, move) {
   } else {
     untilValue = jcalOf(wall, move.to);
   }
-  rewriteRule(move.component, property, { until: untilValue });
+  texts.rewrite(move.component, property, { until: untilValue }, { UNTIL: untilValue.replace(/[-:]/g, "") });
 }
 function startOf(master) {
   const frame = frameOf(master);
@@ -932,8 +1058,8 @@ function suggestedRule(rule, start, timed) {
 }
 var SHAPING = ["dtstart", "rrule", "rdate"];
 var NO_SERIES = { finish() {
-} };
-function beginSeriesEdit(calendar, master, written) {
+}, render: (text) => text };
+function beginSeriesEdit(calendar, master, written, source = null) {
   const failClosed = (error) => {
     if (error instanceof SeriesUnverifiable) {
       return new Error(`Cannot check that the overrides and EXDATEs still name occurrences of the series: ${error.message}. Rewrite the whole iCalendar object instead`);
@@ -945,7 +1071,7 @@ function beginSeriesEdit(calendar, master, written) {
     return written.has("rrule") || written.has("rdate") ? new Error(`Cannot check that the overrides and EXDATEs still name occurrences of the series: ${rule}: ${error.message}. Rewrite the whole iCalendar object instead`) : new Error(`Cannot check that moving DTSTART keeps the series' occurrences: ${rule}: ${error.message}. Give RRULE, UNTIL and EXDATE explicitly in the same call, or rewrite the whole iCalendar object`);
   };
   try {
-    const edit = startSeriesEdit(calendar, master, written);
+    const edit = startSeriesEdit(calendar, master, written, source);
     return {
       finish() {
         try {
@@ -953,13 +1079,14 @@ function beginSeriesEdit(calendar, master, written) {
         } catch (error) {
           throw failClosed(error);
         }
-      }
+      },
+      render: (text) => edit.render(text)
     };
   } catch (error) {
     throw failClosed(error);
   }
 }
-function startSeriesEdit(calendar, master, written) {
+function startSeriesEdit(calendar, master, written, source) {
   if (!["vevent", "vtodo", "vjournal"].includes(master.name) || master.hasProperty("recurrence-id")) {
     return NO_SERIES;
   }
@@ -990,15 +1117,23 @@ function startSeriesEdit(calendar, master, written) {
   const watched = references.filter((_, i) => before[i] === true);
   const start = written.has("dtstart") ? startOf(master) : null;
   const keepsRule = !["rrule", "exrule", "rdate"].some((name) => written.has(name));
+  const texts = new RuleTexts(source, calendar, master);
   const named = () => [
     ...master.getAllProperties("exdate"),
     ...master.getAllProperties("rdate"),
     ...overrides.map((c) => c.getFirstProperty("recurrence-id"))
   ];
+  let twinBefore = null;
+  let twinError = null;
   if (start || ruleWritten) {
-    checkGapTwins(master, named(), false);
+    try {
+      twinBefore = findGapTwin(master, named());
+    } catch (error) {
+      twinError = error;
+    }
   }
   return {
+    render: (text) => texts.render(text),
     finish() {
       const now = start && startOf(master);
       if (start && now && start.text !== now.text) {
@@ -1014,7 +1149,7 @@ function startSeriesEdit(calendar, master, written) {
           const upper = property.name.toUpperCase();
           const until = property.getFirstValue().until.toICALString();
           try {
-            moveUntil(property, move);
+            moveUntil(property, move, texts);
           } catch (error) {
             throw new Error(`DTSTART changed, and the existing ${upper} UNTIL=${until} cannot follow it (${error.message}): give ${upper}, with UNTIL, in the same call`);
           }
@@ -1039,12 +1174,23 @@ function startSeriesEdit(calendar, master, written) {
           }
         }
         if (keepsRule) {
-          checkMove(master, move, start.text, now.text);
+          checkMove(master, move, start.text, now.text, texts);
         }
       }
-      if (start || ruleWritten) {
-        checkGapTwins(master, named(), true);
+      const moving = Boolean(start && now && start.text !== now.text);
+      if (moving || ruleWritten) {
+        const cause = moving ? "Moving DTSTART" : `Writing ${shaping.filter((n) => n !== "dtstart").map((n) => n.toUpperCase()).join(" and ")}`;
+        if (twinError) {
+          throw twinError;
+        }
+        const after2 = twinBefore ? null : findGapTwin(master, named());
+        const twin = twinBefore ?? after2;
+        if (twin) {
+          const verb = twinBefore ? "names" : moving ? "would name, moved," : "would name";
+          throw new Error(`${cause} is refused: ${twin.replace("%NAMES%", verb)}. Rewrite the whole iCalendar object with the values it should have`);
+        }
       }
+      texts.mark();
       if (!watched.length) {
         return;
       }
@@ -1056,6 +1202,15 @@ function startSeriesEdit(calendar, master, written) {
       }
     }
   };
+}
+function yearlyFollows(from, to) {
+  const everyYear = (month, day) => day <= new Date(Date.UTC(2025, month, 0)).getUTCDate();
+  if (!everyYear(from.month, from.day) || !everyYear(to.month, to.day)) {
+    return false;
+  }
+  const years = to.year - from.year;
+  const distances = [2023, 2024, 2025, 2026].map((y) => Date.UTC(y + years, to.month - 1, to.day) - Date.UTC(y, from.month - 1, from.day));
+  return distances.every((d) => d === distances[0]);
 }
 var SUB_DAILY = /* @__PURE__ */ new Set(["SECONDLY", "MINUTELY", "HOURLY"]);
 var FREQS = /* @__PURE__ */ new Set([...SUB_DAILY, "DAILY", "WEEKLY", "MONTHLY", "YEARLY"]);
@@ -1098,12 +1253,13 @@ function moveBreaksRule(recur, move) {
   if (parts.includes("BYDAY") && !(["DAILY", "WEEKLY"].includes(recur.freq) && days % 7 === 0)) {
     return "has BYDAY, which pins weekdays: only a DAILY or WEEKLY rule follows a move, and only by whole weeks";
   }
-  if (recur.freq === "MONTHLY" || recur.freq === "YEARLY") {
-    const from = fieldsOf(move.fromWall);
-    const to = fieldsOf(move.toWall);
-    if (from.year !== to.year || from.month !== to.month || from.day > 28 || to.day > 28) {
-      return `repeats on DTSTART's day of the month, which only follows a move within the same month between the 1st and the 28th`;
-    }
+  const from = fieldsOf(move.fromWall);
+  const to = fieldsOf(move.toWall);
+  if (recur.freq === "MONTHLY" && (from.year !== to.year || from.month !== to.month || from.day > 28 || to.day > 28)) {
+    return `repeats on DTSTART's day of the month, which only follows a move within the same month between the 1st and the 28th`;
+  }
+  if (recur.freq === "YEARLY" && !yearlyFollows(from, to)) {
+    return `repeats on DTSTART's month and day, which only follows a move to a date every year has, by the same number of days in every year (not across the end of February)`;
   }
   return null;
 }
@@ -1126,7 +1282,7 @@ function restatedParts(property, recur, move) {
   }
   return out;
 }
-function checkMove(master, move, from, to) {
+function checkMove(master, move, from, to, texts) {
   for (const property of [...master.getAllProperties()]) {
     if (!isRecurProperty(master, property.name)) {
       continue;
@@ -1138,10 +1294,16 @@ function checkMove(master, move, from, to) {
     for (const name of Object.keys(restating)) {
       delete plain.parts[name.toUpperCase()];
     }
-    const why = unknown.length ? `has ${unknown.join(", ")}, whose effect on a move updateFields cannot tell` : moveBreaksRule(plain, move);
+    const repeated = texts.repeated(property);
+    const why = repeated.length ? `gives ${repeated.join(", ")} more than once, which RFC 5545 3.3.10 does not allow and clients read differently` : unknown.length ? `has ${unknown.join(", ")}, whose effect on a move updateFields cannot tell` : moveBreaksRule(plain, move);
     if (!why) {
       if (Object.keys(restating).length) {
-        rewriteRule(master, property, restating);
+        texts.rewrite(
+          master,
+          property,
+          restating,
+          Object.fromEntries(Object.entries(restating).map(([k, v]) => [k.toUpperCase(), String(v)]))
+        );
       }
       continue;
     }
@@ -1219,14 +1381,19 @@ function updateFields(calendarObject, fields, options = {}) {
     ([a], [b]) => Number(b.toLowerCase() === "dtstart") - Number(a.toLowerCase() === "dtstart")
   );
   const written = new Set(entries.map(([key]) => key.toLowerCase()));
-  const series = beginSeriesEdit(component.name === "vcalendar" ? component : null, actualComponent, written);
+  const series = beginSeriesEdit(
+    component.name === "vcalendar" ? component : null,
+    actualComponent,
+    written,
+    icalString
+  );
   for (const [key, value] of entries) {
     if (!setDateValue(actualComponent, key, value, floatingTime) && !setRecurValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }
   series.finish();
-  return component.toString();
+  return series.render(component.toString());
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {

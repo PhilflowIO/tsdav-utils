@@ -323,7 +323,8 @@ describe('a move is accepted only where the rule provably moves with it', () => 
     let skipped = 0;
     for (let i = 0; i < RUNS; i++) {
       const date = rnd() < 0.2;
-      const start = Date.UTC(2026, int(0, 11), int(1, 28)) / 1000 + (date ? 0 : int(0, 23) * 3600 + pick([0, 15, 30, 45]) * 60);
+      // a month end now and then, which some months and Feb in some years lack
+      const start = Date.UTC(pick([2026, 2027, 2028]), int(0, 11), rnd() < 0.15 ? int(29, 31) : int(1, 28)) / 1000 + (date ? 0 : int(0, 23) * 3600 + pick([0, 15, 30, 45]) * 60);
       let { freq, rule, end } = randomRule(date, start);
       if (end === 'until') {
         const span = { MINUTELY: 3600, HOURLY: 3 * D, DAILY: 60 * D, WEEKLY: 300 * D, MONTHLY: 900 * D, YEARLY: 4000 * D }[freq]!;

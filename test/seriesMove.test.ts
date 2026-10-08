@@ -261,9 +261,11 @@ describe('a rule that does not move with DTSTART is refused, naming the rule to 
     const yearly = calendar(master('DTSTART:20260315T090000Z', 'RRULE:FREQ=YEARLY;BYMONTH=3;BYMONTHDAY=15'));
     expect(prop(masterOf(updateFields(yearly, { DTSTART: '2026-03-20T09:00:00Z' })), 'RRULE'))
       .toEqual(['RRULE:FREQ=YEARLY;BYMONTH=3;BYMONTHDAY=20']);
-    // into another month, or past the 28th, the plain YEARLY rule does not follow
-    expect(() => updateFields(yearly, { DTSTART: '2026-04-15T09:00:00Z' })).toThrow(/does not move the whole series/);
-    expect(() => updateFields(yearly, { DTSTART: '2026-03-30T09:00:00Z' })).toThrow(/does not move the whole series/);
+    // a YEARLY date follows to any date every year has, by the same distance in every year
+    expect(prop(masterOf(updateFields(yearly, { DTSTART: '2026-04-15T09:00:00Z' })), 'RRULE'))
+      .toEqual(['RRULE:FREQ=YEARLY;BYMONTH=4;BYMONTHDAY=15']);
+    expect(prop(masterOf(updateFields(yearly, { DTSTART: '2026-03-31T09:00:00Z' })), 'RRULE'))
+      .toEqual(['RRULE:FREQ=YEARLY;BYMONTH=3;BYMONTHDAY=31']);
     // BYMONTHDAY=5 in a YEARLY rule without BYMONTH is every 5th: not restating
     const fifths = calendar(master('DTSTART:20260305T090000Z', 'RRULE:FREQ=YEARLY;BYMONTHDAY=5'));
     expect(() => updateFields(fifths, { DTSTART: '2026-03-06T09:00:00Z' })).toThrow(/has BYMONTHDAY/);
@@ -568,7 +570,7 @@ describe('a value in the series\' own zone that shares its instant with a skippe
   it('CX-B: a move that puts an occurrence into the gap, next to an EXDATE that then shares its instant', () => {
     expect(() => updateFields(calendar(BERLIN, master('DTSTART;TZID=Europe/Berlin:20260404T010000', 'RRULE:FREQ=HOURLY;COUNT=5',
       'EXDATE;TZID=Europe/Berlin:20260404T030000')), { DTSTART: '2026-03-29T01:00:00' }))
-      .toThrow(/moved, EXDATE;TZID=Europe\/Berlin:20260329T030000 would name the same instant as the occurrence at 20260329T020000/);
+      .toThrow(/Moving DTSTART is refused: EXDATE;TZID=Europe\/Berlin:20260329T030000 would name, moved, the same instant as the occurrence at 20260329T020000/);
   });
 
   it('CX-C: an override with RECURRENCE-ID 03:30 for the skipped 02:30 occurrence', () => {
@@ -581,5 +583,58 @@ describe('a value in the series\' own zone that shares its instant with a skippe
     const out = updateFields(calendar(BERLIN, master('DTSTART;TZID=Europe/Berlin:20260325T033000', 'RRULE:FREQ=DAILY;COUNT=7',
       'EXDATE;TZID=Europe/Berlin:20260329T033000')), { DTSTART: '2026-03-25T04:30:00' });
     expect(prop(masterOf(out), 'EXDATE')).toEqual(['EXDATE;TZID=Europe/Berlin:20260329T043000']);
+  });
+});
+
+describe('final adversarial check of #22', () => {
+  it('an override time in another zone that would land in its repeated hour is refused', () => {
+    // 4 Apr 2032 Sydney repeats 02:00-03:00; the override, a week later on the
+    // Auckland wall clock, is 16:30Z: the second 02:30, which reads as 15:30Z
+    expect(() => updateFields(calendar(
+      master('DTSTART;TZID=Pacific/Auckland:20320320T090000', 'RRULE:FREQ=WEEKLY;COUNT=6'),
+      override('RECURRENCE-ID;TZID=Pacific/Auckland:20320403T090000', 'DTSTART;TZID=Australia/Sydney:20320403T023000'),
+    ), { DTSTART: '2032-03-21T09:00:00' })).toThrow(/falls in the second pass of the hour the DST change shows twice/);
+  });
+
+  it('a rewritten rule keeps its own spelling and order; only the changed part is new', () => {
+    const lower = calendar(master('DTSTART:20261005T090000Z', 'RRULE:byday=MO;freq=WEEKLY;count=6'));
+    expect(updateFields(lower, { DTSTART: '2026-10-06T09:00:00Z' })).toContain('RRULE:byday=TU;freq=WEEKLY;count=6\r\n');
+    const until = calendar(master('DTSTART:20261005T090000Z', 'RRULE:freq=DAILY;until=20261020T090000Z;interval=1'));
+    expect(updateFields(until, { DTSTART: '2026-10-05T10:00:00Z' }))
+      .toContain('RRULE:freq=DAILY;until=20261020T100000Z;interval=1\r\n');
+  });
+
+  it('a rule giving a part twice is refused on a move', () => {
+    expect(() => updateFields(calendar(master('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;BYDAY=TU;BYDAY=MO;COUNT=6')),
+      { DTSTART: '2026-10-06T09:00:00Z' })).toThrow(/gives BYDAY more than once, which RFC 5545 3.3.10 does not allow/);
+  });
+
+  it('DTSTART written with the same value changes nothing, as without it', () => {
+    const twin = calendar(BERLIN, master('DTSTART;TZID=Europe/Berlin:20260315T023000', 'RRULE:FREQ=WEEKLY;COUNT=4',
+      'EXDATE;TZID=Europe/Berlin:20260329T033000'));
+    expect(updateFields(twin, { DTSTART: '2026-03-15T02:30:00', SUMMARY: 'x' }))
+      .toBe(updateFields(twin, { SUMMARY: 'x' }));
+  });
+
+  it('a gap twin met by a new rule says so, not "DTSTART changed"', () => {
+    const twin = calendar(BERLIN, master('DTSTART;TZID=Europe/Berlin:20260315T023000', 'RRULE:FREQ=WEEKLY;COUNT=4',
+      'EXDATE;TZID=Europe/Berlin:20260329T033000'));
+    expect(() => updateFields(twin, { RRULE: 'FREQ=WEEKLY;COUNT=5' }))
+      .toThrow(/^Writing RRULE is refused: EXDATE;TZID=Europe\/Berlin:20260329T033000 names the same instant/);
+  });
+
+  it.each([
+    ['31 Mar to 30 Mar', '20260331T090000Z', '2026-03-30T09:00:00Z', true],
+    ['31 Jan to 31 Mar', '20260131T090000Z', '2026-03-31T09:00:00Z', false],
+    ['30 Dec to 2 Jan', '20261230T090000Z', '2027-01-02T09:00:00Z', true],
+    ['20 Feb to 5 Mar', '20260220T090000Z', '2026-03-05T09:00:00Z', false],
+    ['29 Feb', '20280229T090000Z', '2028-02-28T09:00:00Z', false],
+  ])('a YEARLY date moved %s', (_, from, to, follows) => {
+    const call = () => updateFields(calendar(master(`DTSTART:${from}`, 'RRULE:FREQ=YEARLY;COUNT=10')), { DTSTART: to });
+    if (follows) {
+      expect(call).not.toThrow();
+    } else {
+      expect(call).toThrow(/repeats on DTSTART's month and day/);
+    }
   });
 });

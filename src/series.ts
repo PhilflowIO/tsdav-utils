@@ -151,18 +151,19 @@ function gapTwin(component: ICAL.Component, stamp: Stamp, frame: Anchor): { wall
 }
 
 /**
- * Throw where a RECURRENCE-ID, EXDATE or RDATE shares its instant with an
- * occurrence on another wall clock of the series (gapTwin): it then names
- * that occurrence for a client, but another one on the wall clock this module
+ * A RECURRENCE-ID, EXDATE or RDATE that shares its instant with an occurrence
+ * on another wall clock of the series (gapTwin): it then names that
+ * occurrence for a client, but another one on the wall clock this module
  * moves by, so which one it names cannot be told. Only where the series does
- * have an occurrence on the twin wall clock; checked before and after a move.
+ * have an occurrence on the twin wall clock. Returns the clash to report, or
+ * null.
  */
-function checkGapTwins(master: ICAL.Component, properties: ICAL.Property[], after: boolean) {
+function findGapTwin(master: ICAL.Component, properties: ICAL.Property[]): string | null {
   const frame = frameOf(master);
   // a zone with no known rules (no VTIMEZONE, no IANA name) has no known gap;
   // a value that needs it converted is refused where it is moved
   if (!frame || frame.form !== 'tzid' || !zoneOf(master, frame.tzid)) {
-    return;
+    return null;
   }
   const twins = properties.filter((property) => property.type !== 'period').flatMap((property) =>
     propertyStamps(property).flatMap((stamp) => {
@@ -170,17 +171,13 @@ function checkGapTwins(master: ICAL.Component, properties: ICAL.Property[], afte
       return twin ? [{ property, twin }] : [];
     }));
   if (!twins.length) {
-    return;
+    return null;
   }
   const walls = expand(master, Math.max(...twins.map(({ twin }) => twin.other)));
   const clash = twins.find(({ twin }) => walls.has(twin.other));
-  if (clash) {
-    const line = clash.property.toICALString();
-    throw new Error(`DTSTART changed, and ${after ? 'moved, ' : ''}${line} ${after ? 'would name' : 'names'} the same ` +
-      `instant as the occurrence at ${icalForm(jcalOf(clash.twin.other, 'floating'))} in "${frame.form === 'tzid' ? frame.tzid : ''}", ` +
-      'a wall-clock time the DST change skips, so which occurrence it names cannot be told: rewrite the whole ' +
-      'iCalendar object with the values it should have');
-  }
+  return clash ? `${clash.property.toICALString()} %NAMES% the same instant as the occurrence at ` +
+    `${icalForm(jcalOf(clash.twin.other, 'floating'))} in "${frame.tzid}", a wall-clock time the DST change skips, ` +
+    'so which occurrence it names cannot be told' : null;
 }
 
 /** The DTSTART of a series before and after a write, each in its own frame */
@@ -256,7 +253,23 @@ function wallOut(component: ICAL.Component, wall: number, frame: Anchor, own: St
   }
   const from = frame.form === 'utc' ? null : frame.tzid;
   const to = own.kind === 'utc' ? null : own.tzid!;
-  return from === to ? wall : convert(component, wall, from, to);
+  if (from === to) {
+    return wall;
+  }
+  const utc = from === null ? wall : zone(component, from).toUtc(wall);
+  if (to === null) {
+    return utc;
+  }
+  // In the hour a DST change shows twice, a wall clock is read as its first
+  // occurrence (RFC 5545 3.3.5); an instant in the second pass has no wall
+  // clock of its own in that zone
+  const own2 = zone(component, to);
+  const out = own2.fromUtc(utc);
+  if (own2.toUtc(out) !== utc) {
+    throw new Error(`moved, it would be ${icalForm(jcalOf(utc, 'utc'))}, which in "${to}" falls in the second pass ` +
+      `of the hour the DST change shows twice, where ${icalForm(jcalOf(out, 'floating'))} reads as the first`);
+  }
+  return out;
 }
 
 /**
@@ -307,6 +320,142 @@ function unknownRuleParts(property: ICAL.Property): string[] {
     : [];
 }
 
+/** A rule's line as written in the object: everything before the value, and the value's parts */
+interface RuleText {
+  head: string;
+  parts: string[];
+}
+
+/**
+ * The RRULE and EXRULE lines of a component as the object spells them, so a
+ * move can change one part (UNTIL, a restated BYDAY) and leave every other
+ * byte as it was: ical.js parses a rule into a normalised value and writes it
+ * back upper-cased and reordered, with a part given twice merged into one.
+ */
+class RuleTexts {
+  private readonly texts = new Map<ICAL.Property, RuleText>();
+  private readonly changed = new Map<ICAL.Property, RuleText>();
+
+  constructor(source: string | null, calendar: ICAL.Component | null, master: ICAL.Component) {
+    if (source === null) {
+      return;
+    }
+    // the lines of the master's own block: the n-th component of its type
+    // inside the VCALENDAR, or the bare component itself
+    const lines = source.replace(/\r?\n[ \t]/g, '').split(/\r?\n/);
+    const type = master.name.toUpperCase();
+    const index = calendar ? calendar.getAllSubcomponents(master.name).indexOf(master) : 0;
+    const level = calendar ? 2 : 1;
+    const own: string[] = [];
+    let depth = 0;
+    let seen = -1;
+    let inside = false;
+    for (const line of lines) {
+      const boundary = /^(BEGIN|END):(.+)$/i.exec(line.trim());
+      if (boundary && boundary[1].toUpperCase() === 'BEGIN') {
+        depth++;
+        if (!inside && depth === level && boundary[2].trim().toUpperCase() === type && ++seen === index) {
+          inside = true;
+        }
+      } else if (boundary) {
+        if (inside && depth === level) {
+          break;
+        }
+        depth--;
+      } else if (inside && depth === level) {
+        own.push(line);
+      }
+    }
+    for (const name of ['rrule', 'exrule']) {
+      const written = own.filter((line) => new RegExp(`^${name}[;:]`, 'i').test(line));
+      const properties = master.getAllProperties(name);
+      if (written.length !== properties.length) {
+        continue;
+      }
+      properties.forEach((property, i) => {
+        const colon = colonOf(written[i]);
+        this.texts.set(property, { head: written[i].slice(0, colon), parts: written[i].slice(colon + 1).split(';') });
+      });
+    }
+  }
+
+  /** The rule part names given more than once (RFC 5545 3.3.10 allows each once) */
+  repeated(property: ICAL.Property): string[] {
+    const names = (this.texts.get(property)?.parts ?? []).map((part) => part.split('=')[0].trim().toUpperCase());
+    return [...new Set(names.filter((name, i) => names.indexOf(name) !== i))];
+  }
+
+  /**
+   * Change rule parts: in the rule as parsed (so the rest of the write sees
+   * it), and in the rule as written, token by token, the part names matched
+   * case-insensitively and everything else kept as it was.
+   */
+  rewrite(component: ICAL.Component, property: ICAL.Property, parsed: Record<string, unknown>,
+    written: Record<string, string>): ICAL.Property {
+    const text = this.texts.get(property);
+    if (!text) {
+      throw new Error('its text could not be found in the object, so it cannot be rewritten part by part');
+    }
+    const parts = text.parts.map((part) => {
+      const eq = part.indexOf('=');
+      const name = eq < 0 ? part : part.slice(0, eq);
+      const value = written[name.trim().toUpperCase()];
+      return value === undefined ? part : `${name}=${value}`;
+    });
+    const next = rewriteRule(component, property, parsed);
+    const line = { head: text.head, parts };
+    this.texts.delete(property);
+    this.changed.delete(property);
+    this.texts.set(next, line);
+    this.changed.set(next, line);
+    return next;
+  }
+
+  /** Before serialising: tag each rewritten rule so render() can find its line */
+  mark() {
+    [...this.changed.keys()].forEach((property, i) => property.setParameter('x-tsdav-utils-rule', String(i)));
+  }
+
+  /** After serialising: put each tagged rule back as written, with only its changed parts */
+  render(text: string): string {
+    if (!this.changed.size) {
+      return text;
+    }
+    const lines = [...this.changed.values()];
+    const physical = text.split('\r\n');
+    const out: string[] = [];
+    for (let i = 0; i < physical.length;) {
+      let j = i + 1;
+      while (j < physical.length && /^[ \t]/.test(physical[j])) {
+        j++;
+      }
+      const logical = physical[i] + physical.slice(i + 1, j).map((l) => l.slice(1)).join('');
+      const tag = /;X-TSDAV-UTILS-RULE=(\d+)/i.exec(logical.slice(0, colonOf(logical)));
+      if (tag) {
+        const line = lines[Number(tag[1])];
+        out.push(ICAL.helpers.foldline(`${line.head}:${line.parts.join(';')}`));
+      } else {
+        out.push(...physical.slice(i, j));
+      }
+      i = j;
+    }
+    return out.join('\r\n');
+  }
+}
+
+/** The position of the colon that ends a content line's name and parameters (not one in a quoted value) */
+function colonOf(line: string): number {
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '"') {
+      quoted = !quoted;
+    } else if (line[i] === ':' && !quoted) {
+      return i;
+    }
+  }
+  return line.length;
+}
+
 /**
  * Replace parts of a RECUR property by rewriting only those tokens of the rule
  * as parsed, in place: the other parts keep their text and order, and the
@@ -328,7 +477,12 @@ function rewriteRule(component: ICAL.Component, property: ICAL.Property, changes
  * next to a floating one and UTC otherwise (RFC 5545 3.3.10), so a wall clock
  * in a TZID is converted to UTC with the zone's rules.
  */
-function moveUntil(property: ICAL.Property, move: Move) {
+function moveUntil(property: ICAL.Property, move: Move, texts: RuleTexts) {
+  const repeated = texts.repeated(property);
+  if (repeated.length) {
+    throw new Error(`the rule gives ${repeated.join(', ')} more than once, which RFC 5545 3.3.10 does not allow ` +
+      'and clients read differently');
+  }
   const unknown = unknownRuleParts(property);
   if (unknown.length) {
     // ical.js keeps them only as long as the rule is not written again
@@ -376,7 +530,7 @@ function moveUntil(property: ICAL.Property, move: Move) {
   } else {
     untilValue = jcalOf(wall, move.to);
   }
-  rewriteRule(move.component, property, { until: untilValue });
+  texts.rewrite(move.component, property, { until: untilValue }, { UNTIL: untilValue.replace(/[-:]/g, '') });
 }
 
 /** The DTSTART of a series as frame and wall clock, or null without one */
@@ -584,7 +738,7 @@ function suggestedRule(rule: ICAL.Recur, start: number, timed: boolean): string 
 /** Properties whose change decides which occurrences a series has */
 const SHAPING = ['dtstart', 'rrule', 'rdate'];
 
-const NO_SERIES = { finish() {} };
+const NO_SERIES = { finish() {}, render: (text: string) => text };
 
 /**
  * Start a write on an event, todo or journal: reject what would corrupt the
@@ -597,7 +751,8 @@ const NO_SERIES = { finish() {} };
  * @param master - the component updateFields writes (see seriesMaster)
  * @param written - the lower-case property names the call writes
  */
-export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component, written: Set<string>) {
+export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component, written: Set<string>,
+  source: string | null = null) {
   // A check that cannot be completed fails closed, with what the caller can do
   const failClosed = (error: unknown) => {
     if (error instanceof SeriesUnverifiable) {
@@ -615,7 +770,7 @@ export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Co
         'Give RRULE, UNTIL and EXDATE explicitly in the same call, or rewrite the whole iCalendar object');
   };
   try {
-    const edit = startSeriesEdit(calendar, master, written);
+    const edit = startSeriesEdit(calendar, master, written, source);
     return {
       finish() {
         try {
@@ -624,13 +779,15 @@ export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Co
           throw failClosed(error);
         }
       },
+      render: (text: string) => edit.render(text),
     };
   } catch (error) {
     throw failClosed(error);
   }
 }
 
-function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component, written: Set<string>) {
+function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component, written: Set<string>,
+  source: string | null) {
   if (!['vevent', 'vtodo', 'vjournal'].includes(master.name) || master.hasProperty('recurrence-id')) {
     return NO_SERIES;
   }
@@ -675,13 +832,23 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
   const start = written.has('dtstart') ? startOf(master) : null;
   // Without a new rule the series has to come out the same, moved
   const keepsRule = !['rrule', 'exrule', 'rdate'].some((name) => written.has(name));
+  const texts = new RuleTexts(source, calendar, master);
   const named = () => [...master.getAllProperties('exdate'), ...master.getAllProperties('rdate'),
     ...overrides.map((c) => c.getFirstProperty('recurrence-id')!)];
+  // Found now, on the series as it was, but reported only if the write does
+  // change its occurrences (a DTSTART written with the same value does not)
+  let twinBefore: string | null = null;
+  let twinError: unknown = null;
   if (start || ruleWritten) {
-    checkGapTwins(master, named(), false);
+    try {
+      twinBefore = findGapTwin(master, named());
+    } catch (error) {
+      twinError = error;
+    }
   }
 
   return {
+    render: (text: string) => texts.render(text),
     finish() {
       const now = start && startOf(master);
       if (start && now && start.text !== now.text) {
@@ -694,7 +861,7 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
           const upper = property.name.toUpperCase();
           const until = (property.getFirstValue() as ICAL.Recur).until!.toICALString();
           try {
-            moveUntil(property, move);
+            moveUntil(property, move, texts);
           } catch (error) {
             throw new Error(`DTSTART changed, and the existing ${upper} UNTIL=${until} ` +
               `cannot follow it (${(error as Error).message}): give ${upper}, with UNTIL, in the same call`);
@@ -722,12 +889,25 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
           }
         }
         if (keepsRule) {
-          checkMove(master, move, start.text, now.text);
+          checkMove(master, move, start.text, now.text, texts);
         }
       }
-      if (start || ruleWritten) {
-        checkGapTwins(master, named(), true);
+      const moving = Boolean(start && now && start.text !== now.text);
+      if (moving || ruleWritten) {
+        const cause = moving ? 'Moving DTSTART' : `Writing ${shaping.filter((n) => n !== 'dtstart')
+          .map((n) => n.toUpperCase()).join(' and ')}`;
+        if (twinError) {
+          throw twinError;
+        }
+        const after = twinBefore ? null : findGapTwin(master, named());
+        const twin = twinBefore ?? after;
+        if (twin) {
+          const verb = twinBefore ? 'names' : moving ? 'would name, moved,' : 'would name';
+          throw new Error(`${cause} is refused: ${twin.replace('%NAMES%', verb)}. Rewrite the whole iCalendar ` +
+            'object with the values it should have');
+        }
       }
+      texts.mark();
 
       if (!watched.length) {
         return;
@@ -745,6 +925,24 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
       }
     },
   };
+}
+
+/**
+ * Whether a YEARLY rule without BY parts follows a move of its date: both
+ * dates exist in every year (not 29 February), and the distance between them
+ * is the same in every year, which it is unless it spans the end of February.
+ * Checked over a leap year and the years around it, which covers every case:
+ * only 29 February makes years differ.
+ */
+function yearlyFollows(from: ReturnType<typeof fieldsOf>, to: ReturnType<typeof fieldsOf>): boolean {
+  const everyYear = (month: number, day: number) => day <= new Date(Date.UTC(2025, month, 0)).getUTCDate();
+  if (!everyYear(from.month, from.day) || !everyYear(to.month, to.day)) {
+    return false;
+  }
+  const years = to.year - from.year;
+  const distances = [2023, 2024, 2025, 2026].map((y) =>
+    Date.UTC(y + years, to.month - 1, to.day) - Date.UTC(y, from.month - 1, from.day));
+  return distances.every((d) => d === distances[0]);
 }
 
 const SUB_DAILY = new Set(['SECONDLY', 'MINUTELY', 'HOURLY']);
@@ -814,13 +1012,16 @@ function moveBreaksRule(recur: ICAL.Recur, move: Move): string | null {
   if (parts.includes('BYDAY') && !(['DAILY', 'WEEKLY'].includes(recur.freq) && days % 7 === 0)) {
     return 'has BYDAY, which pins weekdays: only a DAILY or WEEKLY rule follows a move, and only by whole weeks';
   }
-  if (recur.freq === 'MONTHLY' || recur.freq === 'YEARLY') {
-    const from = fieldsOf(move.fromWall);
-    const to = fieldsOf(move.toWall);
-    if (from.year !== to.year || from.month !== to.month || from.day > 28 || to.day > 28) {
-      return `repeats on DTSTART's day of the month, which only follows a move within the same month ` +
-        'between the 1st and the 28th';
-    }
+  const from = fieldsOf(move.fromWall);
+  const to = fieldsOf(move.toWall);
+  if (recur.freq === 'MONTHLY' &&
+      (from.year !== to.year || from.month !== to.month || from.day > 28 || to.day > 28)) {
+    return `repeats on DTSTART's day of the month, which only follows a move within the same month ` +
+      'between the 1st and the 28th';
+  }
+  if (recur.freq === 'YEARLY' && !yearlyFollows(from, to)) {
+    return `repeats on DTSTART's month and day, which only follows a move to a date every year has, by the same ` +
+      'number of days in every year (not across the end of February)';
   }
   return null;
 }
@@ -863,7 +1064,7 @@ function restatedParts(property: ICAL.Property, recur: ICAL.Recur, move: Move): 
  * that only restate DTSTART (restatedParts) are written with the new start's
  * values instead, where the rule without them follows the move.
  */
-function checkMove(master: ICAL.Component, move: Move, from: string, to: string) {
+function checkMove(master: ICAL.Component, move: Move, from: string, to: string, texts: RuleTexts) {
   for (const property of [...master.getAllProperties()]) {
     if (!isRecurProperty(master, property.name)) {
       continue;
@@ -876,12 +1077,16 @@ function checkMove(master: ICAL.Component, move: Move, from: string, to: string)
     for (const name of Object.keys(restating)) {
       delete (plain.parts as Record<string, unknown>)[name.toUpperCase()];
     }
-    const why = unknown.length
-      ? `has ${unknown.join(', ')}, whose effect on a move updateFields cannot tell`
-      : moveBreaksRule(plain, move);
+    const repeated = texts.repeated(property);
+    const why = repeated.length
+      ? `gives ${repeated.join(', ')} more than once, which RFC 5545 3.3.10 does not allow and clients read differently`
+      : unknown.length
+        ? `has ${unknown.join(', ')}, whose effect on a move updateFields cannot tell`
+        : moveBreaksRule(plain, move);
     if (!why) {
       if (Object.keys(restating).length) {
-        rewriteRule(master, property, restating);
+        texts.rewrite(master, property, restating,
+          Object.fromEntries(Object.entries(restating).map(([k, v]) => [k.toUpperCase(), String(v)])));
       }
       continue;
     }
