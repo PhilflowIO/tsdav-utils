@@ -618,6 +618,23 @@ function startOf(master) {
   return { frame, wall: stampOf(String(valuesOf(dtstart)[0])).wall, text: dtstart.toICALString() };
 }
 var EXPANSION_LIMIT = 1e3;
+var STEP_BUDGET = 2e5;
+var SeriesTooSparse = class extends Error {
+};
+function metered(iterator, budget) {
+  const it = iterator;
+  const check = it.check_contracting_rules;
+  if (typeof check !== "function") {
+    throw new SeriesTooSparse("ical.js no longer exposes the step a rule expansion can be bounded at");
+  }
+  it.check_contracting_rules = function(...args) {
+    if (--budget.left < 0) {
+      throw new SeriesTooSparse("the rule is too sparse to expand within the work limit");
+    }
+    return check.apply(this, args);
+  };
+  return iterator;
+}
 function expand(master, until = Infinity) {
   const start = startOf(master);
   if (!start) {
@@ -629,6 +646,7 @@ function expand(master, until = Infinity) {
   const timeOf = (wall) => day ? import_ical3.default.Time.fromDateString(jcalOf(wall, frame)) : import_ical3.default.Time.fromDateTimeString(jcalOf(wall, "floating"));
   const walls = /* @__PURE__ */ new Set([norm(start.wall)]);
   let horizon = Infinity;
+  const budget = { left: STEP_BUDGET };
   try {
     for (const rdate of master.getAllProperties("rdate")) {
       for (const stamp of propertyStamps(rdate)) {
@@ -640,7 +658,7 @@ function expand(master, until = Infinity) {
       if (recur.until) {
         recur.until = timeOf(norm(wallIn(master, stampOf(recur.until.toString()), frame)));
       }
-      const iterator = recur.iterator(timeOf(start.wall));
+      const iterator = metered(recur.iterator(timeOf(start.wall)), budget);
       for (let i = 0; ; i++) {
         const next = iterator.next();
         if (!next) {
@@ -657,7 +675,10 @@ function expand(master, until = Infinity) {
         }
       }
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof SeriesTooSparse) {
+      throw error;
+    }
     return null;
   }
   return { frame, walls: [...walls].sort((a, b) => a - b), horizon };
@@ -719,6 +740,29 @@ var SHAPING = ["dtstart", "rrule", "rdate"];
 var NO_SERIES = { finish() {
 } };
 function beginSeriesEdit(calendar, master, written) {
+  const failClosed = (error) => {
+    if (!(error instanceof SeriesTooSparse)) {
+      return error;
+    }
+    const rule = master.getFirstProperty("rrule")?.toICALString() ?? "The rule";
+    return written.has("rrule") || written.has("rdate") ? new Error(`Cannot check that the overrides and EXDATEs still name occurrences of the series: ${rule}: ${error.message}. Rewrite the whole iCalendar object instead`) : new Error(`Cannot check that moving DTSTART keeps the series' occurrences: ${rule}: ${error.message}. Give RRULE, UNTIL and EXDATE explicitly in the same call, or rewrite the whole iCalendar object`);
+  };
+  try {
+    const edit = startSeriesEdit(calendar, master, written);
+    return {
+      finish() {
+        try {
+          edit.finish();
+        } catch (error) {
+          throw failClosed(error);
+        }
+      }
+    };
+  } catch (error) {
+    throw failClosed(error);
+  }
+}
+function startSeriesEdit(calendar, master, written) {
   if (!["vevent", "vtodo", "vjournal"].includes(master.name) || master.hasProperty("recurrence-id")) {
     return NO_SERIES;
   }

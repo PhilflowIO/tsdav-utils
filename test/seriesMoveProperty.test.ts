@@ -99,3 +99,47 @@ describe('a moved series keeps every occurrence on the wall clock, across DST ch
     }
   });
 });
+
+describe('the expansion check is bounded', () => {
+  const event = (...props: string[]) => ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//EN',
+    'BEGIN:VEVENT', 'UID:s', 'DTSTAMP:20260101T000000Z', ...props, 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+  const timed = (f: () => void) => {
+    const t0 = performance.now();
+    let error: Error | null = null;
+    try {
+      f();
+    } catch (e) {
+      error = e as Error;
+    }
+    return { ms: performance.now() - t0, error };
+  };
+
+  it.each([
+    ['MINUTELY', 'RRULE:FREQ=MINUTELY;BYMONTH=12;BYMONTHDAY=31;BYHOUR=23', 'DTSTART:20261231T230000Z', '2026-12-31T23:01:00Z'],
+    ['SECONDLY', 'RRULE:FREQ=SECONDLY;BYMONTH=12;BYMONTHDAY=31;BYHOUR=23;BYMINUTE=59;BYSECOND=59',
+      'DTSTART:20261231T235959Z', '2026-12-31T23:59:58Z'],
+  ])('a sparse %s rule fails closed, well under a second', (_, rule, dtstart, moved) => {
+    const { ms, error } = timed(() => updateFields(event(dtstart, rule), { DTSTART: moved }));
+    expect(error?.message).toMatch(/^Cannot check that moving DTSTART keeps the series' occurrences: RRULE:FREQ=\w+;.*too sparse to expand within the work limit\. Give RRULE, UNTIL and EXDATE explicitly in the same call, or rewrite the whole iCalendar object$/);
+    expect(ms).toBeLessThan(1000);
+  });
+
+  it('the orphan check of a sparse rule given in the call fails closed too', () => {
+    const input = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//EN',
+      'BEGIN:VEVENT', 'UID:s', 'DTSTAMP:20260101T000000Z', 'DTSTART:20260101T235959Z', 'RRULE:FREQ=DAILY', 'END:VEVENT',
+      'BEGIN:VEVENT', 'UID:s', 'DTSTAMP:20260101T000000Z', 'RECURRENCE-ID:20261231T235959Z',
+      'DTSTART:20261231T235959Z', 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+    const { ms, error } = timed(() => updateFields(input,
+      { RRULE: 'FREQ=SECONDLY;BYMONTH=12;BYMONTHDAY=31;BYHOUR=23;BYMINUTE=59;BYSECOND=59' }));
+    expect(error?.message).toMatch(/^Cannot check that the overrides and EXDATEs still name occurrences of the series: .*Rewrite the whole iCalendar object instead$/);
+    expect(ms).toBeLessThan(1000);
+  });
+
+  it('dense rules stay well inside the limit', () => {
+    const { ms, error } = timed(() => updateFields(
+      event('DTSTART:20260101T000000Z', 'RRULE:FREQ=MINUTELY', 'RRULE:FREQ=SECONDLY', 'RRULE:FREQ=HOURLY'),
+      { DTSTART: '2026-01-01T00:00:30Z' }));
+    expect(error).toBeNull();
+    expect(ms).toBeLessThan(1000);
+  });
+});

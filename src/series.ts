@@ -253,6 +253,37 @@ function startOf(master: ICAL.Component): { frame: Anchor; wall: number; text: s
 /** Occurrences expanded per rule before an expansion stops and is partial */
 const EXPANSION_LIMIT = 1000;
 
+/**
+ * Candidates ical.js may test while expanding the rules of one series. A
+ * sparse rule (FREQ=MINUTELY;BYMONTH=12;BYMONTHDAY=31) makes it step through
+ * every minute of the year to find the next occurrence; this caps that work
+ * deterministically, at well under a second.
+ */
+const STEP_BUDGET = 200000;
+
+/** An expansion that ran out of STEP_BUDGET: the check cannot be made, so it fails closed */
+class SeriesTooSparse extends Error {}
+
+/**
+ * Count the candidates a RecurIterator tests. next() has no bound of its own;
+ * every candidate passes check_contracting_rules once, so that is where the
+ * budget is charged.
+ */
+function metered(iterator: ICAL.RecurIterator, budget: { left: number }): ICAL.RecurIterator {
+  const it = iterator as unknown as { check_contracting_rules?: (...args: unknown[]) => unknown };
+  const check = it.check_contracting_rules;
+  if (typeof check !== 'function') {
+    throw new SeriesTooSparse('ical.js no longer exposes the step a rule expansion can be bounded at');
+  }
+  it.check_contracting_rules = function (this: unknown, ...args: unknown[]) {
+    if (--budget.left < 0) {
+      throw new SeriesTooSparse('the rule is too sparse to expand within the work limit');
+    }
+    return check.apply(this, args);
+  };
+  return iterator;
+}
+
 /** The occurrences of a series on its wall clock, ascending; partial when a rule went on past the limit */
 interface Expansion {
   frame: Anchor;
@@ -281,6 +312,7 @@ function expand(master: ICAL.Component, until = Infinity): Expansion | null {
     : ICAL.Time.fromDateTimeString(jcalOf(wall, 'floating'));
   const walls = new Set([norm(start.wall)]);
   let horizon = Infinity;
+  const budget = { left: STEP_BUDGET };
   try {
     for (const rdate of master.getAllProperties('rdate')) {
       for (const stamp of propertyStamps(rdate)) {
@@ -292,7 +324,7 @@ function expand(master: ICAL.Component, until = Infinity): Expansion | null {
       if (recur.until) {
         recur.until = timeOf(norm(wallIn(master, stampOf(recur.until.toString()), frame)));
       }
-      const iterator = recur.iterator(timeOf(start.wall));
+      const iterator = metered(recur.iterator(timeOf(start.wall)), budget);
       for (let i = 0; ; i++) {
         const next = iterator.next();
         if (!next) {
@@ -309,7 +341,10 @@ function expand(master: ICAL.Component, until = Infinity): Expansion | null {
         }
       }
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof SeriesTooSparse) {
+      throw error;
+    }
     return null;
   }
   return { frame, walls: [...walls].sort((a, b) => a - b), horizon };
@@ -403,6 +438,35 @@ const NO_SERIES = { finish() {} };
  * @param written - the lower-case property names the call writes
  */
 export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component, written: Set<string>) {
+  // A check that cannot be completed fails closed, with what the caller can do
+  const failClosed = (error: unknown) => {
+    if (!(error instanceof SeriesTooSparse)) {
+      return error;
+    }
+    const rule = master.getFirstProperty('rrule')?.toICALString() ?? 'The rule';
+    return written.has('rrule') || written.has('rdate')
+      ? new Error(`Cannot check that the overrides and EXDATEs still name occurrences of the series: ${rule}: ` +
+        `${error.message}. Rewrite the whole iCalendar object instead`)
+      : new Error(`Cannot check that moving DTSTART keeps the series' occurrences: ${rule}: ${error.message}. ` +
+        'Give RRULE, UNTIL and EXDATE explicitly in the same call, or rewrite the whole iCalendar object');
+  };
+  try {
+    const edit = startSeriesEdit(calendar, master, written);
+    return {
+      finish() {
+        try {
+          edit.finish();
+        } catch (error) {
+          throw failClosed(error);
+        }
+      },
+    };
+  } catch (error) {
+    throw failClosed(error);
+  }
+}
+
+function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component, written: Set<string>) {
   if (!['vevent', 'vtodo', 'vjournal'].includes(master.name) || master.hasProperty('recurrence-id')) {
     return NO_SERIES;
   }
