@@ -276,7 +276,11 @@ jobs:
       # Safe to run again for a version that is already on npm: same bytes ->
       # nothing to do, different bytes -> fail and ask for a new version.
       # The registry is asked anonymously over its JSON API, so the answer
-      # does not depend on the token setup-node writes into .npmrc.
+      # does not depend on the token setup-node writes into .npmrc. The
+      # request bypasses caches (no-cache header plus a unique query string):
+      # a cached 404 would misjudge a re-run as "not published yet", and a
+      # plain request here would put a 404 for this URL into a cache right
+      # before the check below asks for the same URL.
       - name: Publish with provenance
         env:
           npm_config_allow_git: none
@@ -284,7 +288,9 @@ jobs:
         run: |
           LOCAL="sha512-$(openssl dgst -sha512 -binary "release/$ASSET" | base64 -w0)"
           URL="https://registry.npmjs.org/@philflow/tsdav-utils/$VERSION"
-          STATUS=$(curl --silent --show-error --output "$RUNNER_TEMP/existing.json" --write-out '%{http_code}' "$URL")
+          STATUS=$(curl --silent --show-error --max-time 30 --header 'Cache-Control: no-cache' \
+            --output "$RUNNER_TEMP/existing.json" --write-out '%{http_code}' \
+            "$URL?nocache=$(date +%s%N)")
           case "$STATUS" in
             404)
               echo "ℹ️  @philflow/tsdav-utils@$VERSION is not on npm yet"
@@ -320,16 +326,32 @@ jobs:
           fi
           npm publish "$SPEC" --provenance --access public --ignore-scripts
 
-      # The registry answers from a cache that can lag behind the publish;
-      # poll until it serves the bytes this run verified.
+      # A version the registry has just accepted can take minutes to show up
+      # on its read side, and the publish step above asked for this very URL
+      # (404) seconds before publishing, so a cache in front of the registry
+      # may keep answering 404. Every poll therefore bypasses caches (no-cache
+      # header plus a unique query string) and polling backs off for up to ten
+      # minutes. A version that is served with a different integrity is not
+      # lag but a mismatch, and fails at once: npm never replaces the bytes of
+      # a published version, so waiting cannot fix it.
       - name: Check the registry serves the verified tarball
         run: |
           LOCAL="sha512-$(openssl dgst -sha512 -binary "release/$ASSET" | base64 -w0)"
           URL="https://registry.npmjs.org/@philflow/tsdav-utils/$VERSION"
-          for _ in $(seq 1 12); do
-            PUBLISHED=$(curl --silent --fail "$URL" | jq -r '.dist.integrity' || true)
+          DEADLINE=$((SECONDS + 600))
+          DELAY=5
+          ATTEMPT=0
+          while :; do
+            ATTEMPT=$((ATTEMPT + 1))
+            STATUS=$(curl --silent --max-time 30 --header 'Cache-Control: no-cache' \
+              --output "$RUNNER_TEMP/served.json" --write-out '%{http_code}' \
+              "$URL?nocache=$(date +%s%N)") || true
+            PUBLISHED=""
+            if [ "$STATUS" = 200 ]; then
+              PUBLISHED=$(jq -r '.dist.integrity // empty' "$RUNNER_TEMP/served.json") || true
+            fi
             if [ "$PUBLISHED" = "$LOCAL" ]; then
-              echo "✅ registry serves @philflow/tsdav-utils@$VERSION ($LOCAL)"
+              echo "✅ registry serves @philflow/tsdav-utils@$VERSION ($LOCAL) after $ATTEMPT request(s)"
               {
                 echo "### @philflow/tsdav-utils@$VERSION"
                 echo ""
@@ -341,11 +363,22 @@ jobs:
               } >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
-            sleep 10
+            if [ -n "$PUBLISHED" ]; then
+              echo "❌ ERROR: registry serves @philflow/tsdav-utils@$VERSION with different content"
+              echo "   served:   $PUBLISHED"
+              echo "   verified: $LOCAL"
+              exit 1
+            fi
+            if [ $((SECONDS + DELAY)) -gt "$DEADLINE" ]; then
+              break
+            fi
+            echo "⏳ request $ATTEMPT: registry answered ${STATUS:-no response} without this version, next try in ${DELAY}s"
+            sleep "$DELAY"
+            DELAY=$((DELAY * 2 > 60 ? 60 : DELAY * 2))
           done
-          echo "❌ ERROR: registry does not serve the verified tarball for @philflow/tsdav-utils@$VERSION"
-          echo "   served:   ${PUBLISHED:-nothing}"
-          echo "   verified: $LOCAL"
+          echo "❌ ERROR: registry does not serve @philflow/tsdav-utils@$VERSION after ${SECONDS}s"
+          echo "   last answer: HTTP ${STATUS:-none}"
+          echo "   verified:    $LOCAL"
           exit 1
 
   # Release notes and the tarball on GitHub, after npm has the version. Kept
