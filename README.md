@@ -328,8 +328,14 @@ follow the master's `DTSTART` (see above).
     | `BYDAY` with `MONTHLY`/`YEARLY`; `BYMONTH`, `BYMONTHDAY`, `BYYEARDAY`, `BYWEEKNO`, `BYSETPOS` | a new time, on the same date |
     | a date-picking part with `HOURLY`/`MINUTELY`/`SECONDLY` | no move |
 
-    An all-day/timed switch counts as a new time. Anything else throws and says
-    why. Where a single `BYDAY`, `BYMONTHDAY`, `BYMONTH`, `BYHOUR` or `BYMINUTE`
+    An all-day/timed switch counts as a new time. A part that only restates
+    DTSTART, as Google and Outlook write rules — a single `BYDAY` equal to its
+    weekday in a `WEEKLY` rule, a single `BYMONTHDAY` equal to its day in a
+    `MONTHLY` rule, a single `BYMONTH` (with `BYMONTHDAY`) equal to its date in a
+    `YEARLY` rule — follows the move: the rule is judged without it, and the part
+    is rewritten to the new start (`FREQ=WEEKLY;BYDAY=MO` moved from Monday to
+    Tuesday becomes `BYDAY=TU`). Only that token changes; the rest of the rule
+    keeps its text and order. Anything else throws and says why. Where a single `BYDAY`, `BYMONTHDAY`, `BYMONTH`, `BYHOUR` or `BYMINUTE`
     value pins the old start, the error suggests the rule with the new start's
     value, e.g. `RRULE "FREQ=WEEKLY;COUNT=3;BYDAY=TU"` for a Monday series moved to
     Tuesday; otherwise it says to give `RRULE` in the same call. Weekly by weekday
@@ -355,9 +361,13 @@ follow the master's `DTSTART` (see above).
       changes the time of day (on a move by whole days it stays a date);
     - a rule with parts RFC 5545 does not define (`X-…`, `BYEASTER`, RFC 7529
       `RSCALE`/`SKIP`), which writing the rule again would lose;
-    - an `EXDATE` or `RECURRENCE-ID` given in UTC for an occurrence on a
-      wall-clock time a DST change skips: that instant is also the first time
-      after the gap, so which occurrence it names cannot be told;
+    - an `EXDATE`, `RECURRENCE-ID` or `RDATE` that shares its instant with an
+      occurrence on a wall-clock time a DST change skips (read past the gap,
+      RFC 5545 3.3.5): in UTC, or in the series' zone as the first time after
+      the gap (`03:30` for a skipped `02:30`). Clients match it to that
+      occurrence by instant, the move by wall clock, so which one it names
+      cannot be told. Checked before and after the move, where the series has
+      such an occurrence;
     - on a switch from timed to all-day, a `RECURRENCE-ID`, `EXDATE` or `RDATE`
       at another time of day than the series (or a date already): as a date it
       could name an occurrence it never named, or fall together with another.
