@@ -1588,7 +1588,6 @@ function checkDatesOnly(master, move, properties) {
 // src/vtimezone.ts
 import ICAL4 from "ical.js";
 var DAY3 = 86400;
-var WEEK = 7 * DAY3;
 var FIRST_YEAR = 1970;
 var LAST_SCANNED_YEAR = 2045;
 var MIN_RUN = 3;
@@ -1613,7 +1612,7 @@ function scan(tzid, offsetAt, start, end) {
   let t = start;
   let offset = initial;
   while (t < end) {
-    const next = Math.min(t + WEEK, end);
+    const next = Math.min(t + DAY3, end);
     const after = at(next);
     if (after === offset) {
       t = next;

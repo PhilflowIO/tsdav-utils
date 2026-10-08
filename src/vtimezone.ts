@@ -36,7 +36,6 @@ import { fieldsOf, ianaZone, vtimezoneIn, vtimezoneZone, wallOf } from './zone';
  */
 
 const DAY = 86400;
-const WEEK = 7 * DAY;
 
 /** The first year a generated VTIMEZONE covers, unless a value lies earlier */
 const FIRST_YEAR = 1970;
@@ -83,8 +82,9 @@ const scans = new Map<string, Scan>();
 
 /**
  * The offset changes of an IANA zone between two UTC instants. The offset is
- * sampled weekly and each change found by bisection to the second; no zone
- * has changed and changed back within a week since 1970.
+ * sampled daily and each change found by bisection to the second. Daily, not
+ * weekly: Brazil's Boa Vista, Recife and Noronha kept DST for one week in
+ * October 2000.
  */
 function scan(tzid: string, offsetAt: (utc: number) => number, start: number, end: number): Scan {
   const key = `${tzid}|${start}|${end}`;
@@ -103,7 +103,7 @@ function scan(tzid: string, offsetAt: (utc: number) => number, start: number, en
   let t = start;
   let offset = initial;
   while (t < end) {
-    const next = Math.min(t + WEEK, end);
+    const next = Math.min(t + DAY, end);
     const after = at(next);
     if (after === offset) {
       t = next;
