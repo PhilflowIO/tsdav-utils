@@ -1,6 +1,6 @@
 import ICAL from 'ical.js';
 import { frameOf, isDateListProperty, isRecurProperty, pad } from './typedValue';
-import { holds, listKeys } from './dateLists';
+import { holds, instantKey, listKeys } from './dateLists';
 import type { DateListEdit, ListOutcome } from './dateLists';
 import type { Anchor } from './typedValue';
 import { fieldsOf, unknownZone, wallOf, zoneOf } from './zone';
@@ -1077,6 +1077,34 @@ function inSeriesForm(master: ICAL.Component, line: ICAL.Property | undefined) {
   master.addProperty(own);
 }
 
+/**
+ * After restoreOccurrences took away a date of a timed series (which excluded
+ * every occurrence that day) to bring back some of them: exclude each other
+ * occurrence of that day one by one, in the series' own form, so exactly the
+ * restored ones come back. An occurrence another EXDATE excludes already is
+ * left to it.
+ */
+function keepDayExclusions(master: ICAL.Component, outcome: ListOutcome) {
+  const frame = frameOf(master);
+  if (!outcome.liftedDays.size || !frame || frame.form === 'date') {
+    return;
+  }
+  const walls = expand(master, Math.max(...outcome.liftedDays.keys()) + DAY - 1);
+  const list = listKeys(master, 'exdate');
+  const stampAt = (wall: number): Stamp => frame.form === 'tzid'
+    ? { wall, kind: 'tzid', tzid: frame.tzid } : { wall, kind: frame.form };
+  const keep = [...walls].sort((a, b) => a - b).filter((wall) => {
+    const restored = outcome.liftedDays.get(dayOf(wall));
+    const stamp = stampAt(wall);
+    return restored !== undefined && !restored.has(instantKey(master, stamp)) && !holds(master, list, stamp);
+  });
+  if (keep.length) {
+    const property = new ICAL.Property('exdate', master);
+    writeInstants(property, keep, frame);
+    master.addProperty(property);
+  }
+}
+
 /** A write on something that is no series master: its lists are merged, nothing is checked */
 function noSeries(lists: DateListEdit | null) {
   return {
@@ -1280,6 +1308,7 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
         const outcome = lists.apply();
         checkAddedExdates(master, outcome.addedExdates, lists.purpose === 'cancel');
         settleGapTwins(master, outcome);
+        keepDayExclusions(master, outcome);
         if (lists.purpose === 'cancel') {
           inSeriesForm(master, outcome.written.get('exdate'));
         }

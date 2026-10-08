@@ -118,6 +118,9 @@ export interface Given {
   label: string;
 }
 
+/** The date a given value falls on, as a caller writes a date ("2026-12-24") */
+const fieldsDate = (g: Given) => new Date(Number(g.day!.slice(4)) * 1000).toISOString().slice(0, 10);
+
 /** Whether keys hold a given value, at its instant or as a date of its day */
 const covers = (keys: Set<string>, g: Given) => keys.has(g.key) || (g.day !== null && keys.has(g.day));
 
@@ -133,6 +136,12 @@ export interface ListOutcome {
   givenExdates: Given[];
   /** per list, the line the call wrote its new values on, if any */
   written: Map<string, ICAL.Property>;
+  /**
+   * The days (wall clock of their midnight) restoreOccurrences took a date of
+   * a timed series away from, each with the keys of the occurrences restored:
+   * every other occurrence the date excluded that day is to stay excluded
+   */
+  liftedDays: Map<number, Set<string>>;
 }
 
 /**
@@ -153,7 +162,7 @@ export class DateListEdit {
   }
 
   apply(): ListOutcome {
-    const outcome: ListOutcome = { addedExdates: [], givenExdates: [], written: new Map() };
+    const outcome: ListOutcome = { addedExdates: [], givenExdates: [], written: new Map(), liftedDays: new Map() };
     for (const [name, mode] of this.modes) {
       const lines = this.master.getAllProperties(name);
       const fresh = lines.filter((line) => !this.held.has(line));
@@ -171,7 +180,7 @@ export class DateListEdit {
       }
       if (mode === 'remove') {
         this.master.removeProperty(line);
-        this.remove(name, old, oldKeys, given);
+        this.remove(name, old, oldKeys, given, outcome);
         continue;
       }
       const present = new Set<string>();
@@ -221,28 +230,45 @@ export class DateListEdit {
   /**
    * Take values out of a list, each matched directly against the values held,
    * by instant (or as a date given as a date); refused, naming them, where the
-   * list does not hold one. restoreOccurrences also takes a date of the
-   * occurrence's day.
+   * list does not hold one.
+   *
+   * A date of a timed series excludes every occurrence that day. Restoring one
+   * of them (restoreOccurrences) takes the date away and records the day, so
+   * the other occurrences it excluded are excluded one by one instead (see
+   * ListOutcome.liftedDays) and exactly the restored ones come back. A plain
+   * remove of a time held only by such a date is refused, as it cannot tell
+   * which of the two the caller means.
    */
-  private remove(name: string, old: ICAL.Property[], oldKeys: string[][], given: Given[]) {
+  private remove(name: string, old: ICAL.Property[], oldKeys: string[][], given: Given[], outcome: ListOutcome) {
     const upper = name.toUpperCase();
     const held = new Set(oldKeys.flat());
-    // A value is removed where the list holds it; restoring an occurrence also
-    // takes away a date of a timed series that excludes its day (every
-    // occurrence that day comes back), as the occurrence would stay excluded
-    const byDay = this.purpose === 'restore';
-    const missing = given.filter((g) => byDay ? !covers(held, g) : !held.has(g.key));
+    const restore = this.purpose === 'restore';
+    const missing = given.filter((g) => restore ? !covers(held, g) : !held.has(g.key));
     if (missing.length) {
       const list = old.map((property) => property.toICALString()).join(', ');
       const values = missing.map((g) => icalForm(String(g.value))).join(', ');
-      throw new UpdateFieldsError('NOT_IN_LIST', this.purpose === 'restore'
+      const byDate = !restore && missing.every((g) => g.day !== null && held.has(g.day));
+      throw new UpdateFieldsError('NOT_IN_LIST', restore
         ? `${values} ${missing.length > 1 ? 'are' : 'is'} not cancelled: no EXDATE names ${missing.length > 1 ? 'them' : 'it'} ` +
           `(${list || 'the series has no EXDATE'}). Give the original start of a cancelled occurrence`
-        : `${missing.map((g) => g.label).join(', ')} ${missing.length > 1 ? 'are' : 'is'} not in the list ` +
-          `(${list || `the object has no ${upper}`}), so there is nothing to remove. Give a value the list holds, ` +
-          'at the same instant (in any zone)', { remedy: 'fix-value', property: upper });
+        : byDate
+          ? `${missing.map((g) => g.label).join(', ')} ${missing.length > 1 ? 'are' : 'is'} not in the list as such: ` +
+            `a date in it (${list}) excludes the whole day. Give the date (e.g. "${fieldsDate(missing[0])}") to remove ` +
+            'it, which brings back every occurrence that day, or use restoreOccurrences to bring back this occurrence only'
+          : `${missing.map((g) => g.label).join(', ')} ${missing.length > 1 ? 'are' : 'is'} not in the list ` +
+            `(${list || `the object has no ${upper}`}), so there is nothing to remove. Give a value the list holds, ` +
+            'at the same instant (in any zone)', { remedy: 'fix-value', property: upper });
     }
-    const remove = new Set(given.flatMap((g) => g.day === null || !byDay ? [g.key] : [g.key, g.day]));
+    const remove = new Set(given.map((g) => g.key));
+    if (restore) {
+      for (const g of given) {
+        if (g.day !== null && held.has(g.day)) {
+          remove.add(g.day);
+          const day = Number(g.day.slice(4));
+          outcome.liftedDays.set(day, (outcome.liftedDays.get(day) ?? new Set()).add(g.key));
+        }
+      }
+    }
     old.forEach((property, n) => keepValues(this.master, property, (i) => !remove.has(oldKeys[n][i])));
   }
 }

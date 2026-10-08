@@ -336,10 +336,28 @@ describe('a date in the list of a timed series holds every occurrence that day (
   });
 
   it('remove of a time matches only that time: the date stays, or the time is not in the list', () => {
-    expect(isUpdateFieldsError(thrown(() => updateFields(dated, { EXDATE: '2026-12-10T10:00:00' }, { lists: { EXDATE: 'remove' } })),
-      'NOT_IN_LIST')).toBe(true);
+    const error = thrown(() => updateFields(dated, { EXDATE: '2026-12-10T10:00:00' }, { lists: { EXDATE: 'remove' } }));
+    expect(isUpdateFieldsError(error, 'NOT_IN_LIST')).toBe(true);
+    expect(error.message).toMatch(/excludes the whole day\. Give the date \(e\.g\. "2026-12-10"\).*restoreOccurrences/);
     expect(lines(updateFields(berlin('EXDATE;VALUE=DATE:20261210', 'EXDATE:20261210T090000Z'), { EXDATE: '2026-12-10T10:00:00' },
       { lists: { EXDATE: 'remove' } }), 'EXDATE')).toEqual(['EXDATE;VALUE=DATE:20261210']);
+  });
+
+  it('restoring one occurrence of a day a date excludes keeps the others of that day excluded', () => {
+    const twice = calendar(...event('DTSTART;TZID=Europe/Berlin:20261220T090000', 'RRULE:FREQ=DAILY;BYHOUR=9,17;COUNT=20',
+      'EXDATE;VALUE=DATE:20261224'));
+    const day = (ics: string) => starts(ics).filter((v) => v.startsWith('2026-12-24'));
+    expect(day(twice)).toEqual([]);
+    const one = restoreOccurrences(twice, ['2026-12-24T09:00:00']);
+    expect(lines(one, 'EXDATE')).toEqual(['EXDATE;TZID=Europe/Berlin:20261224T170000']);
+    expect(day(one)).toEqual(['2026-12-24T09:00:00']);
+    const both = restoreOccurrences(twice, ['2026-12-24T09:00:00', '2026-12-24T16:00:00Z']);
+    expect(lines(both, 'EXDATE')).toEqual([]);
+    expect(day(both)).toEqual(['2026-12-24T09:00:00', '2026-12-24T17:00:00']);
+    // an occurrence another EXDATE excludes already is left to it
+    const also = restoreOccurrences(calendar(...event('DTSTART;TZID=Europe/Berlin:20261220T090000',
+      'RRULE:FREQ=DAILY;BYHOUR=9,17;COUNT=20', 'EXDATE;VALUE=DATE:20261224', 'EXDATE:20261224T160000Z')), ['2026-12-24T09:00:00']);
+    expect(lines(also, 'EXDATE')).toEqual(['EXDATE:20261224T160000Z']);
   });
 
   it('remove takes the date given as a date', () => {

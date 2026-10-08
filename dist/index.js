@@ -845,6 +845,7 @@ function keepValues(master, line, keep) {
     line.setValues(kept);
   }
 }
+var fieldsDate = (g) => new Date(Number(g.day.slice(4)) * 1e3).toISOString().slice(0, 10);
 var covers = (keys, g) => keys.has(g.key) || g.day !== null && keys.has(g.day);
 var DateListEdit = class {
   /**
@@ -858,7 +859,7 @@ var DateListEdit = class {
     this.held = new Set(master.getAllProperties());
   }
   apply() {
-    const outcome = { addedExdates: [], givenExdates: [], written: /* @__PURE__ */ new Map() };
+    const outcome = { addedExdates: [], givenExdates: [], written: /* @__PURE__ */ new Map(), liftedDays: /* @__PURE__ */ new Map() };
     for (const [name, mode] of this.modes) {
       const lines = this.master.getAllProperties(name);
       const fresh = lines.filter((line2) => !this.held.has(line2));
@@ -874,7 +875,7 @@ var DateListEdit = class {
       }
       if (mode === "remove") {
         this.master.removeProperty(line);
-        this.remove(name, old, oldKeys, given);
+        this.remove(name, old, oldKeys, given, outcome);
         continue;
       }
       const present = /* @__PURE__ */ new Set();
@@ -925,20 +926,36 @@ var DateListEdit = class {
   /**
    * Take values out of a list, each matched directly against the values held,
    * by instant (or as a date given as a date); refused, naming them, where the
-   * list does not hold one. restoreOccurrences also takes a date of the
-   * occurrence's day.
+   * list does not hold one.
+   *
+   * A date of a timed series excludes every occurrence that day. Restoring one
+   * of them (restoreOccurrences) takes the date away and records the day, so
+   * the other occurrences it excluded are excluded one by one instead (see
+   * ListOutcome.liftedDays) and exactly the restored ones come back. A plain
+   * remove of a time held only by such a date is refused, as it cannot tell
+   * which of the two the caller means.
    */
-  remove(name, old, oldKeys, given) {
+  remove(name, old, oldKeys, given, outcome) {
     const upper = name.toUpperCase();
     const held = new Set(oldKeys.flat());
-    const byDay = this.purpose === "restore";
-    const missing = given.filter((g) => byDay ? !covers(held, g) : !held.has(g.key));
+    const restore = this.purpose === "restore";
+    const missing = given.filter((g) => restore ? !covers(held, g) : !held.has(g.key));
     if (missing.length) {
       const list = old.map((property) => property.toICALString()).join(", ");
       const values = missing.map((g) => icalForm(String(g.value))).join(", ");
-      throw new UpdateFieldsError("NOT_IN_LIST", this.purpose === "restore" ? `${values} ${missing.length > 1 ? "are" : "is"} not cancelled: no EXDATE names ${missing.length > 1 ? "them" : "it"} (${list || "the series has no EXDATE"}). Give the original start of a cancelled occurrence` : `${missing.map((g) => g.label).join(", ")} ${missing.length > 1 ? "are" : "is"} not in the list (${list || `the object has no ${upper}`}), so there is nothing to remove. Give a value the list holds, at the same instant (in any zone)`, { remedy: "fix-value", property: upper });
+      const byDate = !restore && missing.every((g) => g.day !== null && held.has(g.day));
+      throw new UpdateFieldsError("NOT_IN_LIST", restore ? `${values} ${missing.length > 1 ? "are" : "is"} not cancelled: no EXDATE names ${missing.length > 1 ? "them" : "it"} (${list || "the series has no EXDATE"}). Give the original start of a cancelled occurrence` : byDate ? `${missing.map((g) => g.label).join(", ")} ${missing.length > 1 ? "are" : "is"} not in the list as such: a date in it (${list}) excludes the whole day. Give the date (e.g. "${fieldsDate(missing[0])}") to remove it, which brings back every occurrence that day, or use restoreOccurrences to bring back this occurrence only` : `${missing.map((g) => g.label).join(", ")} ${missing.length > 1 ? "are" : "is"} not in the list (${list || `the object has no ${upper}`}), so there is nothing to remove. Give a value the list holds, at the same instant (in any zone)`, { remedy: "fix-value", property: upper });
     }
-    const remove = new Set(given.flatMap((g) => g.day === null || !byDay ? [g.key] : [g.key, g.day]));
+    const remove = new Set(given.map((g) => g.key));
+    if (restore) {
+      for (const g of given) {
+        if (g.day !== null && held.has(g.day)) {
+          remove.add(g.day);
+          const day = Number(g.day.slice(4));
+          outcome.liftedDays.set(day, (outcome.liftedDays.get(day) ?? /* @__PURE__ */ new Set()).add(g.key));
+        }
+      }
+    }
     old.forEach((property, n) => keepValues(this.master, property, (i) => !remove.has(oldKeys[n][i])));
   }
 };
@@ -1695,6 +1712,25 @@ function inSeriesForm(master, line) {
   }
   master.addProperty(own);
 }
+function keepDayExclusions(master, outcome) {
+  const frame = frameOf(master);
+  if (!outcome.liftedDays.size || !frame || frame.form === "date") {
+    return;
+  }
+  const walls = expand(master, Math.max(...outcome.liftedDays.keys()) + DAY2 - 1);
+  const list = listKeys(master, "exdate");
+  const stampAt = (wall) => frame.form === "tzid" ? { wall, kind: "tzid", tzid: frame.tzid } : { wall, kind: frame.form };
+  const keep = [...walls].sort((a, b) => a - b).filter((wall) => {
+    const restored = outcome.liftedDays.get(dayOf(wall));
+    const stamp = stampAt(wall);
+    return restored !== void 0 && !restored.has(instantKey(master, stamp)) && !holds(master, list, stamp);
+  });
+  if (keep.length) {
+    const property = new import_ical3.default.Property("exdate", master);
+    writeInstants(property, keep, frame);
+    master.addProperty(property);
+  }
+}
 function noSeries(lists) {
   return {
     finish: () => {
@@ -1858,6 +1894,7 @@ function startSeriesEdit(calendar, master, written, source, lists, shapes) {
         const outcome = lists.apply();
         checkAddedExdates(master, outcome.addedExdates, lists.purpose === "cancel");
         settleGapTwins(master, outcome);
+        keepDayExclusions(master, outcome);
         if (lists.purpose === "cancel") {
           inSeriesForm(master, outcome.written.get("exdate"));
         }
