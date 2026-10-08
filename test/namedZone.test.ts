@@ -119,13 +119,48 @@ function samples(tzid: string, first: number, last: number): number[] {
   return out;
 }
 
-/** The observances of a VTIMEZONE with the latest DTSTART, as Outlook picks the current rule (MS-OXCICAL 2.1.3.1.1.19.2) */
-function latest(vtimezone: ICAL.Component): ICAL.Component[] {
+/**
+ * What Outlook and Exchange read as a zone's current rule: the STANDARD and the
+ * DAYLIGHT with the latest DTSTART, each picked on its own (MS-OXCICAL
+ * 2.1.3.1.1.19.2, note <61>). Problems with them, empty when they describe the
+ * zone's final state: an open rule pair while it has DST, else the last offset
+ * without rule (a DAYLIGHT, if any, with the same offsets at the same DTSTART).
+ */
+function finalStateProblems(vtimezone: ICAL.Component, tzid: string, dst: boolean): string[] {
   const key = (o: ICAL.Component) => (o.getFirstPropertyValue('dtstart') as ICAL.Time).toString();
-  const sorted = [...vtimezone.getAllSubcomponents()].sort((a, b) => key(a).localeCompare(key(b)));
-  // the final state is a pair of rules while the zone has DST, else one observance
-  const pair = sorted.slice(-2);
-  return pair.length === 2 && pair.every((o) => o.hasProperty('rrule')) ? pair : sorted.slice(-1);
+  const latestOf = (kind: string) => vtimezone.getAllSubcomponents(kind)
+    .sort((a, b) => key(a).localeCompare(key(b))).pop() ?? null;
+  const standard = latestOf('standard');
+  const daylight = latestOf('daylight');
+  const rule = (o: ICAL.Component | null) => o?.hasProperty('rrule') ? String(o.getFirstPropertyValue('rrule')) : null;
+  const problems: string[] = [];
+  if (dst) {
+    for (const o of [standard, daylight]) {
+      if (!rule(o) || /UNTIL/.test(rule(o)!)) {
+        problems.push(`latest ${o?.name ?? 'observance'} is no open rule`);
+      }
+    }
+    return problems;
+  }
+  const offset = intlOffset(tzid, utcOf(2100));
+  for (const o of [standard, daylight]) {
+    if (!o) {
+      continue;
+    }
+    if (o.hasProperty('rrule') || o.hasProperty('rdate')) {
+      problems.push(`latest ${o.name} repeats`);
+    }
+    if ((o.getFirstPropertyValue('tzoffsetto') as ICAL.UtcOffset).toSeconds() !== offset) {
+      problems.push(`latest ${o.name} is not the final offset`);
+    }
+  }
+  if (!standard) {
+    problems.push('no STANDARD');
+  }
+  if (daylight && standard && key(daylight) !== key(standard)) {
+    problems.push('the latest DAYLIGHT is not at the final DTSTART');
+  }
+  return problems;
 }
 /** whether a zone has DST in 2030 (by Intl) */
 const hasDst = (tzid: string) => intlOffset(tzid, utcOf(2030, 1, 15)) !== intlOffset(tzid, utcOf(2030, 7, 15));
@@ -160,20 +195,9 @@ describe('generated VTIMEZONE against Intl', () => {
     'Asia/Amman', 'Europe/Berlin', 'Africa/Cairo', 'Australia/Sydney', 'America/New_York', 'Asia/Kolkata',
     'Africa/Casablanca', 'Asia/Gaza'])(
     '%s: the observances with the latest DTSTART are the zone\'s final state, for Outlook', (tzid) => {
-      for (const first of [1971, 2026]) {
-        const vtimezone = generateVtimezone(tzid, first, 2026);
-        const final = latest(vtimezone);
-        if (hasDst(tzid) && !['Africa/Casablanca'].includes(tzid)) {
-          expect(final.map((o) => o.name).sort()).toEqual(['daylight', 'standard']);
-          for (const o of final) {
-            expect(String(o.getFirstPropertyValue('rrule'))).not.toContain('UNTIL');
-          }
-        } else {
-          expect(final).toHaveLength(1);
-          expect(final[0].hasProperty('rrule') || final[0].hasProperty('rdate')).toBe(false);
-          expect((final[0].getFirstPropertyValue('tzoffsetto') as ICAL.UtcOffset).toSeconds())
-            .toBe(intlOffset(tzid, utcOf(2100)));
-        }
+      for (const first of [1971, 2000, 2017, 2026]) {
+        const dst = hasDst(tzid) && tzid !== 'Africa/Casablanca';
+        expect(finalStateProblems(generateVtimezone(tzid, first, 2026), tzid, dst)).toEqual([]);
       }
     });
 
@@ -223,6 +247,21 @@ describe('generated VTIMEZONE against Intl', () => {
       .toEqual(generateVtimezone('Australia/Sydney', 2026, 2027).toString());
   });
 
+  it('does not scan past the zone\'s final state: an UNTIL in 9999 or a value in year 1 is fast', () => {
+    for (const [tzid, until] of [['Europe/Berlin', '99991231T000000Z'], ['Africa/Cairo', '50001231T000000Z'],
+      ['Asia/Gaza', '99991231T000000Z']]) {
+      // warm the zone's scan of the years up to today, which any first use pays
+      generateVtimezone(tzid, 2026, 2026);
+      const t0 = performance.now();
+      const out = updateFields(skeleton(), { DTSTART: '2026-10-05T09:00:00', RRULE: `FREQ=WEEKLY;UNTIL=${until}` }, { zone: tzid });
+      expect(performance.now() - t0).toBeLessThan(200);
+      expect(out).toContain(`UNTIL=${until.slice(0, 4)}`);
+    }
+    const t0 = performance.now();
+    expect(refusal(() => generateVtimezone('Europe/Berlin', 1, 1)).code).toBe('UNSUPPORTED_VTIMEZONE');
+    expect(performance.now() - t0).toBeLessThan(200);
+  });
+
   it('keeps one cache entry per zone, of its changes only, grown for new years', () => {
     const zones = ['Europe/Paris', 'America/Chicago', 'Pacific/Auckland'];
     const before = scanCacheSize();
@@ -259,9 +298,9 @@ describe('generated VTIMEZONE against Intl', () => {
           if (bad.length) {
             failed.push(`${tzid} from ${first}: ${bad.length} mismatches, first ${bad[0]}`);
           }
-          const final = latest(vtimezone);
-          if (final.some((o) => o.hasProperty('rdate')) || final.some((o) => /UNTIL/.test(String(o.getFirstPropertyValue('rrule') ?? '')))) {
-            failed.push(`${tzid} from ${first}: the latest observances are no final state`);
+          const problems = finalStateProblems(vtimezone, tzid, hasDst(tzid) && !/Casablanca|El_Aaiun/.test(tzid));
+          if (problems.length) {
+            failed.push(`${tzid} from ${first}: ${problems.join(', ')}`);
           }
         } catch (error) {
           if (!(first === 1971 && (error as UpdateFieldsError).code === 'UNSUPPORTED_VTIMEZONE')) {
@@ -502,6 +541,14 @@ describe('options.zone', () => {
       // 08:00Z to 16:00Z: eight hours
       expect(lines(updateFields(flight, { DTSTART: '2026-09-08T10:00:00' }, { zone: 'Europe/Berlin' })))
         .toContain('DTEND;TZID=Europe/Berlin:20260908T180000');
+    });
+
+    it('keeps an elapsed length elapsed across a DST change', () => {
+      // 08:00Z to 09:00Z the next day: 25 hours, start in Berlin, end in UTC
+      const ics = skeleton('DTSTART;TZID=Europe/Berlin:20260907T100000', 'DTEND:20260908T090000Z');
+      // New York leaves DST on 1 November: 31 October 10:00 EDT + 25 h is 1 November 10:00 EST
+      expect(lines(updateFields(ics, { DTSTART: '2026-10-31T10:00:00' }, { zone: 'America/New_York' })))
+        .toContain('DTEND;TZID=America/New_York:20261101T100000');
     });
 
     it('moves a todo\'s DUE', () => {

@@ -28,6 +28,12 @@ describe('generateVtimezone', () => {
     expect(generateVtimezone('Europe/Berlin', { from: 2026, to: 2030 })).toBe(text);
   });
 
+  it('spells the zone as updateFields does', () => {
+    expect(generateVtimezone('europe/berlin', { from: 2026 })).toContain('TZID:Europe/Berlin\r\n');
+    expect(resolveZone('europe/berlin')!.tzid).toBe('Europe/Berlin');
+    expect(resolveZone('US/Eastern')!.tzid).toBe('US/Eastern');
+  });
+
   it('refuses an unknown zone and a range that is no pair of years', () => {
     expect(refusal(() => generateVtimezone('Mars/Olympus', { from: 2026 }))).toMatchObject({ code: 'UNKNOWN_TZID' });
     for (const range of [{ from: 2026.5 }, { from: 2027, to: 2026 }, null]) {
@@ -106,6 +112,23 @@ describe('expandOccurrences', () => {
     ]);
     expect(result.occurrences[2].recurrenceId).toEqual({ value: '2026-10-26T09:00:00', tzid: 'Europe/Berlin',
       instant: '2026-10-26T08:00:00.000Z' });
+  });
+
+  it('ends an override by its own DTEND, else its own DURATION, else the master\'s length from its own start', () => {
+    const ends = (masterEnd: string, ...override: string[]) => expandOccurrences(calendar(
+      ...event('DTSTART;TZID=Europe/Berlin:20260921T090000', masterEnd, 'RRULE:FREQ=WEEKLY;COUNT=2'),
+      ...event('RECURRENCE-ID;TZID=Europe/Berlin:20260928T090000', 'DTSTART;TZID=Europe/Berlin:20260928T120000', ...override)),
+    { budget: createRecurrenceBudget(), until: '2027-01-01T00:00:00Z' }).occurrences[1].end?.value;
+    expect(ends('DTEND;TZID=Europe/Berlin:20260921T100000')).toBe('2026-09-28T13:00:00');
+    expect(ends('DTEND;TZID=Europe/Berlin:20260921T100000', 'DURATION:PT3H')).toBe('2026-09-28T15:00:00');
+    expect(ends('DTEND;TZID=Europe/Berlin:20260921T100000', 'DTEND;TZID=Europe/Berlin:20260928T123000')).toBe('2026-09-28T12:30:00');
+    expect(ends('DURATION:PT2H')).toBe('2026-09-28T14:00:00');
+    // an override written in UTC keeps its own form
+    expect(expandOccurrences(calendar(
+      ...event('DTSTART;TZID=Europe/Berlin:20260921T090000', 'DURATION:PT1H', 'RRULE:FREQ=WEEKLY;COUNT=2'),
+      ...event('RECURRENCE-ID;TZID=Europe/Berlin:20260928T090000', 'DTSTART:20260928T100000Z')),
+    { budget: createRecurrenceBudget(), until: '2027-01-01T00:00:00Z' }).occurrences[1].end)
+      .toEqual({ value: '2026-09-28T11:00:00Z', tzid: null, instant: '2026-09-28T11:00:00.000Z' });
   });
 
   it('stops at the limit and says so', () => {
