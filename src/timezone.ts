@@ -1,7 +1,7 @@
 import ICAL from 'ical.js';
 import { UpdateFieldsError } from './errors';
 import { parseDateValue } from './typedValue';
-import { fieldsOf, ianaZone, vtimezoneIn, vtimezoneZone, wallOf } from './zone';
+import { fieldsOf, ianaZone, ianaZoneName, vtimezoneIn, vtimezoneZone, wallOf } from './zone';
 import type { Zone } from './zone';
 
 /*
@@ -105,7 +105,9 @@ function converter(tzid: string, zone: Zone, source: 'vtimezone' | 'iana'): Zone
 /**
  * The conversions of a TZID: by the object's VTIMEZONE of that TZID when
  * `source` (the object's text, or any component of it, or a VTIMEZONE) has
- * one, else by the IANA zone of that name. Null when it is neither.
+ * one, else by the IANA zone of that name, whose `tzid` is then spelled as
+ * updateFields writes it ("europe/berlin" is "Europe/Berlin"). Null when it
+ * is neither.
  *
  * @throws {UpdateFieldsError} INVALID_ICALENDAR for a text that does not parse;
  *   UNSUPPORTED_VTIMEZONE (on a conversion) for a VTIMEZONE whose rules
@@ -125,8 +127,10 @@ export function resolveZone(tzid: string, source?: ZoneSource): ZoneConverter | 
       return converter(tzid, vtimezoneZone(vtimezone), 'vtimezone');
     }
   }
-  const zone = ianaZone(tzid);
-  return zone ? converter(tzid, zone, 'iana') : null;
+  // spelled as updateFields writes it ("europe/berlin" is "Europe/Berlin")
+  const name = ianaZoneName(tzid);
+  const zone = name ? ianaZone(name) : null;
+  return zone ? converter(name!, zone, 'iana') : null;
 }
 
 /**

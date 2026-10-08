@@ -304,9 +304,11 @@ export function updateFields(
       if (!start || !end) {
         return [];
       }
-      const length = start.frame === end.frame ? end.wall - start.wall
-        : start.utc !== null && end.utc !== null ? end.utc - start.utc : null;
-      return length === null ? [] : [{ name, length }];
+      // the same zone: wall-clock length; different zones (a flight): elapsed
+      if (start.frame === end.frame) {
+        return [{ name, length: end.wall - start.wall, elapsed: false }];
+      }
+      return start.utc !== null && end.utc !== null ? [{ name, length: end.utc - start.utc, elapsed: true }] : [];
     }) : [];
   for (const [key, value] of entries) {
     if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, zone) &&
@@ -315,8 +317,11 @@ export function updateFields(
     }
   }
   const start = ends.length ? momentOf(actualComponent, 'dtstart') : null;
-  for (const { name, length } of start ? ends : []) {
-    setDateValue(actualComponent, name, wallText(start!.wall + length), floatingTime, absoluteTime, zone);
+  for (const { name, length, elapsed } of start ? ends : []) {
+    // an elapsed length is given as the end's instant, which the zone writes
+    // as its wall clock there (or refuses in the second pass of a repeated hour)
+    const value = elapsed && start!.utc !== null ? `${wallText(start!.utc + length)}Z` : wallText(start!.wall + length);
+    setDateValue(actualComponent, name, value, floatingTime, absoluteTime, zone);
   }
   series.finish();
 

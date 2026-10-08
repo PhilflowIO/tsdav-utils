@@ -76,7 +76,7 @@ export interface ExpansionResult {
 export interface ExpandOptions {
   /** the work budget to spend (see createRecurrenceBudget); shared across calls if the same object is passed */
   budget: RecurrenceBudget;
-  /** occurrences whose original start lies before this are not returned (exclusive end of the range) */
+  /** the end of the range, exclusive: occurrences whose original start lies at or after this are not returned */
   until: Date | string;
   /** occurrences whose original start lies before this are skipped (default: all from DTSTART) */
   from?: Date | string;
@@ -161,15 +161,46 @@ function endOf(master: ICAL.Component, frame: Anchor, startWall: number): Occurr
       return timeIn(master, wall, frameKind(frame), frameTzid(frame));
     }
   }
-  const duration = master.getFirstPropertyValue('duration') as ICAL.Duration | null;
-  if (duration && typeof duration.toSeconds === 'function') {
-    // days and weeks are nominal: whole days on the wall clock (RFC 5545 3.3.6)
-    const days = (duration.weeks ?? 0) * 7 + (duration.days ?? 0);
-    const seconds = (duration.hours ?? 0) * 3600 + (duration.minutes ?? 0) * 60 + (duration.seconds ?? 0);
-    const sign = duration.isNegative ? -1 : 1;
-    return timeIn(master, startWall + sign * (days * 86400 + seconds), frameKind(frame), frameTzid(frame));
+  const length = durationOf(master);
+  return length === null ? null : timeIn(master, startWall + length, frameKind(frame), frameTzid(frame));
+}
+
+/**
+ * A component's DURATION as seconds to add on the wall clock, or null. Days
+ * and weeks are nominal, whole days on the wall clock (RFC 5545 3.3.6); the
+ * time part is added there too, which differs from elapsed time only across a
+ * DST change within the duration.
+ */
+function durationOf(component: ICAL.Component): number | null {
+  const duration = component.getFirstPropertyValue('duration') as ICAL.Duration | null;
+  if (!duration || typeof duration.toSeconds !== 'function') {
+    return null;
   }
-  return null;
+  const days = (duration.weeks ?? 0) * 7 + (duration.days ?? 0);
+  const seconds = (duration.hours ?? 0) * 3600 + (duration.minutes ?? 0) * 60 + (duration.seconds ?? 0);
+  return (duration.isNegative ? -1 : 1) * (days * 86400 + seconds);
+}
+
+/**
+ * Where an overridden occurrence ends. An override is a whole component (RFC
+ * 5545 3.8.4.4): its own DTEND or DUE, else its own DURATION from its own
+ * start, else the master's length (DTEND - DTSTART on the series' wall clock,
+ * or its DURATION) from its own start, in the form of that start.
+ */
+function overrideEnd(master: ICAL.Component, frame: Anchor, override: ICAL.Component, start: Stamp): OccurrenceTime | null {
+  const own = override.getFirstProperty('dtend') ?? override.getFirstProperty('due');
+  if (own) {
+    return ownTime(master, own);
+  }
+  let length = durationOf(override);
+  if (length === null) {
+    const dtstart = master.getFirstProperty('dtstart')!;
+    const end = master.getFirstProperty('dtend') ?? master.getFirstProperty('due');
+    length = end
+      ? wallIn(master, propertyStamps(end)[0], frame) - propertyStamps(dtstart)[0].wall
+      : durationOf(master);
+  }
+  return length === null ? null : timeIn(master, start.wall + length, start.kind, start.tzid ?? null);
 }
 
 /**
@@ -262,9 +293,10 @@ export function expandOccurrences(calendarObject: CalendarObjectInput | ICAL.Com
     const recurrenceId = timeIn(master, wall, frameKind(frame), frameTzid(frame));
     if (override) {
       const own = override.getFirstProperty('dtstart');
-      const ownEnd = override.getFirstProperty('dtend') ?? override.getFirstProperty('due');
+      const start: Stamp = own ? propertyStamps(own)[0]
+        : { wall, kind: frameKind(frame), ...(frame.form === 'tzid' ? { tzid: frame.tzid } : {}) };
       occurrences.push({ recurrenceId, start: own ? ownTime(master, own) : recurrenceId,
-        end: ownEnd ? ownTime(master, ownEnd) : endOf(master, frame, wall), overridden: true });
+        end: overrideEnd(master, frame, override, start), overridden: true });
     } else {
       occurrences.push({ recurrenceId, start: recurrenceId, end: endOf(master, frame, wall), overridden: false });
     }
