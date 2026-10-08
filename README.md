@@ -269,6 +269,8 @@ updateFields(event, { RRULE: 'FREQ=DAILY;UNTIL=2026-10-26T14:00:00-04:00' });
     A `VTIMEZONE` is read from its own observances (`DTSTART`, `RDATE`, `RRULE`
     with `UNTIL`), not with ical.js' `convertToZone`, which is off by an hour for
     up to five hours around each DST change ([ical.js#847](https://github.com/kewisch/ical.js/issues/847)).
+    Observance rules other than `YEARLY` or `MONTHLY`, which no real zone has,
+    are refused.
     A wall-clock time a change makes ambiguous is its first occurrence, and one
     that does not exist lies past the gap by as much as it was into it (02:30 on
     the spring-forward night is 03:30), as RFC 5545 3.3.5 reads them;
@@ -313,20 +315,29 @@ follow the master's `DTSTART` (see above).
   - Across an all-day/timed switch the distance counts in days: an occurrence
     keeps its day and becomes a date or takes the new DTSTART's time of day; an
     override keeps its own time on its day.
-  - A rule part that pins days or times (`BYDAY=MO`, `BYMONTHDAY=5`, `BYHOUR`) does
-    not move with DTSTART. When the call gives no `RRULE`, the series is expanded
-    before and after; if the moved series would gain or lose an occurrence, it
-    throws. Where a single `BYDAY`, `BYMONTHDAY`, `BYMONTH`, `BYHOUR` or `BYMINUTE`
+  - When the call gives no `RRULE`, the move is accepted only where the rule
+    provably moves with it, decided from the rule itself (nothing is expanded).
+    The move splits into a change of date and a change of time of day:
+
+    | The rule has | it follows |
+    |---|---|
+    | no `BY` part, `FREQ` up to `WEEKLY` | any move |
+    | no `BY` part, `MONTHLY`/`YEARLY` | a new time, or a new date in the same month between the 1st and 28th |
+    | `BYHOUR`, `BYMINUTE`, `BYSECOND` | a new date, at the same time of day |
+    | `BYDAY` with `DAILY`/`WEEKLY` | a new time, or a move by whole weeks |
+    | `BYDAY` with `MONTHLY`/`YEARLY`; `BYMONTH`, `BYMONTHDAY`, `BYYEARDAY`, `BYWEEKNO`, `BYSETPOS` | a new time, on the same date |
+    | a date-picking part with `HOURLY`/`MINUTELY`/`SECONDLY` | no move |
+
+    An all-day/timed switch counts as a new time. Anything else throws and says
+    why. Where a single `BYDAY`, `BYMONTHDAY`, `BYMONTH`, `BYHOUR` or `BYMINUTE`
     value pins the old start, the error suggests the rule with the new start's
     value, e.g. `RRULE "FREQ=WEEKLY;COUNT=3;BYDAY=TU"` for a Monday series moved to
-    Tuesday; for the rest (a month-end start, several values per part, several
-    occurrences a day going all-day) it says to give `RRULE` in the same call.
-  - The expansion's work is bounded, weighted per `FREQ`, so a check takes well
-    under a second. A rule so sparse that the check cannot be completed within
-    it (`FREQ=MINUTELY;BYMONTH=12;BYMONTHDAY=31`, `FREQ=HOURLY;BYMONTH=1;BYMONTHDAY=1`)
-    fails closed: it throws and asks for `RRULE`, `UNTIL` and `EXDATE` in the same
-    call, or a rewrite of the object. Ordinary rules — weekly for years, daily
-    without end, every 15 minutes, weekdays 9-17 — stay far inside it.
+    Tuesday; otherwise it says to give `RRULE` in the same call. Weekly by weekday
+    at a new time, daily, and monthly by a date up to the 28th are always accepted.
+  - When the call gives `RRULE` or `RDATE`, the series is expanded up to the
+    furthest override or `EXDATE` to check they still name occurrences. That work
+    is bounded (also for a large `INTERVAL`); a rule too sparse to check within
+    the bound fails closed and asks for a rewrite of the object.
   - **To start a series later without moving it** (drop its first weeks), give
     `RRULE`, `UNTIL` and `EXDATE` explicitly in the same call, or replace the
     object: a bare `DTSTART` write moves every occurrence.
