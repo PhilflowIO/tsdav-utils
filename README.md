@@ -336,14 +336,31 @@ follow the master's `DTSTART` (see above).
     at a new time, daily, and monthly by a date up to the 28th are always accepted.
   - When the call gives `RRULE` or `RDATE`, the series is expanded up to the
     furthest override or `EXDATE` to check they still name occurrences. That work
-    is bounded (also for a large `INTERVAL`); a rule too sparse to check within
-    the bound fails closed and asks for a rewrite of the object.
+    is bounded (also for a large `INTERVAL`). Where the check cannot be made — a
+    rule too sparse or an override too far ahead to check within the bound, a
+    rule ical.js cannot expand, a zone that cannot be read — it fails closed:
+    it throws, says why, and asks for a rewrite of the object.
   - **To start a series later without moving it** (drop its first weeks), give
     `RRULE`, `UNTIL` and `EXDATE` explicitly in the same call, or replace the
     object: a bare `DTSTART` write moves every occurrence.
-  - Where a value cannot be moved it throws and says what to give instead: a UTC
-    value next to a `TZID` that is neither in a `VTIMEZONE` nor an IANA zone, a UTC
-    value in a floating series, an `RDATE` of periods.
+  - **A value that cannot be moved with its meaning kept is refused**, never
+    moved approximately. The error says why and what to give instead:
+    - a UTC value next to a `TZID` that is neither in a `VTIMEZONE` nor an IANA
+      zone, a UTC value in a floating series, an `RDATE` of periods;
+    - an `UNTIL` of the other value type than DTSTART (a date next to a timed
+      DTSTART), and an `UNTIL` at a DST change — in the repeated hour, just past
+      a skipped hour, or moved into one — where the wall clock and the order of
+      instants part, so it could let one occurrence too many or too few through;
+    - an `RDATE` or `EXDATE` of a whole day next to a timed series on a move that
+      changes the time of day (on a move by whole days it stays a date);
+    - a rule with parts RFC 5545 does not define (`X-…`, `BYEASTER`, RFC 7529
+      `RSCALE`/`SKIP`), which writing the rule again would lose;
+    - an `EXDATE` or `RECURRENCE-ID` given in UTC for an occurrence on a
+      wall-clock time a DST change skips: that instant is also the first time
+      after the gap, so which occurrence it names cannot be told;
+    - on a switch from timed to all-day, a `RECURRENCE-ID`, `EXDATE` or `RDATE`
+      at another time of day than the series (or a date already): as a date it
+      could name an occurrence it never named, or fall together with another.
 
   ```typescript
   // weekly at 09:00Z, override RECURRENCE-ID:20261012T090000Z moved to 13:00
