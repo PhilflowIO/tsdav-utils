@@ -38,6 +38,11 @@ declare const COMPONENT_TYPES: readonly ["vevent", "vtodo", "vjournal"];
  * An iCalendar component type a write can be aimed at.
  */
 type ComponentType = typeof COMPONENT_TYPES[number];
+/**
+ * The properties whose values a write can add to instead of replacing: the
+ * lists of dates, which may be spread over several lines.
+ */
+type AppendableProperty = 'EXDATE' | 'RDATE';
 interface UpdateFieldsOptions {
     floatingTime?: FloatingTime;
     /**
@@ -50,6 +55,15 @@ interface UpdateFieldsOptions {
      * taken, VEVENT before VTODO before VJOURNAL (see seriesMaster).
      */
     type?: ComponentType;
+    /**
+     * EXDATE and RDATE named here are added to: the values given join the ones
+     * the object holds, and a value already there (the same instant, or the same
+     * date) is not written twice. Without it a write of EXDATE or RDATE gives
+     * the complete list and replaces every line of it. An EXDATE added this way
+     * has to name an occurrence of the series, or the call is refused
+     * (UNMATCHED_EXDATE). Names are case-insensitive.
+     */
+    append?: readonly AppendableProperty[];
 }
 
 /**
@@ -98,6 +112,8 @@ declare function seriesMaster(calendar: ICAL.Component, type?: ComponentType): I
  * @param options.type - the component type to write into ("vevent", "vtodo",
  *   "vjournal"); by default the first type present, in that order. Throws if
  *   the object holds no component of that type, or is a vCard
+ * @param options.append - EXDATE and RDATE to add the values given to,
+ *   instead of replacing the whole list (see "Lists of dates" in the README)
  * @returns Updated iCal string ready for tsdav.updateCalendarObject()
  *
  * @example
@@ -153,7 +169,7 @@ declare function parseDateValue(raw: string): DateValue;
  *
  * See "Errors" in the README for when each code occurs.
  */
-declare const CODES: readonly ["INVALID_INPUT", "INVALID_ICALENDAR", "INVALID_TYPE", "INVALID_FLOATING_TIME", "INVALID_ABSOLUTE_TIME", "COMPONENT_NOT_FOUND", "WRONG_OBJECT_KIND", "NO_MASTER", "INVALID_VALUE", "VALUE_TYPE_MISMATCH", "ZONE_MISMATCH", "UNKNOWN_TZID", "UNSUPPORTED_VTIMEZONE", "UNKNOWN_RULE_PART", "DUPLICATE_RULE_PART", "INVALID_RULE", "RECURRENCE_ID_ON_MASTER", "SERIES_MOVE_REFUSED", "ORPHANED_EXCEPTIONS", "DST_AMBIGUOUS", "CHECK_LIMIT_EXCEEDED", "SERIES_UNVERIFIABLE"];
+declare const CODES: readonly ["INVALID_INPUT", "INVALID_ICALENDAR", "INVALID_TYPE", "INVALID_FLOATING_TIME", "INVALID_ABSOLUTE_TIME", "COMPONENT_NOT_FOUND", "WRONG_OBJECT_KIND", "NO_MASTER", "INVALID_VALUE", "VALUE_TYPE_MISMATCH", "ZONE_MISMATCH", "UNKNOWN_TZID", "UNSUPPORTED_VTIMEZONE", "UNKNOWN_RULE_PART", "DUPLICATE_RULE_PART", "INVALID_RULE", "RECURRENCE_ID_ON_MASTER", "SERIES_MOVE_REFUSED", "ORPHANED_EXCEPTIONS", "UNMATCHED_EXDATE", "DST_AMBIGUOUS", "CHECK_LIMIT_EXCEEDED", "SERIES_UNVERIFIABLE"];
 /** Every code, frozen */
 declare const UPDATE_FIELDS_ERROR_CODES: typeof CODES;
 /** A stable reason for a refusal; see UPDATE_FIELDS_ERROR_CODES */
@@ -217,4 +233,4 @@ declare function isUpdateFieldsError<C extends UpdateFieldsErrorCode = UpdateFie
     code: C;
 };
 
-export { type AbsoluteTime, type CalendarObjectInput, type ComponentType, type DateValue, type FieldUpdates, type FloatingTime, UPDATE_FIELDS_ERROR_CODES, UpdateFieldsError, type UpdateFieldsErrorCode, type UpdateFieldsErrorDetails, type UpdateFieldsOptions, type UpdateFieldsRemedy, isUpdateFieldsError, parseDateValue, seriesMaster, updateFields };
+export { type AbsoluteTime, type AppendableProperty, type CalendarObjectInput, type ComponentType, type DateValue, type FieldUpdates, type FloatingTime, UPDATE_FIELDS_ERROR_CODES, UpdateFieldsError, type UpdateFieldsErrorCode, type UpdateFieldsErrorDetails, type UpdateFieldsOptions, type UpdateFieldsRemedy, isUpdateFieldsError, parseDateValue, seriesMaster, updateFields };

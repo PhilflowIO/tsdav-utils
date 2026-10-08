@@ -209,6 +209,16 @@ function dateProperty(component: ICAL.Component, name: string): DateProperty | n
   };
 }
 
+/**
+ * Whether a property holds a list of dates or date-times, which may also be
+ * spread over several lines (EXDATE, RDATE: RFC 5545 3.8.5.1, 3.8.5.2). Such a
+ * property is one set: a write replaces all of its lines, or adds to them (see
+ * setDateValue).
+ */
+export function isDateListProperty(component: ICAL.Component, name: string): boolean {
+  return Boolean(dateProperty(component, name)?.multiValue);
+}
+
 /** Components whose date-times are anchored by DTSTART */
 const ANCHORED = new Set(['vevent', 'vtodo', 'vjournal']);
 
@@ -290,7 +300,12 @@ function wallInZone(component: ICAL.Component, upper: string, tzid: string, valu
  *
  * Updates the first occurrence (creating it when missing), which is the same
  * occurrence updatePropertyWithValue would touch, so only the encoding changes
- * and not which line is written.
+ * and not which line is written. A list of dates (EXDATE, RDATE; see
+ * isDateListProperty) is one set however many lines it is spread over, so the
+ * values given become the whole set: the first line takes them and the other
+ * lines go. With `append` they are added instead, on a line of their own,
+ * which takes the zone and value type a new line would (duplicates of values
+ * already there are dropped once the series is final; see beginSeriesEdit).
  *
  * A value without a zone is a wall-clock time. It is read in the property's
  * own TZID if it has one ("18:00" on DTEND;TZID=Europe/Berlin is 18:00 in
@@ -318,6 +333,7 @@ export function setDateValue(
   raw: string,
   floatingTime: FloatingTime = 'keep',
   absoluteTime: AbsoluteTime = 'as-given',
+  append = false,
 ): boolean {
   const shape = dateProperty(component, name);
   if (!shape) {
@@ -343,7 +359,7 @@ export function setDateValue(
     throw refuse('VALUE_TYPE_MISMATCH', `${upper} needs a date-time, not a date. Accepted forms: ${DATE_TIME_FORMS}`, upper);
   }
 
-  const existing = component.getFirstProperty(lower);
+  const existing = append && shape.multiValue ? null : component.getFirstProperty(lower);
   const anchor = anchorOf(component, lower);
   // RFC 5545 requires it for DTEND, DUE and RECURRENCE-ID; for EXDATE and
   // RDATE a different type names no occurrence of the series
@@ -417,6 +433,13 @@ export function setDateValue(
   property.resetType(type);
   if (shape.multiValue) {
     property.setValues(values);
+    if (!append) {
+      for (const other of component.getAllProperties(lower)) {
+        if (other !== property) {
+          component.removeProperty(other);
+        }
+      }
+    }
   } else {
     property.setValue(values[0]);
   }

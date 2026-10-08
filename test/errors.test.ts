@@ -43,6 +43,11 @@ const CASES = {
     { name: 'parseDateValue of a number', call: () => parseDateValue(5 as never), remedy: 'fix-value' },
     { name: 'two top-level components', call: () => updateFields(timed + timed, { SUMMARY: 'x' }), remedy: 'fix-value',
       message: /holds 2 top-level components/ },
+    { name: 'append not a list', call: () => updateFields(timed, {}, { append: 'EXDATE' as never }), remedy: 'fix-value',
+      message: /append: give a list of property names/ },
+    { name: 'append of a property that is no list of dates', remedy: 'fix-value', property: 'SUMMARY',
+      call: () => updateFields(timed, { SUMMARY: 'x' }, { append: ['SUMMARY' as never] }),
+      message: /append entry "SUMMARY": only EXDATE and RDATE/ },
   ],
   INVALID_ICALENDAR: [
     { name: 'text that does not parse', call: () => updateFields('this is not iCalendar', { SUMMARY: 'x' }),
@@ -176,6 +181,11 @@ const CASES = {
   ORPHANED_EXCEPTIONS: [
     { name: 'a new rule that drops an overridden occurrence', remedy: 'same-call', property: 'RRULE',
       call: () => updateFields(weekly(), { RRULE: 'FREQ=WEEKLY;COUNT=1' }) },
+  ],
+  UNMATCHED_EXDATE: [
+    { name: 'an added EXDATE at a time the series has no occurrence', remedy: 'fix-value', property: 'EXDATE',
+      call: () => updateFields(weekly('EXDATE:20261019T090000Z'), { EXDATE: '2026-10-26T10:00:00Z' }, { append: ['EXDATE'] }),
+      message: /^EXDATE 20261026T100000Z names no occurrence of the series/ },
   ],
   DST_AMBIGUOUS: [
     // 2026-10-25 00:30Z is 02:30 CEST, a wall clock Berlin shows twice that night

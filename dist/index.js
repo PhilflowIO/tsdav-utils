@@ -94,6 +94,8 @@ var CODES = [
   "SERIES_MOVE_REFUSED",
   /** a new RRULE or RDATE leaves an override or EXDATE naming no occurrence */
   "ORPHANED_EXCEPTIONS",
+  /** an EXDATE added with options.append names no occurrence of the series, so it would exclude nothing */
+  "UNMATCHED_EXDATE",
   /** a value sits at a DST change, where the wall clock does not name one instant */
   "DST_AMBIGUOUS",
   /** the series is too sparse, or what has to be checked too far ahead, to check within the work limit */
@@ -418,6 +420,9 @@ function dateProperty(component, name) {
     multiValue: Boolean(design.multiValue)
   };
 }
+function isDateListProperty(component, name) {
+  return Boolean(dateProperty(component, name)?.multiValue);
+}
 var ANCHORED = /* @__PURE__ */ new Set(["vevent", "vtodo", "vjournal"]);
 function anchorOf(component, name) {
   if (name === "dtstart" || UTC_ONLY.has(name) || !ANCHORED.has(component.name)) {
@@ -455,7 +460,7 @@ function wallInZone(component, upper, tzid, value) {
   }
   return { kind: "floating", jcal, local: new Date(utc * 1e3) };
 }
-function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime = "as-given") {
+function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime = "as-given", append = false) {
   const shape = dateProperty(component, name);
   if (!shape) {
     return false;
@@ -476,7 +481,7 @@ function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime 
   if (isDate && !shape.allowedTypes.includes("date")) {
     throw refuse("VALUE_TYPE_MISMATCH", `${upper} needs a date-time, not a date. Accepted forms: ${DATE_TIME_FORMS}`, upper);
   }
-  const existing = component.getFirstProperty(lower);
+  const existing = append && shape.multiValue ? null : component.getFirstProperty(lower);
   const anchor = anchorOf(component, lower);
   const why = ["exdate", "rdate"].includes(lower) ? "otherwise it names no occurrence of the series" : "RFC 5545 requires the same value type";
   if (anchor?.form === "date" && !isDate) {
@@ -521,6 +526,13 @@ function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime 
   property.resetType(type);
   if (shape.multiValue) {
     property.setValues(values);
+    if (!append) {
+      for (const other of component.getAllProperties(lower)) {
+        if (other !== property) {
+          component.removeProperty(other);
+        }
+      }
+    }
   } else {
     property.setValue(values[0]);
   }
@@ -1271,9 +1283,74 @@ function suggestedRule(rule, start, timed) {
   return changed ? parts.join(";") : null;
 }
 var SHAPING = ["dtstart", "rrule", "rdate"];
-var NO_SERIES = { finish() {
-}, render: (text) => text };
-function beginSeriesEdit(calendar, master, written, source = null) {
+function addedLines(master, added, before) {
+  return [...added].flatMap((name) => master.getAllProperties(name).filter((property) => !before.has(property)));
+}
+function dropDuplicates(master, lines) {
+  const frame = frameOf(master);
+  const keyOf = (stamp) => {
+    if (frame) {
+      try {
+        const wall = wallIn(master, stamp, frame);
+        const day = stamp.kind === "date" && frame.form !== "date" ? "day " : "";
+        return `${day}${frame.form === "date" ? dayOf(wall) : wall}`;
+      } catch {
+      }
+    }
+    return `${stamp.kind} ${stamp.tzid ?? ""} ${stamp.wall}`;
+  };
+  const keysOf = (property) => {
+    try {
+      return propertyStamps(property).map(keyOf);
+    } catch {
+      return [];
+    }
+  };
+  for (const line of lines) {
+    const seen = new Set(master.getAllProperties(line.name).filter((p) => p !== line).flatMap(keysOf));
+    const values = valuesOf(line);
+    const keys = keysOf(line);
+    const kept = values.filter((_, i) => !seen.has(keys[i]) && Boolean(seen.add(keys[i])));
+    if (!kept.length) {
+      master.removeProperty(line);
+    } else if (kept.length < values.length) {
+      line.setValues(kept);
+    }
+  }
+}
+function checkAddedExdates(master, lines) {
+  const exdates = lines.filter((line) => line.name === "exdate" && master.getAllProperties("exdate").includes(line));
+  const labels = exdates.flatMap((line) => valuesOf(line).map((v) => `EXDATE ${icalForm(String(v))}`));
+  if (!labels.length) {
+    return;
+  }
+  let found;
+  try {
+    found = occurrences(master, exdates.flatMap(propertyStamps), labels);
+  } catch (error) {
+    if (!(error instanceof SeriesTooSparse)) {
+      throw error;
+    }
+    throw new UpdateFieldsError(
+      "CHECK_LIMIT_EXCEEDED",
+      `Cannot check that the EXDATE added names an occurrence of the series: ${error.message}. Give the complete EXDATE list without append instead`,
+      { remedy: "fix-value", property: "EXDATE" }
+    );
+  }
+  const lost = labels.filter((_, i) => !found[i]);
+  if (lost.length) {
+    const series = ["dtstart", "rrule", "rdate"].flatMap((name) => master.getAllProperties(name)).map((property) => property.toICALString()).join(", ");
+    throw new UpdateFieldsError("UNMATCHED_EXDATE", `${lost.join(", ")} names no occurrence of the series (${series}), so it would exclude nothing. Give the start of the occurrence to cancel, at the time the series has it: in the zone of DTSTART, or in UTC`, { remedy: "fix-value", property: "EXDATE" });
+  }
+}
+function noSeries(master, added) {
+  const held = new Set(master.getAllProperties());
+  return {
+    finish: () => dropDuplicates(master, addedLines(master, added, held)),
+    render: (text) => text
+  };
+}
+function beginSeriesEdit(calendar, master, written, source = null, added = /* @__PURE__ */ new Set()) {
   const failClosed = (error) => {
     if (error instanceof SeriesUnverifiable) {
       const message = `Cannot check that the overrides and EXDATEs still name occurrences of the series: ${error.message}. Rewrite the whole iCalendar object instead`;
@@ -1298,7 +1375,7 @@ function beginSeriesEdit(calendar, master, written, source = null) {
     );
   };
   try {
-    const edit = startSeriesEdit(calendar, master, written, source);
+    const edit = startSeriesEdit(calendar, master, written, source, added);
     return {
       finish() {
         try {
@@ -1313,14 +1390,15 @@ function beginSeriesEdit(calendar, master, written, source = null) {
     throw failClosed(error);
   }
 }
-function startSeriesEdit(calendar, master, written, source) {
+function startSeriesEdit(calendar, master, written, source, added) {
   if (!["vevent", "vtodo", "vjournal"].includes(master.name) || master.hasProperty("recurrence-id")) {
-    return NO_SERIES;
+    return noSeries(master, added);
   }
   if (written.has("recurrence-id")) {
     throw new UpdateFieldsError("RECURRENCE_ID_ON_MASTER", "RECURRENCE-ID cannot be written on the series master: it would turn the master into an override of a single instance (RFC 5545 3.8.4.4). updateFields edits the series; to change one instance, add or edit an override component (same UID, with RECURRENCE-ID) by rewriting the whole iCalendar object", { remedy: "rewrite-object", property: "RECURRENCE-ID" });
   }
-  const replaced = new Set([...written].map((name) => master.getFirstProperty(name)).filter(Boolean));
+  const replaced = new Set([...written].flatMap((name) => isDateListProperty(master, name) ? master.getAllProperties(name) : [master.getFirstProperty(name)]).filter(Boolean));
+  const held = new Set(master.getAllProperties());
   const own = (name) => master.getAllProperties(name).filter((p) => !replaced.has(p));
   const uid = master.getFirstPropertyValue("uid");
   const overrides = (calendar?.getAllSubcomponents(master.name) ?? []).filter((c) => c !== master && c.hasProperty("recurrence-id") && c.getFirstPropertyValue("uid") === uid);
@@ -1417,6 +1495,9 @@ function startSeriesEdit(calendar, master, written, source) {
           checkMove(master, move, start.text, now.text, texts);
         }
       }
+      const appended = addedLines(master, added, held);
+      dropDuplicates(master, appended);
+      checkAddedExdates(master, appended);
       const moving = Boolean(start && now && start.text !== now.text);
       if (moving || ruleWritten) {
         const cause = moving ? "Moving DTSTART" : `Writing ${shaping.filter((n) => n !== "dtstart").map((n) => n.toUpperCase()).join(" and ")}`;
@@ -1596,6 +1677,26 @@ function componentType(type) {
   }
   return name;
 }
+var APPENDABLE = ["EXDATE", "RDATE"];
+function appendedNames(value) {
+  if (value === void 0) {
+    return /* @__PURE__ */ new Set();
+  }
+  if (!Array.isArray(value)) {
+    throw new UpdateFieldsError(
+      "INVALID_INPUT",
+      `Invalid append: give a list of property names, e.g. ["EXDATE"], not ${describe(value)}`,
+      { remedy: "fix-value" }
+    );
+  }
+  return new Set(value.map((name) => {
+    const upper = typeof name === "string" ? name.toUpperCase() : "";
+    if (!APPENDABLE.includes(upper)) {
+      throw new UpdateFieldsError("INVALID_INPUT", `Invalid append entry ${typeof name === "string" ? `"${name}"` : describe(name)}: only ${APPENDABLE.join(" and ")} can be added to`, { remedy: "fix-value", ...upper ? { property: upper } : {} });
+    }
+    return upper.toLowerCase();
+  }));
+}
 function seriesMaster(calendar, type) {
   const types = type === void 0 ? COMPONENT_TYPES : [componentType(type)];
   for (const type2 of types) {
@@ -1668,6 +1769,7 @@ function updateFields(calendarObject, fields, options = {}) {
     );
   }
   const type = options.type === void 0 ? void 0 : componentType(options.type);
+  const appended = appendedNames(options.append);
   let jcalData;
   let component;
   try {
@@ -1703,15 +1805,17 @@ function updateFields(calendarObject, fields, options = {}) {
   const entries = Object.entries(fields).sort(
     ([a], [b]) => Number(b.toLowerCase() === "dtstart") - Number(a.toLowerCase() === "dtstart")
   );
-  const written = new Set(entries.map(([key]) => key.toLowerCase()));
+  const written = new Set(entries.map(([key]) => key.toLowerCase()).filter((name) => !appended.has(name)));
+  const added = new Set(entries.map(([key]) => key.toLowerCase()).filter((name) => appended.has(name)));
   const series = beginSeriesEdit(
     component.name === "vcalendar" ? component : null,
     actualComponent,
     written,
-    icalString
+    icalString,
+    added
   );
   for (const [key, value] of entries) {
-    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime) && !setRecurValue(actualComponent, key, value, floatingTime)) {
+    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, appended.has(key.toLowerCase())) && !setRecurValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }

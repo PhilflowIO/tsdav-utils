@@ -1,5 +1,5 @@
 import ICAL from 'ical.js';
-import { frameOf, isRecurProperty, pad } from './typedValue';
+import { frameOf, isDateListProperty, isRecurProperty, pad } from './typedValue';
 import type { Anchor } from './typedValue';
 import { fieldsOf, unknownZone, wallOf, zoneOf } from './zone';
 import { UpdateFieldsError, wrapped } from './errors';
@@ -807,7 +807,99 @@ function suggestedRule(rule: ICAL.Recur, start: number, timed: boolean): string 
 /** Properties whose change decides which occurrences a series has */
 const SHAPING = ['dtstart', 'rrule', 'rdate'];
 
-const NO_SERIES = { finish() {}, render: (text: string) => text };
+/**
+ * The lines a call added to an EXDATE or RDATE list (options.append): the ones
+ * of those names the component did not hold before the write.
+ */
+function addedLines(master: ICAL.Component, added: Set<string>, before: Set<ICAL.Property>): ICAL.Property[] {
+  return [...added].flatMap((name) => master.getAllProperties(name).filter((property) => !before.has(property)));
+}
+
+/**
+ * Drop from each added line the values its list already holds, and repeats
+ * within the line: the same instant (the same date, in an all-day series),
+ * read in the series' frame, whatever zone each is written in. Where an
+ * instant cannot be read there (no DTSTART, a zone without rules) values are
+ * compared as written. A line left without values goes. Values already in the
+ * object that do not parse are left to the checks that read them.
+ */
+function dropDuplicates(master: ICAL.Component, lines: ICAL.Property[]) {
+  const frame = frameOf(master);
+  const keyOf = (stamp: Stamp): string => {
+    if (frame) {
+      try {
+        const wall = wallIn(master, stamp, frame);
+        // a whole day next to a timed series is not its midnight occurrence
+        const day = stamp.kind === 'date' && frame.form !== 'date' ? 'day ' : '';
+        return `${day}${frame.form === 'date' ? dayOf(wall) : wall}`;
+      } catch {
+        // its instant cannot be told in the series' frame: compared as written
+      }
+    }
+    return `${stamp.kind} ${stamp.tzid ?? ''} ${stamp.wall}`;
+  };
+  const keysOf = (property: ICAL.Property): string[] => {
+    try {
+      return propertyStamps(property).map(keyOf);
+    } catch {
+      return [];
+    }
+  };
+  for (const line of lines) {
+    const seen = new Set(master.getAllProperties(line.name).filter((p) => p !== line).flatMap(keysOf));
+    const values = valuesOf(line);
+    const keys = keysOf(line);
+    const kept = values.filter((_, i) => !seen.has(keys[i]) && Boolean(seen.add(keys[i])));
+    if (!kept.length) {
+      master.removeProperty(line);
+    } else if (kept.length < values.length) {
+      line.setValues(kept);
+    }
+  }
+}
+
+/**
+ * Each EXDATE value a call added has to name an occurrence of the series as it
+ * comes out of the write: one that names none excludes nothing, and the
+ * occurrence the caller meant to cancel would silently stay (most often a
+ * time given in the wrong zone). An EXDATE that replaces the whole list is the
+ * caller's to state, as any value written, and is not checked.
+ */
+function checkAddedExdates(master: ICAL.Component, lines: ICAL.Property[]) {
+  const exdates = lines.filter((line) => line.name === 'exdate' && master.getAllProperties('exdate').includes(line));
+  const labels = exdates.flatMap((line) => valuesOf(line).map((v) => `EXDATE ${icalForm(String(v))}`));
+  if (!labels.length) {
+    return;
+  }
+  let found: boolean[];
+  try {
+    found = occurrences(master, exdates.flatMap(propertyStamps), labels);
+  } catch (error) {
+    if (!(error instanceof SeriesTooSparse)) {
+      throw error;
+    }
+    throw new UpdateFieldsError('CHECK_LIMIT_EXCEEDED', 'Cannot check that the EXDATE added names an occurrence of the ' +
+      `series: ${error.message}. Give the complete EXDATE list without append instead`,
+    { remedy: 'fix-value', property: 'EXDATE' });
+  }
+  const lost = labels.filter((_, i) => !found[i]);
+  if (lost.length) {
+    const series = ['dtstart', 'rrule', 'rdate'].flatMap((name) => master.getAllProperties(name))
+      .map((property) => property.toICALString()).join(', ');
+    throw new UpdateFieldsError('UNMATCHED_EXDATE', `${lost.join(', ')} names no occurrence of the series ` +
+      `(${series}), so it would exclude nothing. Give the start of the occurrence to cancel, at the time the ` +
+      'series has it: in the zone of DTSTART, or in UTC', { remedy: 'fix-value', property: 'EXDATE' });
+  }
+}
+
+/** A write on something that is no series master: an added line is only deduplicated */
+function noSeries(master: ICAL.Component, added: Set<string>) {
+  const held = new Set(master.getAllProperties());
+  return {
+    finish: () => dropDuplicates(master, addedLines(master, added, held)),
+    render: (text: string) => text,
+  };
+}
 
 /**
  * Start a write on an event, todo or journal: reject what would corrupt the
@@ -818,10 +910,14 @@ const NO_SERIES = { finish() {}, render: (text: string) => text };
  * @param calendar - the VCALENDAR, to find the overrides in; null for a bare
  *   component, which has none
  * @param master - the component updateFields writes (see seriesMaster)
- * @param written - the lower-case property names the call writes
+ * @param written - the lower-case property names the call writes, replacing them
+ * @param added - the lower-case names of the lists the call adds to (EXDATE,
+ *   RDATE with options.append): their values join the series' after it has
+ *   moved, without the ones it holds already, and an added EXDATE has to name
+ *   an occurrence (see checkAddedExdates)
  */
 export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component, written: Set<string>,
-  source: string | null = null) {
+  source: string | null = null, added: Set<string> = new Set()) {
   // A check that cannot be completed fails closed, with what the caller can do
   const failClosed = (error: unknown) => {
     if (error instanceof SeriesUnverifiable) {
@@ -850,7 +946,7 @@ export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Co
       { remedy: 'same-call' });
   };
   try {
-    const edit = startSeriesEdit(calendar, master, written, source);
+    const edit = startSeriesEdit(calendar, master, written, source, added);
     return {
       finish() {
         try {
@@ -867,9 +963,9 @@ export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Co
 }
 
 function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component, written: Set<string>,
-  source: string | null) {
+  source: string | null, added: Set<string>) {
   if (!['vevent', 'vtodo', 'vjournal'].includes(master.name) || master.hasProperty('recurrence-id')) {
-    return NO_SERIES;
+    return noSeries(master, added);
   }
   if (written.has('recurrence-id')) {
     throw new UpdateFieldsError('RECURRENCE_ID_ON_MASTER', 'RECURRENCE-ID cannot be written on the series master: it would turn the master into an ' +
@@ -879,8 +975,11 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
   }
 
   // A property the call writes itself is the caller's, for the new series: the
-  // first line of its name is the one replaced (see setDateValue/setRecurValue)
-  const replaced = new Set([...written].map((name) => master.getFirstProperty(name)).filter(Boolean));
+  // first line of its name is the one replaced, or every line of a list of
+  // dates (see setDateValue/setRecurValue)
+  const replaced = new Set([...written].flatMap((name) => isDateListProperty(master, name)
+    ? master.getAllProperties(name) : [master.getFirstProperty(name)]).filter(Boolean));
+  const held = new Set(master.getAllProperties());
   const own = (name: string) => master.getAllProperties(name).filter((p) => !replaced.has(p));
 
   const uid = master.getFirstPropertyValue('uid');
@@ -977,6 +1076,10 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
           checkMove(master, move, start.text, now.text, texts);
         }
       }
+      // Added values are the new series': compared with the moved ones
+      const appended = addedLines(master, added, held);
+      dropDuplicates(master, appended);
+      checkAddedExdates(master, appended);
       const moving = Boolean(start && now && start.text !== now.text);
       if (moving || ruleWritten) {
         const cause = moving ? 'Moving DTSTART' : `Writing ${shaping.filter((n) => n !== 'dtstart')

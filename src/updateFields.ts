@@ -1,6 +1,6 @@
 import ICAL from 'ical.js';
 import { COMPONENT_TYPES } from './types';
-import type { CalendarObjectInput, ComponentType, FieldUpdates, UpdateFieldsOptions } from './types';
+import type { AppendableProperty, CalendarObjectInput, ComponentType, FieldUpdates, UpdateFieldsOptions } from './types';
 import { beginSeriesEdit } from './series';
 import { UpdateFieldsError } from './errors';
 import { setDateValue, setRecurValue } from './typedValue';
@@ -29,6 +29,31 @@ function componentType(type: unknown): ComponentType {
       { remedy: 'fix-value' });
   }
   return name as ComponentType;
+}
+
+const APPENDABLE: readonly AppendableProperty[] = ['EXDATE', 'RDATE'];
+
+/**
+ * The properties options.append names, lower-cased. Anything but a list of
+ * EXDATE and RDATE is refused: a name the option cannot apply to would
+ * otherwise turn an intended addition into a replacement without a word.
+ */
+function appendedNames(value: unknown): Set<string> {
+  if (value === undefined) {
+    return new Set();
+  }
+  if (!Array.isArray(value)) {
+    throw new UpdateFieldsError('INVALID_INPUT',
+      `Invalid append: give a list of property names, e.g. ["EXDATE"], not ${describe(value)}`, { remedy: 'fix-value' });
+  }
+  return new Set(value.map((name) => {
+    const upper = typeof name === 'string' ? name.toUpperCase() : '';
+    if (!(APPENDABLE as readonly string[]).includes(upper)) {
+      throw new UpdateFieldsError('INVALID_INPUT', `Invalid append entry ${typeof name === 'string' ? `"${name}"` : describe(name)}: ` +
+        `only ${APPENDABLE.join(' and ')} can be added to`, { remedy: 'fix-value', ...(upper ? { property: upper } : {}) });
+    }
+    return upper.toLowerCase();
+  }));
 }
 
 /**
@@ -102,6 +127,8 @@ export function seriesMaster(calendar: ICAL.Component, type?: ComponentType): IC
  * @param options.type - the component type to write into ("vevent", "vtodo",
  *   "vjournal"); by default the first type present, in that order. Throws if
  *   the object holds no component of that type, or is a vCard
+ * @param options.append - EXDATE and RDATE to add the values given to,
+ *   instead of replacing the whole list (see "Lists of dates" in the README)
  * @returns Updated iCal string ready for tsdav.updateCalendarObject()
  *
  * @example
@@ -155,6 +182,7 @@ export function updateFields(
       `Invalid absoluteTime "${absoluteTime}": use "as-given" or "keep-zone"`, { remedy: 'fix-value' });
   }
   const type = options.type === undefined ? undefined : componentType(options.type);
+  const appended = appendedNames(options.append);
 
   // 2. Parse iCal string to Component
   let jcalData: any;
@@ -207,13 +235,19 @@ export function updateFields(
   //    UNTIL the call does not write itself — and a write that would change
   //    the series otherwise, or orphan an override or EXDATE, is refused (see
   //    beginSeriesEdit).
+  //    EXDATE and RDATE are each one list, whatever lines it is spread over:
+  //    a write replaces all of it, or with options.append adds to it, after
+  //    the series has moved, so the values given are the new series' (see
+  //    setDateValue). Added values do not replace what the series holds, so
+  //    they are not among the properties the series edit treats as written.
   const entries = Object.entries(fields).sort(
     ([a], [b]) => Number(b.toLowerCase() === 'dtstart') - Number(a.toLowerCase() === 'dtstart'));
-  const written = new Set(entries.map(([key]) => key.toLowerCase()));
+  const written = new Set(entries.map(([key]) => key.toLowerCase()).filter((name) => !appended.has(name)));
+  const added = new Set(entries.map(([key]) => key.toLowerCase()).filter((name) => appended.has(name)));
   const series = beginSeriesEdit(component.name === 'vcalendar' ? component : null, actualComponent, written,
-    icalString);
+    icalString, added);
   for (const [key, value] of entries) {
-    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime) &&
+    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, appended.has(key.toLowerCase())) &&
         !setRecurValue(actualComponent, key, value, floatingTime)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }

@@ -42,6 +42,12 @@ export const COMPONENT_TYPES = ['vevent', 'vtodo', 'vjournal'] as const;
  */
 export type ComponentType = typeof COMPONENT_TYPES[number];
 
+/**
+ * The properties whose values a write can add to instead of replacing: the
+ * lists of dates, which may be spread over several lines.
+ */
+export type AppendableProperty = 'EXDATE' | 'RDATE';
+
 export interface UpdateFieldsOptions {
   floatingTime?: FloatingTime;
   /**
@@ -54,4 +60,13 @@ export interface UpdateFieldsOptions {
    * taken, VEVENT before VTODO before VJOURNAL (see seriesMaster).
    */
   type?: ComponentType;
+  /**
+   * EXDATE and RDATE named here are added to: the values given join the ones
+   * the object holds, and a value already there (the same instant, or the same
+   * date) is not written twice. Without it a write of EXDATE or RDATE gives
+   * the complete list and replaces every line of it. An EXDATE added this way
+   * has to name an occurrence of the series, or the call is refused
+   * (UNMATCHED_EXDATE). Names are case-insensitive.
+   */
+  append?: readonly AppendableProperty[];
 }

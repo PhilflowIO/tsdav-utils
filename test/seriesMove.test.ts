@@ -350,11 +350,20 @@ describe('moving DTSTART moves EXDATE and RDATE with the series', () => {
     expect(prop(masterOf(out), 'EXDATE')).toEqual(['EXDATE:20261026T100000Z']);
   });
 
-  it('only the EXDATE line the call replaces is left alone, the others move', () => {
+  it('an EXDATE the call writes replaces every line, none of which moves', () => {
     const lines = calendar(master('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;COUNT=4',
       'EXDATE:20261012T090000Z', 'EXDATE:20261019T090000Z'));
     const out = updateFields(lines, { DTSTART: '20261005T100000Z', EXDATE: '20261026T100000Z' });
-    expect(prop(masterOf(out), 'EXDATE')).toEqual(['EXDATE:20261026T100000Z', 'EXDATE:20261019T100000Z']);
+    expect(prop(masterOf(out), 'EXDATE')).toEqual(['EXDATE:20261026T100000Z']);
+  });
+
+  it('an EXDATE the call adds is the moved series\', the lines already there move', () => {
+    const lines = calendar(master('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;COUNT=4',
+      'EXDATE:20261012T090000Z', 'EXDATE:20261019T090000Z'));
+    const out = updateFields(lines, { DTSTART: '20261005T100000Z', EXDATE: '20261026T100000Z,20261019T100000Z' },
+      { append: ['EXDATE'] });
+    expect(prop(masterOf(out), 'EXDATE'))
+      .toEqual(['EXDATE:20261012T100000Z', 'EXDATE:20261019T100000Z', 'EXDATE:20261026T100000Z']);
   });
 
   it('an RDATE of periods is not moved: it throws and asks for RDATE', () => {
