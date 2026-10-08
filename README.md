@@ -361,7 +361,7 @@ runtime's IANA data (Intl) and placed before the components:
   A zone that never changes has a single `STANDARD` observance.
 - Before it is used, the `VTIMEZONE` is read back and compared with Intl at every
   instant the generator looked at; the tests compare it, read with this
-  library's reader and with ical.js, with Intl for 16 zones (and every zone with
+  library's reader and with ical.js, with Intl for 17 zones (and every zone with
   `VTIMEZONE_ALL_ZONES=1`).
 - The same input gives the same text, and a second write finds the `VTIMEZONE`
   and adds no other.

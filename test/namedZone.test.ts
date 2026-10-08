@@ -57,19 +57,25 @@ const refusal = (call: () => unknown): UpdateFieldsError => {
  * Kolkata), a two-hour DST (Troll), rules ended or changed (Sao Paulo 2019,
  * Moscow 2011 and 2014, New York 2007), a rule that is not "n-th weekday"
  * (Jerusalem, Friday on or after 23 March), and DST following no yearly rule
- * at all (Casablanca, Ramadan).
+ * at all (Casablanca, Gaza: Ramadan, with a one-week DST in October 2040).
  */
 const ZONES = ['Europe/Berlin', 'America/New_York', 'Australia/Sydney', 'America/Sao_Paulo', 'Europe/Moscow',
   'Asia/Kolkata', 'Asia/Kathmandu', 'Australia/Lord_Howe', 'Asia/Tokyo', 'Antarctica/Troll', 'Asia/Jerusalem',
-  'Africa/Casablanca', 'America/Santiago', 'Pacific/Chatham', 'America/St_Johns', 'Europe/Dublin'];
+  'Africa/Casablanca', 'America/Santiago', 'Pacific/Chatham', 'America/St_Johns', 'Europe/Dublin', 'Asia/Gaza'];
 
 /** Compare a generated VTIMEZONE with Intl, with both readers, at the given UTC instants */
 function mismatches(tzid: string, vtimezone: ICAL.Component, instants: number[]): string[] {
   const own = zoneOf(vtimezone, tzid)!;
   const ical = new ICAL.Timezone(vtimezone);
   const iana = zoneOf(parse(calendar()), tzid)!;
+  // a VTIMEZONE covers from its first observance on (Africa/Monrovia's from
+  // 1972, when it left local mean time)
+  const first = vtimezone.getAllSubcomponents()[0];
+  const startLocal = first.getFirstPropertyValue('dtstart') as ICAL.Time;
+  const start = Date.UTC(startLocal.year, startLocal.month - 1, startLocal.day, startLocal.hour, startLocal.minute,
+    startLocal.second) / 1000 - (first.getFirstPropertyValue('tzoffsetfrom') as ICAL.UtcOffset).toSeconds();
   const out: string[] = [];
-  for (const utc of instants) {
+  for (const utc of instants.filter((t) => t >= start)) {
     const expected = intlOffset(tzid, utc);
     if (own.offsetAt(utc) !== expected) {
       out.push(`own reader at ${new Date(utc * 1000).toISOString()}: ${own.offsetAt(utc)} != ${expected}`);
@@ -121,6 +127,8 @@ describe('generated VTIMEZONE against Intl', () => {
 
   it.each([
     ['America/Sao_Paulo', 2018, 2020], ['Europe/Moscow', 2010, 2015], ['America/New_York', 2006, 2008],
+    // DST for one week, 8 to 15 October 2000
+    ['America/Recife', 2000, 2000],
   ])('%s around its rule change (%i-%i)', (tzid, first, last) => {
     const vtimezone = generateVtimezone(tzid, first, last);
     expect(mismatches(tzid, vtimezone, samples(tzid, first, last))).toEqual([]);
@@ -172,7 +180,7 @@ describe('generated VTIMEZONE against Intl', () => {
     const vtimezone = generateVtimezone('Africa/Monrovia', 2026, 2026);
     expect(vtimezone.getFirstSubcomponent('standard')!.getFirstPropertyValue('dtstart')!.toString())
       .toBe('1972-01-07T00:44:30');
-    expect(mismatches('Africa/Monrovia', vtimezone, samples('Africa/Monrovia', 2026, 2026).filter((t) => t >= utcOf(1972, 1, 8))))
+    expect(mismatches('Africa/Monrovia', vtimezone, samples('Africa/Monrovia', 2026, 2026)))
       .toEqual([]);
   });
 
