@@ -120,11 +120,6 @@ function wallIn(component: ICAL.Component, stamp: Stamp, frame: Anchor): number 
   return own === target ? stamp.wall : convert(component, stamp.wall, own, target);
 }
 
-/** A value as an instant (naive UTC seconds); a floating or date value as its wall clock */
-function instantOf(component: ICAL.Component, stamp: Stamp): number {
-  return stamp.kind === 'tzid' ? convert(component, stamp.wall, stamp.tzid!, null) : stamp.wall;
-}
-
 /** The DTSTART of a series before and after a write, each in its own frame */
 interface Move {
   component: ICAL.Component;
@@ -177,25 +172,42 @@ function moveInstants(property: ICAL.Property, move: Move) {
 }
 
 /**
- * Move an override's own DTSTART, DTEND and DUE as far as its RECURRENCE-ID
- * moved, keeping each one's own form: by the same instant distance (in a TZID
- * read with that zone's rules), or in whole days for a date or across an
- * all-day/timed switch.
+ * A wall clock of a series' frame as a value in another value's own form:
+ * converted into its zone, or to UTC.
+ */
+function wallOut(component: ICAL.Component, wall: number, frame: Anchor, own: Stamp): number {
+  if (own.kind === 'floating' || own.kind === 'date' || frame.form === 'floating' || frame.form === 'date') {
+    return wall;
+  }
+  const from = frame.form === 'utc' ? null : frame.tzid;
+  const to = own.kind === 'utc' ? null : own.tzid!;
+  return from === to ? wall : convert(component, wall, from, to);
+}
+
+/**
+ * Move an override's own DTSTART, DTEND and DUE with the series, keeping each
+ * one's own form. A timed value moves like every value of the series: read on
+ * the series' wall clock, moved by the distance DTSTART moved, and written back
+ * in its own zone (a UTC value too, so an instance rescheduled across a DST
+ * change keeps its wall-clock time in the series' zone). A date, or any value
+ * across an all-day/timed switch, moves by the days its RECURRENCE-ID moved.
+ * In a floating series, whose wall clock has no zone to read a zoned value
+ * in, a value moves by its RECURRENCE-ID's wall-clock distance.
  */
 function moveOverrideTimes(override: ICAL.Component, before: Stamp, after: Stamp, move: Move) {
   const component = move.component;
   const days = (dayOf(after.wall) - dayOf(before.wall)) / DAY;
-  const distance = instantOf(component, after) - instantOf(component, before);
+  const floating = move.from.form === 'floating' || move.to.form === 'floating';
   for (const name of ['dtstart', 'dtend', 'due']) {
     for (const property of override.getAllProperties(name)) {
       const [stamp] = propertyStamps(property);
       let wall: number;
       if (stamp.kind === 'date' || byDays(move)) {
         wall = stamp.wall + days * DAY;
-      } else if (stamp.kind === 'tzid') {
-        wall = convert(component, convert(component, stamp.wall, stamp.tzid!, null) + distance, null, stamp.tzid!);
+      } else if (floating || stamp.kind === 'floating') {
+        wall = stamp.wall + (after.wall - before.wall);
       } else {
-        wall = stamp.wall + distance;
+        wall = wallOut(component, moved(stamp, move), move.to, stamp);
       }
       const type = property.type;
       property.resetType(type);

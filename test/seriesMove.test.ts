@@ -155,6 +155,27 @@ describe('moving DTSTART moves the overrides with the series', () => {
     ]);
   });
 
+  it('an override rescheduled across a DST change keeps its wall-clock time', () => {
+    // RID Sat 24 Oct 09:00 (CEST), rescheduled to Mon 26 Oct 09:00 (CET); a
+    // week earlier is Mon 19 Oct 09:00, not 10:00 as a real-time shift gives
+    for (const vtimezone of [true, false]) {
+      const out = updateFields(calendar(...(vtimezone ? [BERLIN] : []),
+        master('DTSTART;TZID=Europe/Berlin:20261017T090000', 'RRULE:FREQ=WEEKLY;COUNT=3'),
+        override('RECURRENCE-ID;TZID=Europe/Berlin:20261024T090000', 'DTSTART;TZID=Europe/Berlin:20261026T090000'),
+      ), { DTSTART: '2026-10-10T09:00:00' });
+      expect(prop(overridesOf(out)[0], 'DTSTART')).toEqual(['DTSTART;TZID=Europe/Berlin:20261019T090000']);
+    }
+  });
+
+  it('an override written in UTC follows the series\' wall clock as well', () => {
+    // 26 Oct 09:00 CET = 08:00Z; a week earlier 09:00 CEST = 07:00Z
+    const out = updateFields(calendar(BERLIN,
+      master('DTSTART;TZID=Europe/Berlin:20261017T090000', 'RRULE:FREQ=WEEKLY;COUNT=3'),
+      override('RECURRENCE-ID;TZID=Europe/Berlin:20261024T090000', 'DTSTART:20261026T080000Z'),
+    ), { DTSTART: '2026-10-10T09:00:00' });
+    expect(prop(overridesOf(out)[0], 'DTSTART')).toEqual(['DTSTART:20261019T070000Z']);
+  });
+
   it('a TZID series without its VTIMEZONE moves a RECURRENCE-ID in the same zone', () => {
     const out = updateFields(calendar(
       master('DTSTART;TZID=Europe/Berlin:20261019T090000', 'RRULE:FREQ=WEEKLY;COUNT=3'),

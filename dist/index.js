@@ -536,9 +536,6 @@ function wallIn(component, stamp, frame) {
   const target = frame.form === "utc" ? null : frame.tzid;
   return own === target ? stamp.wall : convert(component, stamp.wall, own, target);
 }
-function instantOf(component, stamp) {
-  return stamp.kind === "tzid" ? convert(component, stamp.wall, stamp.tzid, null) : stamp.wall;
-}
 var byDays = (move) => move.from.form === "date" || move.to.form === "date";
 function moved(stamp, move) {
   const wall = wallIn(move.component, stamp, move.from);
@@ -568,20 +565,28 @@ function moveInstants(property, move) {
   }
   writeInstants(property, propertyStamps(property).map((stamp) => moved(stamp, move)), move.to);
 }
+function wallOut(component, wall, frame, own) {
+  if (own.kind === "floating" || own.kind === "date" || frame.form === "floating" || frame.form === "date") {
+    return wall;
+  }
+  const from = frame.form === "utc" ? null : frame.tzid;
+  const to = own.kind === "utc" ? null : own.tzid;
+  return from === to ? wall : convert(component, wall, from, to);
+}
 function moveOverrideTimes(override, before, after, move) {
   const component = move.component;
   const days = (dayOf(after.wall) - dayOf(before.wall)) / DAY;
-  const distance = instantOf(component, after) - instantOf(component, before);
+  const floating = move.from.form === "floating" || move.to.form === "floating";
   for (const name of ["dtstart", "dtend", "due"]) {
     for (const property of override.getAllProperties(name)) {
       const [stamp] = propertyStamps(property);
       let wall;
       if (stamp.kind === "date" || byDays(move)) {
         wall = stamp.wall + days * DAY;
-      } else if (stamp.kind === "tzid") {
-        wall = convert(component, convert(component, stamp.wall, stamp.tzid, null) + distance, null, stamp.tzid);
+      } else if (floating || stamp.kind === "floating") {
+        wall = stamp.wall + (after.wall - before.wall);
       } else {
-        wall = stamp.wall + distance;
+        wall = wallOut(component, moved(stamp, move), move.to, stamp);
       }
       const type = property.type;
       property.resetType(type);
