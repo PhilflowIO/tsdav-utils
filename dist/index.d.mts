@@ -274,7 +274,9 @@ type ZoneSource = string | ICAL.Component;
 /**
  * The conversions of a TZID: by the object's VTIMEZONE of that TZID when
  * `source` (the object's text, or any component of it, or a VTIMEZONE) has
- * one, else by the IANA zone of that name. Null when it is neither.
+ * one, else by the IANA zone of that name, whose `tzid` is then spelled as
+ * updateFields writes it ("europe/berlin" is "Europe/Berlin"). Null when it
+ * is neither.
  *
  * @throws {UpdateFieldsError} INVALID_ICALENDAR for a text that does not parse;
  *   UNSUPPORTED_VTIMEZONE (on a conversion) for a VTIMEZONE whose rules
@@ -342,7 +344,7 @@ interface ExpansionResult {
 interface ExpandOptions {
     /** the work budget to spend (see createRecurrenceBudget); shared across calls if the same object is passed */
     budget: RecurrenceBudget;
-    /** occurrences whose original start lies before this are not returned (exclusive end of the range) */
+    /** the end of the range, exclusive: occurrences whose original start lies at or after this are not returned */
     until: Date | string;
     /** occurrences whose original start lies before this are skipped (default: all from DTSTART) */
     from?: Date | string;

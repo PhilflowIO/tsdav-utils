@@ -1702,50 +1702,65 @@ var weekdayAt = (wall) => new Date(wall * 1e3).getUTCDay();
 var firstOnOrAfter = (year, month, from, weekday) => from + (weekday - weekdayAt(wallOf(year, month, from)) + 7) % 7;
 var firstOnOrAfterBack = (year, from, weekday) => from + (weekday - weekdayAt(wallOf(year + 1, 1, 1) + from * DAY3) + 7) % 7;
 var range = (from) => Array.from({ length: 7 }, (_, i) => from + i).join(",");
-function yearlyRule(onsets) {
-  const [first] = onsets;
-  if (onsets.some((o) => o.time !== first.time || o.change.from !== first.change.from || o.change.to !== first.change.to)) {
-    return null;
+function rulesFor(o) {
+  const out = [];
+  const month = `BYMONTH=${o.month}`;
+  const wd = WEEKDAYS2[o.weekday];
+  if (o.day + 7 > daysIn(o.year, o.month)) {
+    out.push(`${month};BYDAY=-1${wd}`);
   }
-  const sameWeekday = onsets.every((o) => o.weekday === first.weekday);
-  const wd = WEEKDAYS2[first.weekday];
-  if (onsets.every((o) => o.month === first.month)) {
-    const month = `BYMONTH=${first.month}`;
-    if (sameWeekday) {
-      if (onsets.every((o) => o.day + 7 > daysIn(o.year, o.month))) {
-        return `${month};BYDAY=-1${wd}`;
-      }
-      const shortest = first.month === 2 ? 28 : daysIn(2001, first.month);
-      const fits = (from) => onsets.every((o) => firstOnOrAfter(o.year, o.month, from, o.weekday) === o.day);
-      for (const from of [1, 8, 15, 22]) {
-        if (fits(from)) {
-          return `${month};BYDAY=${(from + 6) / 7}${wd}`;
-        }
-      }
-      for (let from = 1; from + 6 <= shortest; from++) {
-        if (fits(from)) {
-          return `${month};BYMONTHDAY=${range(from)};BYDAY=${wd}`;
-        }
-      }
-    }
-    if (onsets.every((o) => o.day === first.day)) {
-      return `${month};BYMONTHDAY=${first.day}`;
+  for (const from of [1, 8, 15, 22]) {
+    if (firstOnOrAfter(o.year, o.month, from, o.weekday) === o.day) {
+      out.push(`${month};BYDAY=${(from + 6) / 7}${wd}`);
     }
   }
-  if (sameWeekday && onsets.every((o) => o.month >= 3)) {
-    const latest = Math.min(...onsets.map((o) => o.back));
-    for (let from = latest - 6; from <= latest && from + 6 <= -1; from++) {
-      if (onsets.every((o) => firstOnOrAfterBack(o.year, from, o.weekday) === o.back)) {
-        return `BYYEARDAY=${range(from)};BYDAY=${wd}`;
+  const shortest = o.month === 2 ? 28 : daysIn(2001, o.month);
+  for (let from = Math.max(1, o.day - 6); from <= o.day && from + 6 <= shortest; from++) {
+    if (firstOnOrAfter(o.year, o.month, from, o.weekday) === o.day) {
+      out.push(`${month};BYMONTHDAY=${range(from)};BYDAY=${wd}`);
+    }
+  }
+  out.push(`${month};BYMONTHDAY=${o.day}`);
+  if (o.month >= 3) {
+    for (let from = o.back - 6; from <= o.back && from + 6 <= -1; from++) {
+      if (firstOnOrAfterBack(o.year, from, o.weekday) === o.back) {
+        out.push(`BYYEARDAY=${range(from)};BYDAY=${wd}`);
       }
     }
   }
-  return null;
+  return out;
 }
+var signature = (o) => `${o.time}|${o.change.from}|${o.change.to}`;
+var RuleSet = class {
+  constructor() {
+    this.candidates = null;
+    this.sig = "";
+  }
+  /** the rules if `onset` is added too, without adding it; empty when none */
+  with(onset) {
+    if (this.candidates === null) {
+      return rulesFor(onset);
+    }
+    if (signature(onset) !== this.sig) {
+      return [];
+    }
+    const own = new Set(rulesFor(onset));
+    return this.candidates.filter((rule) => own.has(rule));
+  }
+  add(onset, rules) {
+    this.sig = signature(onset);
+    this.candidates = rules;
+  }
+};
 function runsOf(onsets) {
   const byYear = /* @__PURE__ */ new Map();
   for (const onset of onsets) {
-    byYear.set(onset.year, [...byYear.get(onset.year) ?? [], onset]);
+    const list = byYear.get(onset.year);
+    if (list) {
+      list.push(onset);
+    } else {
+      byYear.set(onset.year, [onset]);
+    }
   }
   const pair = (year) => {
     const list = byYear.get(year);
@@ -1758,8 +1773,10 @@ function runsOf(onsets) {
   const runs = [];
   const inRun = /* @__PURE__ */ new Set();
   for (let i = 0; i < years.length; ) {
-    let ups = [];
-    let downs = [];
+    const ups = [];
+    const downs = [];
+    const upRules = new RuleSet();
+    const downRules = new RuleSet();
     let rules = null;
     let j = i;
     for (; j < years.length; j++) {
@@ -1767,14 +1784,16 @@ function runsOf(onsets) {
       if (!p || j > i && years[j] !== years[j - 1] + 1) {
         break;
       }
-      const upRule = yearlyRule([...ups, p.up]);
-      const downRule = yearlyRule([...downs, p.down]);
-      if (!upRule || !downRule) {
+      const up = upRules.with(p.up);
+      const down = downRules.with(p.down);
+      if (!up.length || !down.length) {
         break;
       }
-      ups = [...ups, p.up];
-      downs = [...downs, p.down];
-      rules = [upRule, downRule];
+      upRules.add(p.up, up);
+      downRules.add(p.down, down);
+      ups.push(p.up);
+      downs.push(p.down);
+      rules = [up[0], down[0]];
     }
     if (rules && ups.length >= MIN_RUN) {
       runs.push({ ups, downs, upRule: rules[0], downRule: rules[1] });
@@ -1890,14 +1909,9 @@ function observancesOf(found, rules, lastYear) {
     });
   }
   if (final) {
-    out.push({
-      kind: "STANDARD",
-      from: final.change.from,
-      to: final.change.to,
-      start: final.local,
-      at: final.change.at,
-      lines: []
-    });
+    for (const kind of ["STANDARD", "DAYLIGHT"]) {
+      out.push({ kind, from: final.change.from, to: final.change.to, start: final.local, at: final.change.at, lines: [] });
+    }
   }
   return out;
 }
@@ -1931,7 +1945,15 @@ function vtimezoneFor(tzid, firstYear, lastYear) {
   }
   const local = wallOf(firstYear - 1, 1, 1);
   const start = local - zone2.offsetAt(local);
-  let endYear = Math.max(LAST_SCANNED_YEAR, lastYear + 2);
+  void lastYear;
+  if (firstYear < 1800 && zone2.offsetAt(wallOf(firstYear, 1, 1)) % 60 !== 0) {
+    throw new UpdateFieldsError(
+      "UNSUPPORTED_VTIMEZONE",
+      `"${tzid}" was on local mean time in ${firstYear}, an offset in seconds that iCalendar readers cannot read: give values in UTC, or from the year standard time began`,
+      { remedy: "fix-value" }
+    );
+  }
+  let endYear = LAST_SCANNED_YEAR;
   let found;
   for (; ; ) {
     const endLocal = wallOf(endYear + 1, 1, 1);
@@ -1967,7 +1989,11 @@ function generateVtimezone(tzid, range2) {
   if (typeof tzid !== "string" || !Number.isInteger(from) || !Number.isInteger(to) || to < from) {
     throw new UpdateFieldsError("INVALID_INPUT", "generateVtimezone takes an IANA zone name and { from, to? }, integer years with from <= to", { remedy: "fix-value" });
   }
-  return vtimezoneFor(tzid, from, to).toString();
+  const name = ianaZoneName(tzid);
+  if (!name) {
+    throw new UpdateFieldsError("UNKNOWN_TZID", `"${tzid}" is no IANA time zone`, { remedy: "fix-value" });
+  }
+  return vtimezoneFor(name, from, to).toString();
 }
 function valuesIn(calendar, tzid) {
   const walls = [];
@@ -2259,8 +2285,10 @@ function updateFields(calendarObject, fields, options = {}) {
     if (!start2 || !end) {
       return [];
     }
-    const length = start2.frame === end.frame ? end.wall - start2.wall : start2.utc !== null && end.utc !== null ? end.utc - start2.utc : null;
-    return length === null ? [] : [{ name, length }];
+    if (start2.frame === end.frame) {
+      return [{ name, length: end.wall - start2.wall, elapsed: false }];
+    }
+    return start2.utc !== null && end.utc !== null ? [{ name, length: end.utc - start2.utc, elapsed: true }] : [];
   }) : [];
   for (const [key, value] of entries) {
     if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, zone2) && !setRecurValue(actualComponent, key, value, floatingTime, zone2)) {
@@ -2268,8 +2296,9 @@ function updateFields(calendarObject, fields, options = {}) {
     }
   }
   const start = ends.length ? momentOf(actualComponent, "dtstart") : null;
-  for (const { name, length } of start ? ends : []) {
-    setDateValue(actualComponent, name, wallText(start.wall + length), floatingTime, absoluteTime, zone2);
+  for (const { name, length, elapsed } of start ? ends : []) {
+    const value = elapsed && start.utc !== null ? `${wallText(start.utc + length)}Z` : wallText(start.wall + length);
+    setDateValue(actualComponent, name, value, floatingTime, absoluteTime, zone2);
   }
   series.finish();
   if (zone2 && isEvent && ["dtstart", "dtend", "due"].some((name) => written.has(name))) {
@@ -2358,8 +2387,9 @@ function resolveZone(tzid, source) {
       return converter(tzid, vtimezoneZone(vtimezone), "vtimezone");
     }
   }
-  const zone2 = ianaZone(tzid);
-  return zone2 ? converter(tzid, zone2, "iana") : null;
+  const name = ianaZoneName(tzid);
+  const zone2 = name ? ianaZone(name) : null;
+  return zone2 ? converter(name, zone2, "iana") : null;
 }
 function resolvePropertyZone(property) {
   const tzid = property.getParameter("tzid");
@@ -2433,8 +2463,8 @@ function endOf(master, frame, startWall) {
     const property = master.getFirstProperty(name);
     if (property) {
       const [end] = propertyStamps(property);
-      const length = wallIn(master, end, frame) - start.wall;
-      const wall = startWall + length;
+      const length2 = wallIn(master, end, frame) - start.wall;
+      const wall = startWall + length2;
       if (end.kind === "tzid" && frame.form === "tzid" && end.tzid !== frame.tzid) {
         const instant = zoneOf(master, frame.tzid).toUtc(wall);
         const own = zoneOf(master, end.tzid);
@@ -2443,14 +2473,30 @@ function endOf(master, frame, startWall) {
       return timeIn(master, wall, frameKind(frame), frameTzid(frame));
     }
   }
-  const duration = master.getFirstPropertyValue("duration");
-  if (duration && typeof duration.toSeconds === "function") {
-    const days = (duration.weeks ?? 0) * 7 + (duration.days ?? 0);
-    const seconds = (duration.hours ?? 0) * 3600 + (duration.minutes ?? 0) * 60 + (duration.seconds ?? 0);
-    const sign = duration.isNegative ? -1 : 1;
-    return timeIn(master, startWall + sign * (days * 86400 + seconds), frameKind(frame), frameTzid(frame));
+  const length = durationOf(master);
+  return length === null ? null : timeIn(master, startWall + length, frameKind(frame), frameTzid(frame));
+}
+function durationOf(component) {
+  const duration = component.getFirstPropertyValue("duration");
+  if (!duration || typeof duration.toSeconds !== "function") {
+    return null;
   }
-  return null;
+  const days = (duration.weeks ?? 0) * 7 + (duration.days ?? 0);
+  const seconds = (duration.hours ?? 0) * 3600 + (duration.minutes ?? 0) * 60 + (duration.seconds ?? 0);
+  return (duration.isNegative ? -1 : 1) * (days * 86400 + seconds);
+}
+function overrideEnd(master, frame, override, start) {
+  const own = override.getFirstProperty("dtend") ?? override.getFirstProperty("due");
+  if (own) {
+    return ownTime(master, own);
+  }
+  let length = durationOf(override);
+  if (length === null) {
+    const dtstart = master.getFirstProperty("dtstart");
+    const end = master.getFirstProperty("dtend") ?? master.getFirstProperty("due");
+    length = end ? wallIn(master, propertyStamps(end)[0], frame) - propertyStamps(dtstart)[0].wall : durationOf(master);
+  }
+  return length === null ? null : timeIn(master, start.wall + length, start.kind, start.tzid ?? null);
 }
 function expandOccurrences(calendarObject, options) {
   const { budget, until } = options ?? {};
@@ -2528,11 +2574,11 @@ function expandOccurrences(calendarObject, options) {
     const recurrenceId = timeIn(master, wall, frameKind(frame), frameTzid(frame));
     if (override) {
       const own = override.getFirstProperty("dtstart");
-      const ownEnd = override.getFirstProperty("dtend") ?? override.getFirstProperty("due");
+      const start2 = own ? propertyStamps(own)[0] : { wall, kind: frameKind(frame), ...frame.form === "tzid" ? { tzid: frame.tzid } : {} };
       occurrences2.push({
         recurrenceId,
         start: own ? ownTime(master, own) : recurrenceId,
-        end: ownEnd ? ownTime(master, ownEnd) : endOf(master, frame, wall),
+        end: overrideEnd(master, frame, override, start2),
         overridden: true
       });
     } else {
