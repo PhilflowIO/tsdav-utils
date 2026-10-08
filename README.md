@@ -169,6 +169,11 @@ Updates arbitrary properties on a calendar/todo/contact object.
 
 - `string`: Updated iCal string ready for `tsdav.updateCalendarObject()`
 
+#### Throws
+
+- `UpdateFieldsError` with a stable `code` when the call asks for something the
+  object cannot take; nothing is written. See [Errors](#errors).
+
 #### Example
 
 ```typescript
@@ -406,6 +411,62 @@ follow the master's `DTSTART` (see above).
 - The component type is chosen first (`VEVENT`, then `VTODO`, then `VJOURNAL`),
   since a CalDAV object holds one type (RFC 4791 4.1). Name it explicitly with
   `updateFields(obj, fields, { type: 'vtodo' })` or `seriesMaster(calendar, 'vtodo')`.
+
+## Errors
+
+Every refusal of `updateFields`, `seriesMaster` and `parseDateValue` throws an
+`UpdateFieldsError`: an `Error` (so `instanceof Error` holds) with a stable
+`code`, the `property` it is about where there is one (upper-cased: `"DTEND"`,
+`"RRULE"`), and a `suggestion` where the library can name a value that would be
+accepted. Branch on `code`, not on the message: the messages explain what to
+give instead and may be reworded. Anything else thrown is a plain `Error`, a
+failure of the library rather than of the call.
+
+```typescript
+import { updateFields, isUpdateFieldsError } from '@philflow/tsdav-utils';
+
+function move(data: string, start: string) {
+  try {
+    return { ok: true, data: updateFields(data, { DTSTART: start }) };
+  } catch (error) {
+    if (!isUpdateFieldsError(error)) throw error;  // a library failure, not the caller's mistake
+    // error.suggestion: for SERIES_MOVE_REFUSED, the RRULE to give with the new start
+    return { ok: false, code: error.code, message: error.message, suggestion: error.suggestion };
+  }
+}
+```
+
+`isUpdateFieldsError(error, code?)` checks the name and code rather than the
+class, so it also holds when both the ESM and the CommonJS build are loaded.
+`UPDATE_FIELDS_ERROR_CODES` lists every code; the type `UpdateFieldsErrorCode`
+is their union.
+
+| Code | When |
+|---|---|
+| `INVALID_INPUT` | `calendarObject` is neither a string nor an object with a `data` string |
+| `INVALID_ICALENDAR` | the iCalendar or vCard text does not parse |
+| `INVALID_TYPE` | `options.type` (or `seriesMaster`'s type) is not `vevent`, `vtodo` or `vjournal` |
+| `INVALID_FLOATING_TIME` | `options.floatingTime` is not `keep` or `local` |
+| `COMPONENT_NOT_FOUND` | the object holds no component of the type asked for, is a bare component of another type, or is a vCard |
+| `NO_MASTER` | several instances with `RECURRENCE-ID` and no master, so which one is meant cannot be told |
+| `INVALID_VALUE` | a date or date-time value (also a rule's `UNTIL`) does not parse, or names no real date, time or UTC offset |
+| `VALUE_TYPE_MISMATCH` | a date where a date-time is needed or the other way round: next to DTSTART, on a property that takes no date, or mixed in one list |
+| `ZONE_MISMATCH` | a value lacks the zone it needs (next to a UTC DTSTART, on `DTSTAMP`/`CREATED`/...), has one it must not have (`UNTIL` of a floating series), or a list mixes both |
+| `UNKNOWN_TZID` | a TZID whose rules are needed has no `VTIMEZONE` in the object and is no IANA zone |
+| `UNSUPPORTED_VTIMEZONE` | a `VTIMEZONE` in the object repeats more often than monthly, which no time zone does |
+| `UNKNOWN_RULE_PART` | a rule given has a part RFC 5545 3.3.10 does not define, `RSCALE`/`SKIP`, or an `RRULE:` prefix |
+| `DUPLICATE_RULE_PART` | a rule given names a part twice |
+| `INVALID_RULE` | a rule given is otherwise invalid: no `FREQ`, a value out of range, `COUNT` with `UNTIL`, another combination RFC 5545 rules out |
+| `RECURRENCE_ID_ON_MASTER` | `RECURRENCE-ID` written on the series master |
+| `SERIES_MOVE_REFUSED` | a DTSTART move the series cannot follow exactly: the rule pins the old start (`suggestion` holds the rule to give, when there is one), or an existing `UNTIL`, `EXDATE`, `RDATE` or override cannot move with it |
+| `ORPHANS_OVERRIDES` | a new `RRULE` or `RDATE` leaves an override or `EXDATE` naming no occurrence |
+| `DST_AMBIGUOUS` | a value of the series sits at a DST change, where the wall clock does not name one instant |
+| `CHECK_LIMIT_EXCEEDED` | the series is too sparse, or the override or `EXDATE` furthest ahead too far, to check within the work limit |
+| `SERIES_UNVERIFIABLE` | whether the overrides and `EXDATE`s still name occurrences cannot be checked at all (no DTSTART, a rule ical.js cannot expand) |
+
+A move refused for a reason with its own code keeps that code: an `UNTIL` in
+the repeated hour of a DST change is `DST_AMBIGUOUS`, a zone that cannot be
+resolved `UNKNOWN_TZID`, not `SERIES_MOVE_REFUSED`.
 
 ## What This Library Does NOT Do
 
