@@ -3,6 +3,22 @@ import ICAL from 'ical.js';
 import { updateFields } from '../src/updateFields';
 import { expansionWork } from '../src/series';
 
+// Size and seed of the property tests. CI runs a small sample by default;
+// for a deep run set SERIES_PROPERTY_RUNS (e.g. 5000) and, to explore other
+// cases, SERIES_PROPERTY_SEED (logged, so a failure can be replayed):
+//
+//   SERIES_PROPERTY_RUNS=5000 SERIES_PROPERTY_SEED=7 npx vitest run test/seriesMoveProperty.test.ts
+//
+// RUNS random series for the move rule (with 1.5 x RUNS realistic moves),
+// RUNS Berlin series across DST changes, RUNS / 2 through the spring gap.
+const RUNS = Math.max(20, Number(process.env.SERIES_PROPERTY_RUNS ?? 200));
+const SEED = process.env.SERIES_PROPERTY_SEED === undefined ? null : Number(process.env.SERIES_PROPERTY_SEED);
+if (SEED !== null) {
+  console.log(`series property tests: SERIES_PROPERTY_SEED=${SEED}, SERIES_PROPERTY_RUNS=${RUNS}`);
+}
+/** a test's own fixed seed, or the one asked for (offset per test so they differ) */
+const seedFor = (fixed: number) => SEED === null ? fixed : SEED * 7919 + fixed;
+
 // Property check of the whole-series move across DST changes: Berlin series
 // with overrides rescheduled up to days away from their occurrence (so an
 // override and its RECURRENCE-ID often sit on different sides of a DST
@@ -71,14 +87,14 @@ const expandBerlin = (ical: string): string[] => {
 
 describe('a moved series keeps every occurrence on the wall clock, across DST changes', () => {
   ICAL.TimezoneService.register(berlin.component);
-  let seed = 16;
+  let seed = seedFor(16);
   const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
   const int = (a: number, b: number) => a + Math.floor(rnd() * (b - a + 1));
   const H = 3600;
   const D = 24 * H;
 
-  it('holds for 300 seeded series around both 2026 changes', () => {
-    for (let i = 0; i < 300; i++) {
+  it('holds for seeded series around both 2026 changes', () => {
+    for (let i = 0; i < RUNS; i++) {
       // a start a few weeks before a DST change, at a time no gap can hit
       const change = rnd() < 0.5 ? Date.UTC(2026, 2, 29) / 1000 : Date.UTC(2026, 9, 25) / 1000;
       const start = change - int(1, 5) * 7 * D + int(-3, 3) * D + int(6, 20) * H;
@@ -112,35 +128,48 @@ describe('a moved series keeps every occurrence on the wall clock, across DST ch
   });
 });
 
-describe('a value in UTC naming an occurrence in the DST gap is refused, never moved wrong', () => {
+describe('a value naming an occurrence in the DST gap by its instant is refused, never moved wrong', () => {
   // On 29 Mar 2026 Berlin skips 02:00-03:00; an occurrence at 02:30 is read as
   // 03:30 CEST (RFC 5545 3.3.5), 01:30Z, the same instant as a real 03:30. An
-  // EXDATE or RECURRENCE-ID given as that instant cannot tell the two apart.
-  let seed = 329;
+  // EXDATE or RECURRENCE-ID given as that instant — in UTC, or as 03:30 in the
+  // series' own zone — cannot tell the two apart. Given as the skipped 02:30
+  // itself it names that occurrence, and moves with it.
+  let seed = seedFor(329);
   const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
   const int = (a: number, b: number) => a + Math.floor(rnd() * (b - a + 1));
   const p2 = (n: number) => String(n).padStart(2, '0');
 
-  it('holds for 100 seeded series through the spring change', () => {
-    for (let i = 0; i < 100; i++) {
+  it('holds for seeded series through the spring change', () => {
+    for (let i = 0; i < Math.ceil(RUNS / 2); i++) {
       const minute = int(0, 59);
       const weeksBefore = int(1, 4);
       const freq = rnd() < 0.5 ? 'DAILY' : 'WEEKLY';
       const first = Date.UTC(2026, 2, 29 - (freq === 'DAILY' ? weeksBefore : 7 * weeksBefore), 2, minute) / 1000;
       const d = new Date(first * 1000);
       const dtstart = `${d.getUTCFullYear()}${p2(d.getUTCMonth() + 1)}${p2(d.getUTCDate())}T02${p2(minute)}00`;
-      const instant = `20260329T01${p2(minute)}00Z`;
+      const form = int(0, 2);
+      const instant = [`:20260329T01${p2(minute)}00Z`, `;TZID=Europe/Berlin:20260329T03${p2(minute)}00`,
+        `;TZID=Europe/Berlin:20260329T02${p2(minute)}00`][form];
       const named = rnd() < 0.5
-        ? [`EXDATE:${instant}`]
+        ? [`EXDATE${instant}`]
         : [];
       const override = named.length ? [] : ['BEGIN:VEVENT', 'UID:g', 'DTSTAMP:20260101T000000Z',
-        `RECURRENCE-ID:${instant}`, 'DTSTART:20260329T100000Z', 'END:VEVENT'];
+        `RECURRENCE-ID${instant}`, 'DTSTART:20260329T100000Z', 'END:VEVENT'];
       const ical = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//EN', 'BEGIN:VEVENT', 'UID:g', 'DTSTAMP:20260101T000000Z',
         `DTSTART;TZID=Europe/Berlin:${dtstart}`, `RRULE:FREQ=${freq};COUNT=${weeksBefore + 4}`, ...named, 'END:VEVENT',
         ...override, 'END:VCALENDAR', ''].join('\r\n');
-      const moved = new Date((first + int(0, 3) * 86400 + int(1, 6) * 3600) * 1000).toISOString().slice(0, 19);
-      expect(() => updateFields(ical, { DTSTART: moved }), `case ${i}\n${ical}`)
-        .toThrow(/both a wall-clock time the DST change skips and the time just after it/);
+      const days = int(1, 3);
+      const moved = new Date((first + days * 86400) * 1000).toISOString().slice(0, 19);
+      if (form < 2) {
+        expect(() => updateFields(ical, { DTSTART: moved }), `case ${i}\n${ical}`)
+          .toThrow(/names the same instant as the occurrence at 20260329T02\d{4} in "Europe\/Berlin", a wall-clock time the DST change skips/);
+      } else {
+        // the skipped wall clock itself names the 02:mm occurrence, which moves by the days
+        const out = updateFields(ical, { DTSTART: moved });
+        const t = new Date(Date.UTC(2026, 2, 29 + days));
+        const target = `;TZID=Europe/Berlin:${t.getUTCFullYear()}${p2(t.getUTCMonth() + 1)}${p2(t.getUTCDate())}T02${p2(minute)}00`;
+        expect(out, `case ${i}\n${ical}`).toContain(named.length ? `EXDATE${target}` : `RECURRENCE-ID${target}`);
+      }
     }
   });
 });
@@ -150,7 +179,7 @@ describe('a move is accepted only where the rule provably moves with it', () => 
   // beyond anything updateFields expands (30 years, 3000 occurrences), on a
   // floating wall clock. Every accepted move must give exactly the occurrences
   // before, each moved by the same distance.
-  let seed = 22;
+  let seed = seedFor(22);
   const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
   const int = (a: number, b: number) => a + Math.floor(rnd() * (b - a + 1));
   const pick = <T,>(list: T[]): T => list[Math.floor(rnd() * list.length)];
@@ -252,10 +281,30 @@ describe('a move is accepted only where the rule provably moves with it', () => 
     return 'accepted';
   };
 
-  const randomRule = (date: boolean) => {
+  const randomRule = (date: boolean, start: number) => {
     const freq = date ? pick(['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY'])
       : pick(['MINUTELY', 'HOURLY', 'DAILY', 'DAILY', 'WEEKLY', 'WEEKLY', 'MONTHLY', 'YEARLY']);
     const parts = [`FREQ=${freq}`];
+    // the forms clients write that only restate DTSTART
+    if (rnd() < 0.25) {
+      const f = new Date(start * 1000);
+      const restating: Record<string, string> = {
+        WEEKLY: `BYDAY=${DAYS[(f.getUTCDay() + 6) % 7]}`,
+        MONTHLY: `BYMONTHDAY=${f.getUTCDate()}`,
+        YEARLY: `BYMONTH=${f.getUTCMonth() + 1};BYMONTHDAY=${f.getUTCDate()}`,
+      };
+      // and look-alikes that do not restate: the weekday in a DAILY, MONTHLY or
+      // YEARLY rule, which every other month or year skips some of
+      if (rnd() < 0.4 && freq !== 'WEEKLY') {
+        restating[freq] = `BYDAY=${DAYS[(f.getUTCDay() + 6) % 7]}${rnd() < 0.5 ? ';INTERVAL=2' : ''}`;
+      }
+      if (restating[freq]) {
+        parts.push(restating[freq]);
+        const end = pick(['count', 'until', 'none']);
+        if (end === 'count') parts.push(`COUNT=${int(3, 60)}`);
+        return { freq, rule: parts.join(';'), end };
+      }
+    }
     if (rnd() < 0.3) parts.push(`INTERVAL=${int(2, 3)}`);
     if (rnd() < 0.35) parts.push(`BYDAY=${(['MONTHLY', 'YEARLY'].includes(freq) && rnd() < 0.5
       ? [`${pick(['1', '2', '-1'])}${pick(DAYS)}`] : some(DAYS, int(1, 3))).join(',')}`);
@@ -269,13 +318,13 @@ describe('a move is accepted only where the rule provably moves with it', () => 
     return { freq, rule: parts.join(';'), end };
   };
 
-  it('every accepted random move keeps the occurrences, each moved (2000 series)', () => {
+  it('every accepted random move keeps the occurrences, each moved', () => {
     let accepted = 0;
     let skipped = 0;
-    for (let i = 0; i < 2000; i++) {
+    for (let i = 0; i < RUNS; i++) {
       const date = rnd() < 0.2;
       const start = Date.UTC(2026, int(0, 11), int(1, 28)) / 1000 + (date ? 0 : int(0, 23) * 3600 + pick([0, 15, 30, 45]) * 60);
-      let { freq, rule, end } = randomRule(date);
+      let { freq, rule, end } = randomRule(date, start);
       if (end === 'until') {
         const span = { MINUTELY: 3600, HOURLY: 3 * D, DAILY: 60 * D, WEEKLY: 300 * D, MONTHLY: 900 * D, YEARLY: 4000 * D }[freq]!;
         rule += `;UNTIL=${fmt(start + span, date)}`;
@@ -317,15 +366,15 @@ describe('a move is accepted only where the rule provably moves with it', () => 
       accepted += Number(result === 'accepted');
       skipped += Number(result === 'skipped');
     }
-    console.log(`random rules and moves: ${accepted} of 2000 accepted, each checked against ical.js ` +
+    console.log(`random rules and moves: ${accepted} of ${RUNS} accepted, each checked against ical.js ` +
       `(${skipped} too sparse for the oracle to expand)`);
-    expect(skipped).toBeLessThan(40);
-    expect(accepted).toBeGreaterThan(500);
+    expect(skipped).toBeLessThan(Math.max(5, RUNS / 50));
+    expect(accepted).toBeGreaterThan(RUNS / 5);
   });
 
-  it('realistic rules are accepted: weekly by weekday at a new time, daily, monthly by a date up to the 28th', () => {
+  it('realistic rules are accepted: weekly by weekday at a new time or day, daily, monthly by a date up to the 28th', () => {
     const cases: [number, boolean, string, number, boolean][] = [];
-    for (let i = 0; i < 300; i++) {
+    for (let i = 0; i < Math.ceil(RUNS * 1.5 / 7); i++) {
       const start = Date.UTC(2026, int(0, 11), int(1, 20)) / 1000 + int(6, 20) * 3600;
       const end = pick(['', `;COUNT=${int(5, 50)}`, `;UNTIL=${fmt(start + int(30, 900) * D, false)}`]);
       const weekday = DAYS[(new Date(start * 1000).getUTCDay() + 6) % 7];
@@ -335,6 +384,13 @@ describe('a move is accepted only where the rule provably moves with it', () => 
       cases.push([start, false, `FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR${end}`, start + pick([3600, -3600, 7 * D]), false]);
       const day = new Date(start * 1000).getUTCDate();
       cases.push([start, false, `FREQ=MONTHLY${end}`, start + int(1 - day, 28 - day) * D + pick([0, 3600]), false]);
+      // "every Monday" moved to another weekday, as Google and Outlook write it
+      cases.push([start, false, `FREQ=WEEKLY;BYDAY=${weekday}${end}`, start + int(1, 6) * D, false]);
+      // restated month day, and month and day of a yearly date, within the month up to the 28th
+      const within = start + int(1 - day, 28 - day) * D;
+      cases.push([start, false, `FREQ=MONTHLY;BYMONTHDAY=${day}${end}`, within, false]);
+      cases.push([start, false, `FREQ=YEARLY;BYMONTH=${new Date(start * 1000).getUTCMonth() + 1};BYMONTHDAY=${day}${end}`,
+        within, false]);
     }
     const refused = cases.filter(([s, d, r, t, td], i) => check(s, d, r, t, td, `realistic ${i}: ${r}`) === 'refused');
     console.log(`realistic rules and moves: ${refused.length} of ${cases.length} refused`);

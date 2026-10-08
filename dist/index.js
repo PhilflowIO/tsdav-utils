@@ -604,7 +604,7 @@ function convert(component, wall, from, to) {
   const utc = from === null ? wall : zone(component, from).toUtc(wall);
   return to === null ? utc : zone(component, to).fromUtc(utc);
 }
-function wallIn(component, stamp, frame, naming = false) {
+function wallIn(component, stamp, frame) {
   if (stamp.kind === "date" || stamp.kind === "floating" || frame.form === "date") {
     return stamp.wall;
   }
@@ -623,15 +623,45 @@ function wallIn(component, stamp, frame, naming = false) {
   if (target === null) {
     return utc;
   }
-  const series = zone(component, target);
-  if (naming && series.gapAlias(utc) !== null) {
-    throw new Error(`it names ${icalForm(jcalOf(utc, "utc"))}, which in "${target}" is both a wall-clock time the DST change skips and the time just after it, so the occurrence it names cannot be told`);
+  return zone(component, target).fromUtc(utc);
+}
+function gapTwin(component, stamp, frame) {
+  if (frame.form !== "tzid" || stamp.kind === "date") {
+    return null;
   }
-  return series.fromUtc(utc);
+  const series = zone(component, frame.tzid);
+  const inSeries = stamp.kind === "floating" || stamp.kind === "tzid" && stamp.tzid === frame.tzid;
+  const utc = stamp.kind === "utc" ? stamp.wall : inSeries ? series.toUtc(stamp.wall) : zone(component, stamp.tzid).toUtc(stamp.wall);
+  const skipped = series.gapAlias(utc);
+  if (skipped === null) {
+    return null;
+  }
+  const real = series.fromUtc(utc);
+  const wall = inSeries ? stamp.wall : real;
+  return { wall, other: wall === skipped ? real : skipped };
+}
+function checkGapTwins(master, properties, after) {
+  const frame = frameOf(master);
+  if (!frame || frame.form !== "tzid" || !zoneOf(master, frame.tzid)) {
+    return;
+  }
+  const twins = properties.filter((property) => property.type !== "period").flatMap((property) => propertyStamps(property).flatMap((stamp) => {
+    const twin = gapTwin(master, stamp, frame);
+    return twin ? [{ property, twin }] : [];
+  }));
+  if (!twins.length) {
+    return;
+  }
+  const walls = expand(master, Math.max(...twins.map(({ twin }) => twin.other)));
+  const clash = twins.find(({ twin }) => walls.has(twin.other));
+  if (clash) {
+    const line = clash.property.toICALString();
+    throw new Error(`DTSTART changed, and ${after ? "moved, " : ""}${line} ${after ? "would name" : "names"} the same instant as the occurrence at ${icalForm(jcalOf(clash.twin.other, "floating"))} in "${frame.form === "tzid" ? frame.tzid : ""}", a wall-clock time the DST change skips, so which occurrence it names cannot be told: rewrite the whole iCalendar object with the values it should have`);
+  }
 }
 var byDays = (move) => move.from.form === "date" || move.to.form === "date";
-function moved(stamp, move, naming = false) {
-  const wall = wallIn(move.component, stamp, move.from, naming);
+function moved(stamp, move) {
+  const wall = wallIn(move.component, stamp, move.from);
   if (byDays(move) || stamp.kind === "date") {
     const days = (dayOf(wall) - dayOf(move.fromWall)) / DAY2;
     return (move.to.form === "date" ? dayOf(move.toWall) : move.toWall) + days * DAY2;
@@ -665,8 +695,7 @@ function moveInstants(property, move) {
     writeInstants(property, stamps.map((stamp) => stamp.wall + shift), { form: "date" });
     return;
   }
-  const naming = property.name === "recurrence-id" || property.name === "exdate";
-  writeInstants(property, stamps.map((stamp) => moved(stamp, move, naming)), move.to);
+  writeInstants(property, stamps.map((stamp) => moved(stamp, move)), move.to);
 }
 function wallOut(component, wall, frame, own) {
   if (own.kind === "floating" || own.kind === "date" || frame.form === "floating" || frame.form === "date") {
@@ -717,6 +746,16 @@ function unknownRuleParts(property) {
   const raw = property.toJSON()[3];
   return raw && typeof raw === "object" ? Object.keys(raw).filter((key) => !RULE_KEYS.has(key.toLowerCase())).map((key) => key.toUpperCase()) : [];
 }
+function rewriteRule(component, property, changes) {
+  const [name, params, type, value] = property.toJSON();
+  const next = new import_ical3.default.Property([name, params, type, { ...value, ...changes }], component);
+  const all = [...component.getAllProperties()];
+  component.removeAllProperties();
+  for (const each of all) {
+    component.addProperty(each === property ? next : each);
+  }
+  return next;
+}
 function moveUntil(property, move) {
   const unknown = unknownRuleParts(property);
   if (unknown.length) {
@@ -734,21 +773,20 @@ function moveUntil(property, move) {
     throw new Error(`UNTIL is a ${until.kind === "date" ? "date" : "date-time"} next to a ${move.from.form === "date" ? "date" : "date-time"} DTSTART, so where it ends the series is not defined`);
   }
   const wall = move.from.form !== "date" && move.to.form === "date" ? dayOf(move.toWall) + Math.floor((wallIn(move.component, until, move.from) - move.fromWall) / DAY2) * DAY2 : moved(until, move);
+  let untilValue;
   if (move.to.form === "date") {
-    recur.until = import_ical3.default.Time.fromDateString(jcalOf(wall, move.to));
+    untilValue = jcalOf(wall, move.to);
   } else if (move.to.form === "tzid") {
     const target = zone(move.component, move.to.tzid);
     const ambiguity = target.ambiguity(wall) ?? (target.gapAlias(target.toUtc(wall)) !== null ? "gap" : null);
     if (ambiguity) {
       throw new Error(`moved, it would be ${icalForm(jcalOf(wall, "floating"))} in "${move.to.tzid}", at the DST change, where ${ambiguity === "gap" ? "the wall clock skips times" : "the wall clock shows an hour twice"} and its order and the order of instants part`);
     }
-    recur.until = import_ical3.default.Time.fromDateTimeString(
-      jcalOf(convert(move.component, wall, move.to.tzid, null), "utc")
-    );
+    untilValue = jcalOf(convert(move.component, wall, move.to.tzid, null), "utc");
   } else {
-    recur.until = import_ical3.default.Time.fromDateTimeString(jcalOf(wall, move.to));
+    untilValue = jcalOf(wall, move.to);
   }
-  property.setValue(recur);
+  rewriteRule(move.component, property, { until: untilValue });
 }
 function startOf(master) {
   const frame = frameOf(master);
@@ -854,7 +892,7 @@ function occurrences(master, stamps, labels) {
   }
   const targets = stamps.map((stamp, i) => {
     try {
-      const wall = wallIn(master, stamp, frame, true);
+      const wall = wallIn(master, stamp, frame);
       return frame.form === "date" ? dayOf(wall) : wall;
     } catch (error) {
       throw new SeriesUnverifiable(`${labels[i]}: ${error.message}`);
@@ -952,6 +990,14 @@ function startSeriesEdit(calendar, master, written) {
   const watched = references.filter((_, i) => before[i] === true);
   const start = written.has("dtstart") ? startOf(master) : null;
   const keepsRule = !["rrule", "exrule", "rdate"].some((name) => written.has(name));
+  const named = () => [
+    ...master.getAllProperties("exdate"),
+    ...master.getAllProperties("rdate"),
+    ...overrides.map((c) => c.getFirstProperty("recurrence-id"))
+  ];
+  if (start || ruleWritten) {
+    checkGapTwins(master, named(), false);
+  }
   return {
     finish() {
       const now = start && startOf(master);
@@ -995,6 +1041,9 @@ function startSeriesEdit(calendar, master, written) {
         if (keepsRule) {
           checkMove(master, move, start.text, now.text);
         }
+      }
+      if (start || ruleWritten) {
+        checkGapTwins(master, named(), true);
       }
       if (!watched.length) {
         return;
@@ -1058,15 +1107,42 @@ function moveBreaksRule(recur, move) {
   }
   return null;
 }
+var WEEKDAYS = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+var weekdayOf = (wall) => WEEKDAYS[new Date(wall * 1e3).getUTCDay()];
+function restatedParts(property, recur, move) {
+  const raw = property.toJSON()[3];
+  const single = (value) => Array.isArray(value) ? value.length === 1 ? value[0] : void 0 : value;
+  const from = fieldsOf(move.fromWall);
+  const to = fieldsOf(move.toWall);
+  const out = {};
+  if (recur.freq === "WEEKLY" && String(single(raw.byday) ?? "").toUpperCase() === weekdayOf(move.fromWall)) {
+    out.byday = weekdayOf(move.toWall);
+  }
+  if (recur.freq === "YEARLY" && Number(single(raw.bymonth)) === from.month) {
+    out.bymonth = to.month;
+  }
+  if (Number(single(raw.bymonthday)) === from.day && (recur.freq === "MONTHLY" || "bymonth" in out)) {
+    out.bymonthday = to.day;
+  }
+  return out;
+}
 function checkMove(master, move, from, to) {
-  for (const property of master.getAllProperties()) {
+  for (const property of [...master.getAllProperties()]) {
     if (!isRecurProperty(master, property.name)) {
       continue;
     }
     const recur = property.getFirstValue();
     const unknown = unknownRuleParts(property);
-    const why = unknown.length ? `has ${unknown.join(", ")}, whose effect on a move updateFields cannot tell` : moveBreaksRule(recur, move);
+    const restating = unknown.length ? {} : restatedParts(property, recur, move);
+    const plain = recur.clone();
+    for (const name of Object.keys(restating)) {
+      delete plain.parts[name.toUpperCase()];
+    }
+    const why = unknown.length ? `has ${unknown.join(", ")}, whose effect on a move updateFields cannot tell` : moveBreaksRule(plain, move);
     if (!why) {
+      if (Object.keys(restating).length) {
+        rewriteRule(master, property, restating);
+      }
       continue;
     }
     const upper = property.name.toUpperCase();
@@ -1078,7 +1154,7 @@ function checkDatesOnly(master, move, properties) {
   const timeOfDay = move.fromWall - dayOf(move.fromWall);
   for (const property of properties) {
     for (const stamp of propertyStamps(property)) {
-      const wall = stamp.kind === "date" ? null : wallIn(master, stamp, move.from, property.name !== "rdate");
+      const wall = stamp.kind === "date" ? null : wallIn(master, stamp, move.from);
       if (wall === null || wall - dayOf(wall) !== timeOfDay) {
         const line = property.toICALString();
         throw new Error(`DTSTART changed to a date, and ${line} is ${wall === null ? "a date already" : "not at the series' time of day"}, so as a date it could name an occurrence it did not name before: give ${property.name === "recurrence-id" ? "the override" : property.name.toUpperCase()} as dates by rewriting the whole iCalendar object`);

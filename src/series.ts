@@ -101,10 +101,8 @@ function convert(component: ICAL.Component, wall: number, from: string | null, t
  * A value's wall clock in a series' frame: as it is when it already lives
  * there (or has no zone), converted when it is in UTC or another zone. Against
  * an all-day series a timed value keeps its own wall clock, whose date counts.
- * `naming` marks a value that names an occurrence (RECURRENCE-ID, EXDATE),
- * which a UTC instant at the end of a DST gap cannot do unambiguously.
  */
-function wallIn(component: ICAL.Component, stamp: Stamp, frame: Anchor, naming = false): number {
+function wallIn(component: ICAL.Component, stamp: Stamp, frame: Anchor): number {
   if (stamp.kind === 'date' || stamp.kind === 'floating' || frame.form === 'date') {
     return stamp.wall;
   }
@@ -123,15 +121,66 @@ function wallIn(component: ICAL.Component, stamp: Stamp, frame: Anchor, naming =
   if (target === null) {
     return utc;
   }
-  // An occurrence on a wall clock the DST change skips is read past the gap
-  // (RFC 5545 3.3.5), at the same instant as the first wall clock after it:
-  // given as that instant, the value cannot tell which of the two it names
-  const series = zone(component, target);
-  if (naming && series.gapAlias(utc) !== null) {
-    throw new Error(`it names ${icalForm(jcalOf(utc, 'utc'))}, which in "${target}" is both a wall-clock time ` +
-      'the DST change skips and the time just after it, so the occurrence it names cannot be told');
+  return zone(component, target).fromUtc(utc);
+}
+
+/**
+ * Where a value shares its instant with another wall clock of the series: an
+ * occurrence on a wall clock a DST change skips is read past the gap (RFC 5545
+ * 3.3.5), at the same instant as the first wall clock after it, and clients
+ * match RECURRENCE-ID, EXDATE and RDATE by instant. Returns the value's own
+ * wall clock in the series' frame and the other one, or null when the instant
+ * has no such twin. Whatever zone the value is written in.
+ */
+function gapTwin(component: ICAL.Component, stamp: Stamp, frame: Anchor): { wall: number; other: number } | null {
+  if (frame.form !== 'tzid' || stamp.kind === 'date') {
+    return null;
   }
-  return series.fromUtc(utc);
+  const series = zone(component, frame.tzid);
+  const inSeries = stamp.kind === 'floating' || (stamp.kind === 'tzid' && stamp.tzid === frame.tzid);
+  const utc = stamp.kind === 'utc' ? stamp.wall
+    : inSeries ? series.toUtc(stamp.wall)
+    : zone(component, stamp.tzid!).toUtc(stamp.wall);
+  const skipped = series.gapAlias(utc);
+  if (skipped === null) {
+    return null;
+  }
+  const real = series.fromUtc(utc);
+  const wall = inSeries ? stamp.wall : real;
+  return { wall, other: wall === skipped ? real : skipped };
+}
+
+/**
+ * Throw where a RECURRENCE-ID, EXDATE or RDATE shares its instant with an
+ * occurrence on another wall clock of the series (gapTwin): it then names
+ * that occurrence for a client, but another one on the wall clock this module
+ * moves by, so which one it names cannot be told. Only where the series does
+ * have an occurrence on the twin wall clock; checked before and after a move.
+ */
+function checkGapTwins(master: ICAL.Component, properties: ICAL.Property[], after: boolean) {
+  const frame = frameOf(master);
+  // a zone with no known rules (no VTIMEZONE, no IANA name) has no known gap;
+  // a value that needs it converted is refused where it is moved
+  if (!frame || frame.form !== 'tzid' || !zoneOf(master, frame.tzid)) {
+    return;
+  }
+  const twins = properties.filter((property) => property.type !== 'period').flatMap((property) =>
+    propertyStamps(property).flatMap((stamp) => {
+      const twin = gapTwin(master, stamp, frame);
+      return twin ? [{ property, twin }] : [];
+    }));
+  if (!twins.length) {
+    return;
+  }
+  const walls = expand(master, Math.max(...twins.map(({ twin }) => twin.other)));
+  const clash = twins.find(({ twin }) => walls.has(twin.other));
+  if (clash) {
+    const line = clash.property.toICALString();
+    throw new Error(`DTSTART changed, and ${after ? 'moved, ' : ''}${line} ${after ? 'would name' : 'names'} the same ` +
+      `instant as the occurrence at ${icalForm(jcalOf(clash.twin.other, 'floating'))} in "${frame.form === 'tzid' ? frame.tzid : ''}", ` +
+      'a wall-clock time the DST change skips, so which occurrence it names cannot be told: rewrite the whole ' +
+      'iCalendar object with the values it should have');
+  }
 }
 
 /** The DTSTART of a series before and after a write, each in its own frame */
@@ -153,8 +202,8 @@ const byDays = (move: Move) => move.from.form === 'date' || move.to.form === 'da
  * an all-day/timed switch the distance is counted in days: a value keeps its
  * day, and a timed one takes the new DTSTART's time of day.
  */
-function moved(stamp: Stamp, move: Move, naming = false): number {
-  const wall = wallIn(move.component, stamp, move.from, naming);
+function moved(stamp: Stamp, move: Move): number {
+  const wall = wallIn(move.component, stamp, move.from);
   if (byDays(move) || stamp.kind === 'date') {
     const days = (dayOf(wall) - dayOf(move.fromWall)) / DAY;
     return (move.to.form === 'date' ? dayOf(move.toWall) : move.toWall) + days * DAY;
@@ -194,8 +243,7 @@ function moveInstants(property: ICAL.Property, move: Move) {
     writeInstants(property, stamps.map((stamp) => stamp.wall + shift), { form: 'date' });
     return;
   }
-  const naming = property.name === 'recurrence-id' || property.name === 'exdate';
-  writeInstants(property, stamps.map((stamp) => moved(stamp, move, naming)), move.to);
+  writeInstants(property, stamps.map((stamp) => moved(stamp, move)), move.to);
 }
 
 /**
@@ -260,6 +308,22 @@ function unknownRuleParts(property: ICAL.Property): string[] {
 }
 
 /**
+ * Replace parts of a RECUR property by rewriting only those tokens of the rule
+ * as parsed, in place: the other parts keep their text and order, and the
+ * property keeps its place among the component's properties.
+ */
+function rewriteRule(component: ICAL.Component, property: ICAL.Property, changes: Record<string, unknown>): ICAL.Property {
+  const [name, params, type, value] = property.toJSON() as [string, object, string, Record<string, unknown>];
+  const next = new ICAL.Property([name, params, type, { ...value, ...changes }], component);
+  const all = [...component.getAllProperties()];
+  component.removeAllProperties();
+  for (const each of all) {
+    component.addProperty(each === property ? next : each);
+  }
+  return next;
+}
+
+/**
  * Move a rule's UNTIL. UNTIL is a date next to an all-day DTSTART, local time
  * next to a floating one and UTC otherwise (RFC 5545 3.3.10), so a wall clock
  * in a TZID is converted to UTC with the zone's rules.
@@ -295,8 +359,9 @@ function moveUntil(property: ICAL.Property, move: Move) {
   const wall = move.from.form !== 'date' && move.to.form === 'date'
     ? dayOf(move.toWall) + Math.floor((wallIn(move.component, until, move.from) - move.fromWall) / DAY) * DAY
     : moved(until, move);
+  let untilValue: string;
   if (move.to.form === 'date') {
-    recur.until = ICAL.Time.fromDateString(jcalOf(wall, move.to));
+    untilValue = jcalOf(wall, move.to);
   } else if (move.to.form === 'tzid') {
     const target = zone(move.component, move.to.tzid);
     const ambiguity = target.ambiguity(wall) ?? (target.gapAlias(target.toUtc(wall)) !== null ? 'gap' : null);
@@ -307,12 +372,11 @@ function moveUntil(property: ICAL.Property, move: Move) {
         `change, where ${ambiguity === 'gap' ? 'the wall clock skips times' : 'the wall clock shows an hour twice'} ` +
         'and its order and the order of instants part');
     }
-    recur.until = ICAL.Time.fromDateTimeString(
-      jcalOf(convert(move.component, wall, move.to.tzid, null), 'utc'));
+    untilValue = jcalOf(convert(move.component, wall, move.to.tzid, null), 'utc');
   } else {
-    recur.until = ICAL.Time.fromDateTimeString(jcalOf(wall, move.to));
+    untilValue = jcalOf(wall, move.to);
   }
-  property.setValue(recur);
+  rewriteRule(move.component, property, { until: untilValue });
 }
 
 /** The DTSTART of a series as frame and wall clock, or null without one */
@@ -464,7 +528,7 @@ function occurrences(master: ICAL.Component, stamps: Stamp[], labels: string[]):
   }
   const targets = stamps.map((stamp, i) => {
     try {
-      const wall = wallIn(master, stamp, frame, true);
+      const wall = wallIn(master, stamp, frame);
       return frame.form === 'date' ? dayOf(wall) : wall;
     } catch (error) {
       throw new SeriesUnverifiable(`${labels[i]}: ${(error as Error).message}`);
@@ -611,6 +675,11 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
   const start = written.has('dtstart') ? startOf(master) : null;
   // Without a new rule the series has to come out the same, moved
   const keepsRule = !['rrule', 'exrule', 'rdate'].some((name) => written.has(name));
+  const named = () => [...master.getAllProperties('exdate'), ...master.getAllProperties('rdate'),
+    ...overrides.map((c) => c.getFirstProperty('recurrence-id')!)];
+  if (start || ruleWritten) {
+    checkGapTwins(master, named(), false);
+  }
 
   return {
     finish() {
@@ -655,6 +724,9 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
         if (keepsRule) {
           checkMove(master, move, start.text, now.text);
         }
+      }
+      if (start || ruleWritten) {
+        checkGapTwins(master, named(), true);
       }
 
       if (!watched.length) {
@@ -753,21 +825,64 @@ function moveBreaksRule(recur: ICAL.Recur, move: Move): string | null {
   return null;
 }
 
+const WEEKDAYS = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+const weekdayOf = (wall: number) => WEEKDAYS[new Date(wall * 1000).getUTCDay()];
+
+/**
+ * The parts of a rule that only restate DTSTART, as many clients write them
+ * (Google, Outlook): a single BYDAY equal to DTSTART's weekday in a WEEKLY
+ * rule, a single BYMONTH equal to its month in a YEARLY rule, a single
+ * BYMONTHDAY equal to its day in a MONTHLY rule, or in a YEARLY one whose
+ * BYMONTH restates too. Such a rule gives the same occurrences as without
+ * them, so they are derived from DTSTART, not pinned: returned with the new
+ * DTSTART's values (in the rule's own key spelling), to be written on a move.
+ * Anything else — several values, an ordinal, a value DTSTART does not have —
+ * is not restating.
+ */
+function restatedParts(property: ICAL.Property, recur: ICAL.Recur, move: Move): Record<string, unknown> {
+  const raw = (property.toJSON() as unknown[])[3] as Record<string, unknown>;
+  const single = (value: unknown) => Array.isArray(value) ? (value.length === 1 ? value[0] : undefined) : value;
+  const from = fieldsOf(move.fromWall);
+  const to = fieldsOf(move.toWall);
+  const out: Record<string, unknown> = {};
+  if (recur.freq === 'WEEKLY' && String(single(raw.byday) ?? '').toUpperCase() === weekdayOf(move.fromWall)) {
+    out.byday = weekdayOf(move.toWall);
+  }
+  if (recur.freq === 'YEARLY' && Number(single(raw.bymonth)) === from.month) {
+    out.bymonth = to.month;
+  }
+  if (Number(single(raw.bymonthday)) === from.day && (recur.freq === 'MONTHLY' || 'bymonth' in out)) {
+    out.bymonthday = to.day;
+  }
+  return out;
+}
+
 /**
  * Throw when a move would change the occurrences of a rule (RRULE or EXRULE)
- * the call does not write, naming why and suggesting the rule to give.
+ * the call does not write, naming why and suggesting the rule to give. Parts
+ * that only restate DTSTART (restatedParts) are written with the new start's
+ * values instead, where the rule without them follows the move.
  */
 function checkMove(master: ICAL.Component, move: Move, from: string, to: string) {
-  for (const property of master.getAllProperties()) {
+  for (const property of [...master.getAllProperties()]) {
     if (!isRecurProperty(master, property.name)) {
       continue;
     }
     const recur = property.getFirstValue() as ICAL.Recur;
     const unknown = unknownRuleParts(property);
+    // Parts that only restate DTSTART follow it: judge the rule without them
+    const restating = unknown.length ? {} : restatedParts(property, recur, move);
+    const plain = recur.clone();
+    for (const name of Object.keys(restating)) {
+      delete (plain.parts as Record<string, unknown>)[name.toUpperCase()];
+    }
     const why = unknown.length
       ? `has ${unknown.join(', ')}, whose effect on a move updateFields cannot tell`
-      : moveBreaksRule(recur, move);
+      : moveBreaksRule(plain, move);
     if (!why) {
+      if (Object.keys(restating).length) {
+        rewriteRule(master, property, restating);
+      }
       continue;
     }
     const upper = property.name.toUpperCase();
@@ -791,7 +906,7 @@ function checkDatesOnly(master: ICAL.Component, move: Move, properties: ICAL.Pro
   const timeOfDay = move.fromWall - dayOf(move.fromWall);
   for (const property of properties) {
     for (const stamp of propertyStamps(property)) {
-      const wall = stamp.kind === 'date' ? null : wallIn(master, stamp, move.from, property.name !== 'rdate');
+      const wall = stamp.kind === 'date' ? null : wallIn(master, stamp, move.from);
       if (wall === null || wall - dayOf(wall) !== timeOfDay) {
         const line = property.toICALString();
         throw new Error(`DTSTART changed to a date, and ${line} is ${wall === null ? 'a date already' : 'not at the ' +
