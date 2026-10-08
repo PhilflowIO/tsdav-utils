@@ -4,6 +4,8 @@ import type { CalendarObjectInput, ComponentType, FieldUpdates, UpdateFieldsOpti
 import { beginSeriesEdit } from './series';
 import { UpdateFieldsError } from './errors';
 import { setDateValue, setRecurValue } from './typedValue';
+import { ianaZoneName, vtimezoneIn } from './zone';
+import { ensureVtimezone } from './vtimezone';
 
 /** A value's type for an error message: "null", "an array", "a number" */
 function describe(value: unknown): string {
@@ -85,6 +87,25 @@ export function seriesMaster(calendar: ICAL.Component, type?: ComponentType): IC
 }
 
 /**
+ * The TZID options.zone names: a zone the object defines with a VTIMEZONE, as
+ * spelled there, or an IANA zone the runtime knows, spelled as the time zone
+ * data spells it ("europe/berlin" is written "Europe/Berlin").
+ */
+function namedZone(root: ICAL.Component, zone: string): string {
+  if (vtimezoneIn(root, zone)) {
+    return zone;
+  }
+  const name = ianaZoneName(zone);
+  if (!name) {
+    throw new UpdateFieldsError('UNKNOWN_TZID', `zone "${zone}" is no IANA time zone (e.g. "Europe/Berlin", ` +
+      '"America/New_York") and the object has no VTIMEZONE of that name' +
+      (/^[+-]\d/.test(zone.trim()) ? '; for a fixed offset give the values with it ("2026-10-26T18:00:00+02:00") instead' : ''),
+    { remedy: 'fix-value' });
+  }
+  return name;
+}
+
+/**
  * Update arbitrary fields on a calendar/todo/vcard object
  *
  * This function uses a field-agnostic approach - it accepts any iCal property name
@@ -99,6 +120,9 @@ export function seriesMaster(calendar: ICAL.Component, type?: ComponentType): IC
  * @param options.absoluteTime - how a date-time with a zone is written where
  *   the property or its DTSTART has a TZID: as UTC ("as-given", the default) or
  *   converted into that TZID, which stays ("keep-zone")
+ * @param options.zone - an IANA zone ("Europe/Berlin") to write the call's
+ *   date-times in, with that TZID, adding a VTIMEZONE when the VCALENDAR has
+ *   none; replaces floatingTime and absoluteTime (see the README)
  * @param options.type - the component type to write into ("vevent", "vtodo",
  *   "vjournal"); by default the first type present, in that order. Throws if
  *   the object holds no component of that type, or is a vCard
@@ -155,6 +179,25 @@ export function updateFields(
       `Invalid absoluteTime "${absoluteTime}": use "as-given" or "keep-zone"`, { remedy: 'fix-value' });
   }
   const type = options.type === undefined ? undefined : componentType(options.type);
+  if (options.zone !== undefined) {
+    if (typeof options.zone !== 'string' || options.zone.trim() === '') {
+      throw new UpdateFieldsError('INVALID_INPUT', `Invalid input: zone must be an IANA time zone name such as ` +
+        `"Europe/Berlin", not ${typeof options.zone === 'string' ? 'an empty string' : describe(options.zone)}`,
+      { remedy: 'fix-value' });
+    }
+    // zone says how every date-time is read and written; the other two would
+    // say it differently, so giving them too is a contradiction, not a default
+    if (options.floatingTime !== undefined) {
+      throw new UpdateFieldsError('INVALID_FLOATING_TIME', `floatingTime "${floatingTime}" cannot be combined with zone: ` +
+        `with zone "${options.zone}" a time without a zone is wall clock in that zone; leave out floatingTime`,
+      { remedy: 'fix-value' });
+    }
+    if (absoluteTime === 'as-given' && options.absoluteTime !== undefined) {
+      throw new UpdateFieldsError('INVALID_ABSOLUTE_TIME', `absoluteTime "as-given" (write as UTC) cannot be combined with ` +
+        `zone: with zone "${options.zone}" an instant is written as its wall-clock time in that zone; leave out absoluteTime`,
+      { remedy: 'fix-value' });
+    }
+  }
 
   // 2. Parse iCal string to Component
   let jcalData: any;
@@ -194,6 +237,7 @@ export function updateFields(
   const actualComponent = component.name === 'vcalendar'
     ? seriesMaster(component, type)
     : component;
+  const zone = options.zone === undefined ? null : namedZone(component, options.zone.trim());
 
   // 4. Update properties using field-agnostic loop
   //    Date and date-time properties and recurrence rules are parsed and
@@ -213,12 +257,20 @@ export function updateFields(
   const series = beginSeriesEdit(component.name === 'vcalendar' ? component : null, actualComponent, written,
     icalString);
   for (const [key, value] of entries) {
-    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime) &&
-        !setRecurValue(actualComponent, key, value, floatingTime)) {
+    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, zone) &&
+        !setRecurValue(actualComponent, key, value, floatingTime, zone)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }
   series.finish();
+
+  // A TZID the call wrote needs its VTIMEZONE in the VCALENDAR (RFC 5545
+  // 3.6.5); one already there is kept. A bare component has no VCALENDAR to
+  // hold it.
+  if (zone && [...written].some((name) =>
+    actualComponent.getAllProperties(name).some((p: ICAL.Property) => p.getParameter('tzid') === zone))) {
+    ensureVtimezone(component, zone);
+  }
 
   // 5. Serialize back to iCal string
   //    All unmodified properties are automatically preserved by ical.js

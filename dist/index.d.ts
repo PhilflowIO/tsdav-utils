@@ -46,6 +46,15 @@ interface UpdateFieldsOptions {
      */
     absoluteTime?: AbsoluteTime;
     /**
+     * An IANA time zone ("Europe/Berlin") to write the call's date-times in:
+     * a value with Z or an offset becomes its wall-clock time there, one without
+     * a zone is read as wall clock there, and both are written with that TZID;
+     * the VCALENDAR gets a VTIMEZONE for it if it has none. Replaces
+     * floatingTime and absoluteTime ("keep-zone" may be given, it agrees). See
+     * "Writing in a named zone" in the README.
+     */
+    zone?: string;
+    /**
      * The component type to write into. Without it the first type present is
      * taken, VEVENT before VTODO before VJOURNAL (see seriesMaster).
      */
@@ -95,6 +104,9 @@ declare function seriesMaster(calendar: ICAL.Component, type?: ComponentType): I
  * @param options.absoluteTime - how a date-time with a zone is written where
  *   the property or its DTSTART has a TZID: as UTC ("as-given", the default) or
  *   converted into that TZID, which stays ("keep-zone")
+ * @param options.zone - an IANA zone ("Europe/Berlin") to write the call's
+ *   date-times in, with that TZID, adding a VTIMEZONE when the VCALENDAR has
+ *   none; replaces floatingTime and absoluteTime (see the README)
  * @param options.type - the component type to write into ("vevent", "vtodo",
  *   "vjournal"); by default the first type present, in that order. Throws if
  *   the object holds no component of that type, or is a vCard

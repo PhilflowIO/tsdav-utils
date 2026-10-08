@@ -1,5 +1,5 @@
 // src/updateFields.ts
-import ICAL4 from "ical.js";
+import ICAL5 from "ical.js";
 
 // src/types.ts
 var COMPONENT_TYPES = ["vevent", "vtodo", "vjournal"];
@@ -15,15 +15,15 @@ import ICAL from "ical.js";
 
 // src/errors.ts
 var CODES = [
-  /** an argument has the wrong type: calendarObject, fields, options, or several top-level components */
+  /** an argument has the wrong type: calendarObject, fields, options (or options.zone), or several top-level components */
   "INVALID_INPUT",
   /** the iCalendar or vCard text does not parse */
   "INVALID_ICALENDAR",
   /** options.type (or seriesMaster's type) is not "vevent", "vtodo" or "vjournal" */
   "INVALID_TYPE",
-  /** options.floatingTime is not "keep" or "local" */
+  /** options.floatingTime is not "keep" or "local", or is given together with options.zone */
   "INVALID_FLOATING_TIME",
-  /** options.absoluteTime is not "as-given" or "keep-zone" */
+  /** options.absoluteTime is not "as-given" or "keep-zone", or is "as-given" together with options.zone */
   "INVALID_ABSOLUTE_TIME",
   /** the VCALENDAR holds no component of the type asked for */
   "COMPONENT_NOT_FOUND",
@@ -35,11 +35,11 @@ var CODES = [
   "INVALID_VALUE",
   /** a date where a date-time is needed, or the other way round */
   "VALUE_TYPE_MISMATCH",
-  /** a value lacks the zone it needs, has one it must not have, or mixes both */
+  /** a value lacks the zone it needs, has one it must not have, mixes both, or follows a DTSTART in another zone than options.zone */
   "ZONE_MISMATCH",
-  /** a TZID whose rules are needed has no VTIMEZONE in the object and is no IANA zone */
+  /** a TZID whose rules are needed (or options.zone) has no VTIMEZONE in the object and is no IANA zone */
   "UNKNOWN_TZID",
-  /** a VTIMEZONE in the object repeats in a way no time zone does, so it is not read */
+  /** a VTIMEZONE in the object repeats in a way no time zone does, so it is not read; or none can be generated for options.zone at the dates given (local mean time) */
   "UNSUPPORTED_VTIMEZONE",
   /** a rule given has a part RFC 5545 3.3.10 does not define (or RSCALE/SKIP, or an "RRULE:" prefix) */
   "UNKNOWN_RULE_PART",
@@ -278,6 +278,25 @@ function zoneOf(component, tzid) {
   const vtimezone = vtimezoneOf(component, tzid);
   return vtimezone ? vtimezoneZone(vtimezone) : ianaZone(tzid);
 }
+function vtimezoneIn(component, tzid) {
+  return vtimezoneOf(component, tzid);
+}
+var lowerNames = null;
+function ianaZoneName(name) {
+  if (!ianaZone(name)) {
+    return null;
+  }
+  if (!lowerNames) {
+    const supported = Intl.supportedValuesOf?.("timeZone") ?? [];
+    lowerNames = new Map(supported.map((n) => [n.toLowerCase(), n]));
+  }
+  const listed = lowerNames.get(name.toLowerCase());
+  if (listed) {
+    return listed;
+  }
+  const resolved = new Intl.DateTimeFormat("en-US", { timeZone: name }).resolvedOptions().timeZone;
+  return resolved.toLowerCase() === name.toLowerCase() ? resolved : name;
+}
 function unknownZone(tzid) {
   return `the zone "${tzid}" has no VTIMEZONE in the document and is no IANA time zone`;
 }
@@ -402,7 +421,7 @@ function frameOf(component) {
   const value = dtstart.toJSON()[3];
   return typeof value === "string" && /Z$/i.test(value) ? { form: "utc" } : { form: "floating" };
 }
-function wallInZone(component, upper, tzid, value) {
+function wallInZone(component, upper, tzid, value, named = false) {
   const zone2 = zoneOf(component, tzid);
   if (!zone2) {
     throw refuse("UNKNOWN_TZID", `${upper}: ${unknownZone(tzid)}, so the instant cannot be written as its wall-clock time there: give a time without a zone, or leave absoluteTime "as-given"`, upper);
@@ -413,11 +432,21 @@ function wallInZone(component, upper, tzid, value) {
   const f = fieldsOf(wall);
   const jcal = `${pad(f.year, 4)}-${pad(f.month)}-${pad(f.day)}T${pad(f.hour)}:${pad(f.minute)}:${pad(f.second)}`;
   if (zone2.toUtc(wall) !== utc) {
-    throw refuse("DST_AMBIGUOUS", `${upper}: ${value.jcal.replace(/[-:]/g, "")} is ${jcal.replace(/[-:]/g, "")} in "${tzid}", in the second pass of the hour the DST change shows twice, where that wall-clock time reads as the first pass: give the time in UTC with absoluteTime "as-given", or another time`, upper);
+    throw refuse("DST_AMBIGUOUS", `${upper}: ${value.jcal.replace(/[-:]/g, "")} is ${jcal.replace(/[-:]/g, "")} in "${tzid}", in the second pass of the hour the DST change shows twice, where that wall-clock time reads as the first pass: ` + (named ? `no time in "${tzid}" names this instant; give another time, or leave out zone to write it in UTC` : 'give the time in UTC with absoluteTime "as-given", or another time'), upper);
   }
   return { kind: "floating", jcal, local: new Date(utc * 1e3) };
 }
-function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime = "as-given") {
+function utcOfWall(component, upper, tzid, value) {
+  const zone2 = zoneOf(component, tzid);
+  if (!zone2) {
+    throw refuse("UNKNOWN_TZID", `${upper}: ${unknownZone(tzid)}`, upper);
+  }
+  const m = /^(\d{4,})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/.exec(value.jcal);
+  const wall = wallOf(...[1, 2, 3, 4, 5, 6].map((i) => Number(m[i])));
+  return { kind: "utc", jcal: toUtcJcal(new Date(zone2.toUtc(wall) * 1e3)) };
+}
+var anchorText = (anchor) => anchor.form === "tzid" ? `in "${anchor.tzid}"` : anchor.form === "utc" ? "in UTC" : anchor.form;
+function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime = "as-given", named = null) {
   const shape = dateProperty(component, name);
   if (!shape) {
     return false;
@@ -448,8 +477,20 @@ function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime 
     throw refuse("VALUE_TYPE_MISMATCH", `${upper} needs a time: DTSTART has one, and ${why}`, upper);
   }
   const own = existing?.getParameter("tzid");
-  const zone2 = UTC_ONLY.has(lower) ? null : typeof own === "string" && own ? own : anchor?.form === "tzid" ? anchor.tzid : null;
-  if (absoluteTime === "keep-zone" && zone2) {
+  let zone2 = UTC_ONLY.has(lower) ? null : typeof own === "string" && own ? own : anchor?.form === "tzid" ? anchor.tzid : null;
+  if (named && !isDate) {
+    if (UTC_ONLY.has(lower) || component.name === "vcard") {
+      parsed = parsed.map((p) => p.kind === "floating" ? utcOfWall(component, upper, named, p) : p);
+      zone2 = null;
+    } else {
+      if (anchor && anchor.form !== "date" && !(anchor.form === "tzid" && anchor.tzid === named)) {
+        throw new UpdateFieldsError("ZONE_MISMATCH", `${upper} follows DTSTART, which is ${anchorText(anchor)}, so it cannot be written in "${named}": give DTSTART in the same call to move the event into "${named}", or leave out zone`, { remedy: "same-call", property: upper });
+      }
+      parsed = parsed.map((p) => p.kind === "utc" ? wallInZone(component, upper, named, p, true) : p);
+      zone2 = named;
+    }
+  }
+  if (absoluteTime === "keep-zone" && zone2 && !named) {
     parsed = parsed.map((p) => p.kind === "utc" ? wallInZone(component, upper, zone2, p) : p);
   }
   const floating = parsed.some((p) => p.kind === "floating");
@@ -585,7 +626,7 @@ function parseRuleParts(raw) {
   }
   return parts;
 }
-function untilTime(component, ruleName, raw, floatingTime) {
+function untilTime(component, ruleName, raw, floatingTime, named) {
   let parsed;
   try {
     parsed = parseDateValue(raw);
@@ -602,6 +643,14 @@ function untilTime(component, ruleName, raw, floatingTime) {
   }
   if (anchor?.form === "floating" && parsed.kind === "utc") {
     throw fail("ZONE_MISMATCH", 'must be a local time without a zone, like the floating DTSTART (RFC 5545 3.3.10), e.g. "2026-10-26T18:00:00"');
+  }
+  if (parsed.kind === "floating" && named && anchor?.form !== "date") {
+    if (anchor && !(anchor.form === "tzid" && anchor.tzid === named)) {
+      throw new UpdateFieldsError("ZONE_MISMATCH", `${ruleName} UNTIL follows DTSTART, which is ${anchorText(anchor)}, so it cannot be read in "${named}": give DTSTART in the same call to move the series into "${named}", give UNTIL with a zone, or leave out zone`, { remedy: "same-call", property: ruleName });
+    }
+    if (!anchor) {
+      return ICAL2.Time.fromDateTimeString(utcOfWall(component, ruleName, named, parsed).jcal);
+    }
   }
   if (parsed.kind === "floating") {
     if (anchor?.form === "tzid") {
@@ -629,7 +678,7 @@ function untilTime(component, ruleName, raw, floatingTime) {
 function isRecurProperty(component, name) {
   return designSetFor(component).property[name.toLowerCase()]?.defaultType === "recur";
 }
-function setRecurValue(component, name, raw, floatingTime = "keep") {
+function setRecurValue(component, name, raw, floatingTime = "keep", named = null) {
   const lower = name.toLowerCase();
   if (!isRecurProperty(component, lower)) {
     return false;
@@ -645,7 +694,7 @@ function setRecurValue(component, name, raw, floatingTime = "keep") {
   parts.delete("UNTIL");
   const recur = ICAL2.Recur.fromString([...parts].map(([k, v]) => `${k}=${v}`).join(";"));
   if (until !== void 0) {
-    recur.until = untilTime(component, upper, until, floatingTime);
+    recur.until = untilTime(component, upper, until, floatingTime, named);
   }
   let property = component.getFirstProperty(lower);
   if (!property) {
@@ -1536,6 +1585,321 @@ function checkDatesOnly(master, move, properties) {
   }
 }
 
+// src/vtimezone.ts
+import ICAL4 from "ical.js";
+var DAY3 = 86400;
+var WEEK = 7 * DAY3;
+var FIRST_YEAR = 1970;
+var LAST_SCANNED_YEAR = 2045;
+var MIN_RUN = 3;
+var SCAN_STEP = 50;
+var SETTLED_YEARS = 10;
+var SCAN_LIMIT = 2300;
+var scans = /* @__PURE__ */ new Map();
+function scan(tzid, offsetAt, start, end) {
+  const key = `${tzid}|${start}|${end}`;
+  const cached = scans.get(key);
+  if (cached) {
+    return cached;
+  }
+  const samples = [];
+  const at = (utc) => {
+    const offset2 = offsetAt(utc);
+    samples.push([utc, offset2]);
+    return offset2;
+  };
+  const changes = [];
+  const initial = at(start);
+  let t = start;
+  let offset = initial;
+  while (t < end) {
+    const next = Math.min(t + WEEK, end);
+    const after = at(next);
+    if (after === offset) {
+      t = next;
+      continue;
+    }
+    let lo = t;
+    let hi = next;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (at(mid) === offset) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    const to = at(hi);
+    at(hi - 1);
+    changes.push({ at: hi, from: offset, to });
+    t = hi;
+    offset = to;
+  }
+  const result = { initial, start, end, changes, samples };
+  scans.set(key, result);
+  return result;
+}
+function onsetOf(change) {
+  const local = change.at + change.from;
+  const f = fieldsOf(local);
+  return {
+    change,
+    local,
+    year: f.year,
+    month: f.month,
+    day: f.day,
+    weekday: new Date(local * 1e3).getUTCDay(),
+    time: local - Math.floor(local / DAY3) * DAY3,
+    up: change.to > change.from
+  };
+}
+var WEEKDAYS2 = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+var daysIn = (year, month) => fieldsOf(wallOf(year, month + 1, 1) - DAY3).day;
+var weekdayOf2 = (year, month, day) => new Date(wallOf(year, month, day) * 1e3).getUTCDay();
+var firstOnOrAfter = (year, month, from, weekday) => from + (weekday - weekdayOf2(year, month, from) + 7) % 7;
+function yearlyRule(onsets) {
+  const [first] = onsets;
+  if (onsets.some((o) => o.month !== first.month || o.time !== first.time || o.change.from !== first.change.from || o.change.to !== first.change.to)) {
+    return null;
+  }
+  const month = `BYMONTH=${first.month}`;
+  if (onsets.every((o) => o.weekday === first.weekday)) {
+    const wd = WEEKDAYS2[first.weekday];
+    if (onsets.every((o) => o.day + 7 > daysIn(o.year, o.month))) {
+      return `${month};BYDAY=-1${wd}`;
+    }
+    const shortest = first.month === 2 ? 28 : daysIn(2001, first.month);
+    const fits = (from) => onsets.every((o) => firstOnOrAfter(o.year, o.month, from, o.weekday) === o.day);
+    for (const from of [1, 8, 15, 22]) {
+      if (fits(from)) {
+        return `${month};BYDAY=${(from + 6) / 7}${wd}`;
+      }
+    }
+    for (let from = 1; from + 6 <= shortest; from++) {
+      if (fits(from)) {
+        const days = Array.from({ length: 7 }, (_, i) => from + i).join(",");
+        return `${month};BYMONTHDAY=${days};BYDAY=${wd}`;
+      }
+    }
+  }
+  if (onsets.every((o) => o.day === first.day)) {
+    return `${month};BYMONTHDAY=${first.day}`;
+  }
+  return null;
+}
+function runsOf(onsets) {
+  const byYear = /* @__PURE__ */ new Map();
+  for (const onset of onsets) {
+    byYear.set(onset.year, [...byYear.get(onset.year) ?? [], onset]);
+  }
+  const pair = (year) => {
+    const list = byYear.get(year);
+    if (!list || list.length !== 2 || list[0].up === list[1].up) {
+      return null;
+    }
+    return list[0].up ? { up: list[0], down: list[1] } : { up: list[1], down: list[0] };
+  };
+  const years = [...byYear.keys()].sort((a, b) => a - b);
+  const runs = [];
+  const inRun = /* @__PURE__ */ new Set();
+  for (let i = 0; i < years.length; ) {
+    let ups = [];
+    let downs = [];
+    let rules = null;
+    let j = i;
+    for (; j < years.length; j++) {
+      const p = pair(years[j]);
+      if (!p || j > i && years[j] !== years[j - 1] + 1) {
+        break;
+      }
+      const upRule = yearlyRule([...ups, p.up]);
+      const downRule = yearlyRule([...downs, p.down]);
+      if (!upRule || !downRule) {
+        break;
+      }
+      ups = [...ups, p.up];
+      downs = [...downs, p.down];
+      rules = [upRule, downRule];
+    }
+    if (rules && ups.length >= MIN_RUN) {
+      runs.push({ ups, downs, upRule: rules[0], downRule: rules[1] });
+      [...ups, ...downs].forEach((o) => inRun.add(o));
+      i = j;
+    } else {
+      i = Math.max(j, i + 1);
+    }
+  }
+  return { runs, single: onsets.filter((o) => !inRun.has(o)) };
+}
+var pad2 = (n, width = 2) => String(n).padStart(width, "0");
+var icalLocal = (wall) => {
+  const f = fieldsOf(wall);
+  return `${pad2(f.year, 4)}${pad2(f.month)}${pad2(f.day)}T${pad2(f.hour)}${pad2(f.minute)}${pad2(f.second)}`;
+};
+var icalOffset = (seconds) => {
+  const abs = Math.abs(seconds);
+  return `${seconds < 0 ? "-" : "+"}${pad2(Math.floor(abs / 3600))}${pad2(Math.floor(abs / 60) % 60)}`;
+};
+function render(tzid, observances) {
+  const sorted = [...observances].sort((a, b) => a.start - b.start || a.kind.localeCompare(b.kind));
+  return ["BEGIN:VTIMEZONE", `TZID:${tzid}`, ...sorted.flatMap((o) => [
+    `BEGIN:${o.kind}`,
+    `DTSTART:${icalLocal(o.start)}`,
+    `TZOFFSETFROM:${icalOffset(o.from)}`,
+    `TZOFFSETTO:${icalOffset(o.to)}`,
+    ...o.lines,
+    `END:${o.kind}`
+  ]), "END:VTIMEZONE"];
+}
+function observancesOf(found, rules, lastYear) {
+  const onsets = found.changes.map(onsetOf);
+  const { runs, single } = rules ? runsOf(onsets) : { runs: [], single: onsets };
+  const firstUp = onsets[0]?.up;
+  const out = [{
+    kind: firstUp === void 0 || firstUp ? "STANDARD" : "DAYLIGHT",
+    from: found.initial,
+    to: found.initial,
+    start: found.start + found.initial,
+    lines: []
+  }];
+  runs.forEach((run) => {
+    const open = run.ups[run.ups.length - 1].year >= lastYear || run.downs[run.downs.length - 1].year >= lastYear;
+    for (const [list, rule] of [[run.ups, run.upRule], [run.downs, run.downRule]]) {
+      const last = list[list.length - 1];
+      const until = open ? "" : `;UNTIL=${icalLocal(last.change.at)}Z`;
+      out.push({
+        kind: list[0].up ? "DAYLIGHT" : "STANDARD",
+        from: list[0].change.from,
+        to: list[0].change.to,
+        start: list[0].local,
+        lines: [`RRULE:FREQ=YEARLY;${rule}${until}`]
+      });
+    }
+  });
+  const groups = /* @__PURE__ */ new Map();
+  for (const onset of single) {
+    const key = `${onset.up}|${onset.change.from}|${onset.change.to}`;
+    groups.set(key, [...groups.get(key) ?? [], onset]);
+  }
+  for (const group of groups.values()) {
+    const [first] = group;
+    out.push({
+      kind: first.up ? "DAYLIGHT" : "STANDARD",
+      from: first.change.from,
+      to: first.change.to,
+      start: first.local,
+      lines: group.length > 1 ? group.map((o) => `RDATE:${icalLocal(o.local)}`) : []
+    });
+  }
+  return out;
+}
+function settled(found, endYear) {
+  const onsets = found.changes.map(onsetOf);
+  const tail = onsets.filter((o) => o.year > endYear - SETTLED_YEARS);
+  if (!tail.length) {
+    return true;
+  }
+  const { runs } = runsOf(onsets);
+  const last = runs[runs.length - 1];
+  return Boolean(last && tail.every((o) => last.ups.includes(o) || last.downs.includes(o)));
+}
+function matches(vtimezone, found) {
+  const zone2 = vtimezoneZone(vtimezone);
+  return found.samples.every(([utc, offset]) => zone2.offsetAt(utc) === offset);
+}
+function yearsIn(calendar, tzid) {
+  const years = [];
+  const yearOf = (value) => {
+    const m = /^(\d{4,})-/.exec(String(value));
+    if (m) {
+      years.push(Number(m[1]));
+    }
+  };
+  const visit = (component) => {
+    if (component.name === "vtimezone") {
+      return;
+    }
+    for (const property of component.getAllProperties()) {
+      if (property.getParameter("tzid") === tzid) {
+        for (const value of property.toJSON().slice(3)) {
+          (Array.isArray(value) ? value : [value]).forEach(yearOf);
+        }
+      }
+    }
+    if (component.getFirstProperty("dtstart")?.getParameter("tzid") === tzid) {
+      for (const name of ["rrule", "exrule"]) {
+        for (const property of component.getAllProperties(name)) {
+          const until = property.toJSON()[3]?.until;
+          if (until !== void 0) {
+            yearOf(until);
+          }
+        }
+      }
+    }
+    component.getAllSubcomponents().forEach(visit);
+  };
+  visit(calendar);
+  return years.length ? [Math.min(...years), Math.max(...years)] : null;
+}
+function generateVtimezone(tzid, firstYear, lastYear) {
+  const zone2 = ianaZone(tzid);
+  if (!zone2) {
+    throw new UpdateFieldsError("UNKNOWN_TZID", `"${tzid}" is no IANA time zone`, { remedy: "fix-value" });
+  }
+  const startYear = Math.min(FIRST_YEAR, firstYear - 1);
+  const local = wallOf(startYear, 1, 1);
+  const start = local - zone2.offsetAt(local);
+  let endYear = Math.max(LAST_SCANNED_YEAR, lastYear + 2);
+  let found;
+  for (; ; ) {
+    const endLocal = wallOf(endYear + 1, 1, 1);
+    found = scan(tzid, zone2.offsetAt, start, endLocal - zone2.offsetAt(endLocal));
+    if (endYear + SCAN_STEP > SCAN_LIMIT || settled(found, endYear)) {
+      break;
+    }
+    endYear += SCAN_STEP;
+  }
+  const odd = (offset) => offset % 60 !== 0;
+  const lastOdd = found.changes.reduce((last, change, i) => odd(change.from) ? i : last, -1);
+  if (lastOdd >= 0 && found.changes[lastOdd].at <= wallOf(firstYear, 1, 1) - DAY3) {
+    const resume = found.changes[lastOdd].at;
+    found = {
+      ...found,
+      start: resume,
+      initial: found.changes[lastOdd].to,
+      changes: found.changes.slice(lastOdd + 1),
+      samples: found.samples.filter(([utc]) => utc >= resume)
+    };
+  }
+  if (odd(found.initial) || found.changes.some((change) => odd(change.to))) {
+    const end = lastOdd >= 0 ? found.changes[lastOdd] : null;
+    const since = end ? icalLocal(end.at + end.to).slice(0, 8) : null;
+    throw new UpdateFieldsError("UNSUPPORTED_VTIMEZONE", `"${tzid}" was on local mean time, an offset in seconds that iCalendar readers cannot read${since ? ` before ${since}` : ""}: give values in UTC${since ? ` or from ${since} on` : ""}`, { remedy: "fix-value" });
+  }
+  for (const rules of [true, false]) {
+    const text = ["BEGIN:VCALENDAR", ...render(tzid, observancesOf(found, rules, endYear)), "END:VCALENDAR"].join("\r\n");
+    const vtimezone = new ICAL4.Component(ICAL4.parse(text)).getFirstSubcomponent("vtimezone");
+    if (matches(vtimezone, found)) {
+      return vtimezone;
+    }
+  }
+  throw new Error(`the VTIMEZONE generated for "${tzid}" does not match the time zone data`);
+}
+function ensureVtimezone(calendar, tzid) {
+  if (calendar.name !== "vcalendar" || vtimezoneIn(calendar, tzid)) {
+    return;
+  }
+  const years = yearsIn(calendar, tzid);
+  if (!years) {
+    return;
+  }
+  const vtimezone = generateVtimezone(tzid, years[0], years[1]);
+  const all = [...calendar.getAllSubcomponents()];
+  const at = all.findIndex((c) => c.name !== "vtimezone");
+  calendar.removeAllSubcomponents();
+  [...all.slice(0, at < 0 ? all.length : at), vtimezone, ...at < 0 ? [] : all.slice(at)].forEach((c) => calendar.addSubcomponent(c));
+}
+
 // src/updateFields.ts
 function describe(value) {
   if (value === null || value === void 0) {
@@ -1580,6 +1944,20 @@ function seriesMaster(calendar, type) {
   }
   const held = [...new Set(calendar.getAllSubcomponents().map((c) => String(c.name).toUpperCase()))];
   throw new UpdateFieldsError("COMPONENT_NOT_FOUND", `No ${types.map((t) => t.toUpperCase()).join(", ")} found in VCALENDAR ` + (held.length ? `(it holds: ${held.join(", ")})` : "(it holds no components)"), { remedy: "fix-value" });
+}
+function namedZone(root, zone2) {
+  if (vtimezoneIn(root, zone2)) {
+    return zone2;
+  }
+  const name = ianaZoneName(zone2);
+  if (!name) {
+    throw new UpdateFieldsError(
+      "UNKNOWN_TZID",
+      `zone "${zone2}" is no IANA time zone (e.g. "Europe/Berlin", "America/New_York") and the object has no VTIMEZONE of that name` + (/^[+-]\d/.test(zone2.trim()) ? '; for a fixed offset give the values with it ("2026-10-26T18:00:00+02:00") instead' : ""),
+      { remedy: "fix-value" }
+    );
+  }
+  return name;
 }
 function updateFields(calendarObject, fields, options = {}) {
   const icalString = typeof calendarObject === "string" ? calendarObject : calendarObject !== null && typeof calendarObject === "object" ? calendarObject.data : void 0;
@@ -1630,10 +2008,33 @@ function updateFields(calendarObject, fields, options = {}) {
     );
   }
   const type = options.type === void 0 ? void 0 : componentType(options.type);
+  if (options.zone !== void 0) {
+    if (typeof options.zone !== "string" || options.zone.trim() === "") {
+      throw new UpdateFieldsError(
+        "INVALID_INPUT",
+        `Invalid input: zone must be an IANA time zone name such as "Europe/Berlin", not ${typeof options.zone === "string" ? "an empty string" : describe(options.zone)}`,
+        { remedy: "fix-value" }
+      );
+    }
+    if (options.floatingTime !== void 0) {
+      throw new UpdateFieldsError(
+        "INVALID_FLOATING_TIME",
+        `floatingTime "${floatingTime}" cannot be combined with zone: with zone "${options.zone}" a time without a zone is wall clock in that zone; leave out floatingTime`,
+        { remedy: "fix-value" }
+      );
+    }
+    if (absoluteTime === "as-given" && options.absoluteTime !== void 0) {
+      throw new UpdateFieldsError(
+        "INVALID_ABSOLUTE_TIME",
+        `absoluteTime "as-given" (write as UTC) cannot be combined with zone: with zone "${options.zone}" an instant is written as its wall-clock time in that zone; leave out absoluteTime`,
+        { remedy: "fix-value" }
+      );
+    }
+  }
   let jcalData;
   let component;
   try {
-    jcalData = ICAL4.parse(icalString);
+    jcalData = ICAL5.parse(icalString);
   } catch (error) {
     throw new UpdateFieldsError(
       "INVALID_ICALENDAR",
@@ -1645,7 +2046,7 @@ function updateFields(calendarObject, fields, options = {}) {
     throw new UpdateFieldsError("INVALID_INPUT", `Invalid input: the text holds ${jcalData.length} top-level components; give one VCALENDAR or VCARD per call`, { remedy: "fix-value" });
   }
   try {
-    component = new ICAL4.Component(jcalData);
+    component = new ICAL5.Component(jcalData);
   } catch (error) {
     throw new UpdateFieldsError(
       "INVALID_ICALENDAR",
@@ -1662,6 +2063,7 @@ function updateFields(calendarObject, fields, options = {}) {
     );
   }
   const actualComponent = component.name === "vcalendar" ? seriesMaster(component, type) : component;
+  const zone2 = options.zone === void 0 ? null : namedZone(component, options.zone.trim());
   const entries = Object.entries(fields).sort(
     ([a], [b]) => Number(b.toLowerCase() === "dtstart") - Number(a.toLowerCase() === "dtstart")
   );
@@ -1673,11 +2075,14 @@ function updateFields(calendarObject, fields, options = {}) {
     icalString
   );
   for (const [key, value] of entries) {
-    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime) && !setRecurValue(actualComponent, key, value, floatingTime)) {
+    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, zone2) && !setRecurValue(actualComponent, key, value, floatingTime, zone2)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }
   series.finish();
+  if (zone2 && [...written].some((name) => actualComponent.getAllProperties(name).some((p) => p.getParameter("tzid") === zone2))) {
+    ensureVtimezone(component, zone2);
+  }
   return series.render(component.toString());
 }
 export {

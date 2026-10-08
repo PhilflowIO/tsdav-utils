@@ -265,7 +265,8 @@ export function frameOf(component: ICAL.Component): Anchor | null {
  * the first pass (RFC 5545 3.3.5), so the instant has none of its own there.
  * An instant always has a wall clock outside a gap, so none lands in one.
  */
-function wallInZone(component: ICAL.Component, upper: string, tzid: string, value: DateValue): DateValue {
+function wallInZone(component: ICAL.Component, upper: string, tzid: string, value: DateValue,
+  named = false): DateValue {
   const zone = zoneOf(component, tzid);
   if (!zone) {
     throw refuse('UNKNOWN_TZID', `${upper}: ${unknownZone(tzid)}, so the instant cannot be ` +
@@ -279,11 +280,27 @@ function wallInZone(component: ICAL.Component, upper: string, tzid: string, valu
   if (zone.toUtc(wall) !== utc) {
     throw refuse('DST_AMBIGUOUS', `${upper}: ${value.jcal.replace(/[-:]/g, '')} is ` +
       `${jcal.replace(/[-:]/g, '')} in "${tzid}", in the second pass of the hour the DST change shows twice, ` +
-      'where that wall-clock time reads as the first pass: give the time in UTC with absoluteTime "as-given", ' +
-      'or another time', upper);
+      'where that wall-clock time reads as the first pass: ' + (named
+        ? `no time in "${tzid}" names this instant; give another time, or leave out zone to write it in UTC`
+        : 'give the time in UTC with absoluteTime "as-given", or another time'), upper);
   }
   return { kind: 'floating', jcal, local: new Date(utc * 1000) };
 }
+
+/** A wall-clock value read in a zone, as the UTC value of its instant (RFC 5545 3.3.5 in a DST change) */
+function utcOfWall(component: ICAL.Component, upper: string, tzid: string, value: DateValue): DateValue {
+  const zone = zoneOf(component, tzid);
+  if (!zone) {
+    throw refuse('UNKNOWN_TZID', `${upper}: ${unknownZone(tzid)}`, upper);
+  }
+  const m = /^(\d{4,})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/.exec(value.jcal)!;
+  const wall = wallOf(...([1, 2, 3, 4, 5, 6].map((i) => Number(m[i])) as [number, number, number, number, number, number]));
+  return { kind: 'utc', jcal: toUtcJcal(new Date(zone.toUtc(wall) * 1000)) };
+}
+
+/** How an anchor reads in a message: "in UTC", "floating", "in \"America/New_York\"" */
+const anchorText = (anchor: Anchor) => anchor.form === 'tzid' ? `in "${anchor.tzid}"`
+  : anchor.form === 'utc' ? 'in UTC' : anchor.form;
 
 /**
  * Write a date or date-time property from a caller-supplied string.
@@ -318,6 +335,7 @@ export function setDateValue(
   raw: string,
   floatingTime: FloatingTime = 'keep',
   absoluteTime: AbsoluteTime = 'as-given',
+  named: string | null = null,
 ): boolean {
   const shape = dateProperty(component, name);
   if (!shape) {
@@ -357,17 +375,37 @@ export function setDateValue(
     throw refuse('VALUE_TYPE_MISMATCH', `${upper} needs a time: DTSTART has one, and ${why}`, upper);
   }
 
-  // The zone a wall-clock value is read in: the property's own TZID, else
-  // DTSTART's. UTC-only properties never take one.
+  // The zone a wall-clock value is read in: the zone the call names, else the
+  // property's own TZID, else DTSTART's. UTC-only properties never take one.
   const own = existing?.getParameter('tzid');
-  const zone = UTC_ONLY.has(lower) ? null
+  let zone = UTC_ONLY.has(lower) ? null
     : typeof own === 'string' && own ? own
     : anchor?.form === 'tzid' ? anchor.tzid
     : null;
 
+  // A named zone: date-times are wall clock there. Where a TZID cannot be
+  // written (the UTC-only properties, a vCard) a value without a zone is read
+  // in it and written as UTC. A value that follows DTSTART cannot be written
+  // in another zone than DTSTART's (an end in the zone of its start, an EXDATE
+  // in the series' own), so that is refused rather than DTSTART changed.
+  if (named && !isDate) {
+    if (UTC_ONLY.has(lower) || component.name === 'vcard') {
+      parsed = parsed.map((p) => p.kind === 'floating' ? utcOfWall(component, upper, named, p) : p);
+      zone = null;
+    } else {
+      if (anchor && anchor.form !== 'date' && !(anchor.form === 'tzid' && anchor.tzid === named)) {
+        throw new UpdateFieldsError('ZONE_MISMATCH', `${upper} follows DTSTART, which is ${anchorText(anchor)}, so it ` +
+          `cannot be written in "${named}": give DTSTART in the same call to move the event into "${named}", or ` +
+          'leave out zone', { remedy: 'same-call', property: upper });
+      }
+      parsed = parsed.map((p) => p.kind === 'utc' ? wallInZone(component, upper, named, p, true) : p);
+      zone = named;
+    }
+  }
+
   // Under "keep-zone" an instant is written as its wall clock in that zone, so
   // the TZID stays: a series keeps its local time across DST changes
-  if (absoluteTime === 'keep-zone' && zone) {
+  if (absoluteTime === 'keep-zone' && zone && !named) {
     parsed = parsed.map((p) => p.kind === 'utc' ? wallInZone(component, upper, zone, p) : p);
   }
 
@@ -589,6 +627,7 @@ function untilTime(
   ruleName: string,
   raw: string,
   floatingTime: FloatingTime,
+  named: string | null,
 ): ICAL.Time {
   let parsed: DateValue;
   try {
@@ -610,6 +649,18 @@ function untilTime(
     throw fail('ZONE_MISMATCH', 'must be a local time without a zone, like the floating DTSTART (RFC 5545 3.3.10), e.g. "2026-10-26T18:00:00"');
   }
 
+  if (parsed.kind === 'floating' && named && anchor?.form !== 'date') {
+    // A named zone reads a time without a zone; UNTIL follows DTSTART, so it
+    // has to be DTSTART's zone too, or there is no DTSTART
+    if (anchor && !(anchor.form === 'tzid' && anchor.tzid === named)) {
+      throw new UpdateFieldsError('ZONE_MISMATCH', `${ruleName} UNTIL follows DTSTART, which is ${anchorText(anchor)}, so ` +
+        `it cannot be read in "${named}": give DTSTART in the same call to move the series into "${named}", give ` +
+        'UNTIL with a zone, or leave out zone', { remedy: 'same-call', property: ruleName });
+    }
+    if (!anchor) {
+      return ICAL.Time.fromDateTimeString(utcOfWall(component, ruleName, named, parsed).jcal);
+    }
+  }
   if (parsed.kind === 'floating') {
     if (anchor?.form === 'tzid') {
       const zone = zoneOf(component, anchor.tzid);
@@ -661,6 +712,7 @@ export function setRecurValue(
   name: string,
   raw: string,
   floatingTime: FloatingTime = 'keep',
+  named: string | null = null,
 ): boolean {
   const lower = name.toLowerCase();
   if (!isRecurProperty(component, lower)) {
@@ -679,7 +731,7 @@ export function setRecurValue(
   parts.delete('UNTIL');
   const recur = ICAL.Recur.fromString([...parts].map(([k, v]) => `${k}=${v}`).join(';'));
   if (until !== undefined) {
-    recur.until = untilTime(component, upper, until, floatingTime);
+    recur.until = untilTime(component, upper, until, floatingTime, named);
   }
 
   let property = component.getFirstProperty(lower);
