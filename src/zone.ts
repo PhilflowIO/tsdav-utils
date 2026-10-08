@@ -43,7 +43,16 @@ export interface Zone {
   toUtc(wall: number): number;
 }
 
-/** A Zone from its offset function; at most one change in any four days is assumed */
+/**
+ * A Zone from its offset function; at most one change in any four days is
+ * assumed.
+ *
+ * Local to UTC is done here rather than with ical.js' Time.convertToZone: in
+ * ical.js 2.2.1 Timezone.utcOffset resolves an ambiguous fall-back hour to the
+ * later instant (`want_daylight = false; // TODO` in lib/ical/timezone.js),
+ * where RFC 5545 3.3.5 wants the first. Once a fixed ical.js release is the
+ * minimum version, this can go back to convertToZone.
+ */
 function zoneFrom(offsetAt: (utc: number) => number): Zone {
   return {
     offsetAt,
@@ -128,7 +137,15 @@ function transitionsOf(vtimezone: ICAL.Component, horizon: number): Transition[]
 
 const transitionCache = new WeakMap<ICAL.Component, { horizon: number; list: Transition[] }>();
 
-/** A zone from a VTIMEZONE's own observances, read in UTC */
+/**
+ * A zone from a VTIMEZONE's own observances, read in UTC.
+ *
+ * UTC to local is done here rather than with ical.js' Time.convertToZone: in
+ * ical.js 2.2.1 Timezone.convert_time looks up the offset with the time already
+ * in UTC as if it were local, so it is an hour off for |offset| hours around
+ * every change (https://github.com/kewisch/ical.js/issues/847). Once a fixed
+ * ical.js release is the minimum version, this can go back to convertToZone.
+ */
 function vtimezoneZone(vtimezone: ICAL.Component): Zone {
   const transitions = (utc: number) => {
     let cached = transitionCache.get(vtimezone);
