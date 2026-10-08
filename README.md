@@ -496,6 +496,10 @@ show it, and a later move could not tell which occurrence it names. So an
 occurrence by its twin is written as the occurrence's own wall clock
 (`EXDATE;TZID=Europe/Berlin:20260329T023000`); an `RDATE` there would repeat the
 occurrence under another name and is refused, `DST_AMBIGUOUS` (`fix-value`).
+Where the rule itself has occurrences on both wall clocks of that instant (a
+`BYHOUR` spanning the skipped hour, e.g. `BYHOUR=2,3`), `expandOccurrences` lists
+both, an `EXDATE` (or cancel) at that instant excludes both, and clients that
+match on the wall clock differ from one another there.
 
 **A value in the list that cannot be read** (`EXDATE:garbage`) is refused in
 every mode, `INVALID_VALUE` (`rewrite-object`): the write has to read the list.
@@ -527,7 +531,9 @@ every mode, `INVALID_VALUE` (`rewrite-object`): the write has to read the list.
 - **`'remove'`** — the values given leave whatever line holds them, matched
   against the values held directly (by instant, never through a wall clock, so
   `EXDATE:20261025T013000Z` in the second pass of a repeated hour is removed by
-  `'2026-10-25T01:30:00Z'`; a date given as a date). A line left empty goes. A
+  `'2026-10-25T01:30:00Z'`; a date given as a date). Each value is read on its
+  own, so one call may mix a date and a time, or times with and without a zone.
+  A line left empty goes. A
   value the list does not hold is refused, `NOT_IN_LIST` (`fix-value`), naming
   the list.
 
@@ -584,7 +590,10 @@ an all-day series).
   naming the occurrence the series has that day.
 - `restoreOccurrences` removes the `EXDATE` values naming each, whatever line and
   zone they are on, matched by instant directly (any stored form can be
-  removed). A date of a timed series excluding the occurrence's day is replaced
+  removed). An id has to be an occurrence of the series, as for a cancel
+  (`UNKNOWN_OCCURRENCE`, `fix-value`) — to take away a stored value that names
+  none, such as an `EXDATE` in the second pass of a repeated hour, use list mode
+  `'remove'`. A date of a timed series excluding the occurrence's day is replaced
   by exclusions of the other occurrences of that day (see above). An id no `EXDATE` names is refused, `NOT_IN_LIST` (`fix-value`). An
   override removed by a cancel does not come back.
 
