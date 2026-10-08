@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isUpdateFieldsError, updateFields } from '../src/index';
+import { createRecurrenceBudget, expandOccurrences, isUpdateFieldsError, updateFields } from '../src/index';
 
 /*
  * EXDATE and RDATE are lists of dates, which an object may spread over several
@@ -175,6 +175,32 @@ describe('an added EXDATE has to name an occurrence', () => {
     const todo = calendar('BEGIN:VTODO', 'UID:t', 'DTSTAMP:20260101T000000Z', 'SUMMARY:x', 'END:VTODO');
     const error = thrown(() => updateFields(todo, { EXDATE: '2026-12-24T10:00:00Z' }, { append: ['EXDATE'] }));
     expect(isUpdateFieldsError(error, 'SERIES_UNVERIFIABLE')).toBe(true);
+  });
+});
+
+describe('with the other options and helpers', () => {
+  it('adds an EXDATE in the named zone, and refuses one that is not an occurrence there', () => {
+    const out = updateFields(berlin('EXDATE;TZID=Europe/Berlin:20261210T100000'), { EXDATE: '2026-12-24T10:00:00' },
+      { zone: 'Europe/Berlin', append: ['EXDATE'] });
+    expect(lines(out, 'EXDATE')).toEqual(
+      ['EXDATE;TZID=Europe/Berlin:20261210T100000', 'EXDATE;TZID=Europe/Berlin:20261224T100000']);
+    // 10:00 in New York is not 10:00 in Berlin
+    expect(() => updateFields(berlin(), { EXDATE: '2026-12-24T10:00:00-05:00' },
+      { zone: 'Europe/Berlin', append: ['EXDATE'] })).toThrow(/names no occurrence/);
+  });
+
+  it('replaces every line in the named zone on a plain write', () => {
+    const out = updateFields(berlin('EXDATE:20261210T090000Z', 'EXDATE;TZID=Europe/Berlin:20261217T100000'),
+      { EXDATE: '2026-12-24T10:00:00' }, { zone: 'Europe/Berlin' });
+    expect(lines(out, 'EXDATE')).toEqual(['EXDATE;TZID=Europe/Berlin:20261224T100000']);
+  });
+
+  it('expandOccurrences leaves out every excluded occurrence, old and added, over all lines', () => {
+    const out = updateFields(berlin('EXDATE:20261210T090000Z', 'EXDATE;TZID=Europe/Berlin:20261217T100000'),
+      { EXDATE: '2026-12-31T09:00:00Z' }, { append: ['EXDATE'] });
+    const starts = expandOccurrences(out, { budget: createRecurrenceBudget(), from: '2026-12-01T00:00:00Z',
+      until: '2027-01-08T00:00:00Z' }).occurrences.map((o) => o.start.value);
+    expect(starts).toEqual(['2026-12-03T10:00:00', '2026-12-24T10:00:00', '2027-01-07T10:00:00']);
   });
 });
 
