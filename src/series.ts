@@ -250,18 +250,37 @@ function startOf(master: ICAL.Component): { frame: Anchor; wall: number; text: s
   return { frame, wall: stampOf(String(valuesOf(dtstart)[0])).wall, text: dtstart.toICALString() };
 }
 
-/** Occurrences expanded per rule before an expansion stops and is partial */
+/**
+ * Occurrences expanded per rule before an expansion stops and is partial: up
+ * to the latest override or EXDATE that is checked, and for comparing the
+ * series before and after a move. A rule part that pins days shows within the
+ * first weeks or months, so that comparison needs fewer.
+ */
 const EXPANSION_LIMIT = 1000;
+const COMPARISON_LIMIT = 80;
 
 /**
- * Candidates ical.js may test while expanding the rules of one series. A
- * sparse rule (FREQ=MINUTELY;BYMONTH=12;BYMONTHDAY=31) makes it step through
- * every minute of the year to find the next occurrence; this caps that work
- * deterministically, at well under a second.
+ * The work ical.js may do expanding the rules of a series once, in units of
+ * about a microsecond. A sparse rule (FREQ=MINUTELY;BYMONTH=12;BYMONTHDAY=31)
+ * makes it test every minute of the year to find the next occurrence; this
+ * caps that work deterministically. A write expands at most three times, so
+ * the worst case stays well under a second even on a loaded machine.
  */
-const STEP_BUDGET = 200000;
+const WORK_BUDGET = 150000;
 
-/** An expansion that ran out of STEP_BUDGET: the check cannot be made, so it fails closed */
+/**
+ * What testing one candidate costs per FREQ, in the units of WORK_BUDGET
+ * (measured with ical.js 2.2: a SECONDLY candidate about 1 us, an HOURLY or
+ * WEEKLY one 10 us, a MONTHLY or YEARLY one 45 us).
+ */
+const STEP_COST: Record<string, number> = {
+  SECONDLY: 1, MINUTELY: 1, HOURLY: 10, DAILY: 3, WEEKLY: 10, MONTHLY: 45, YEARLY: 45,
+};
+
+/** Candidates tested since the module loaded, so a test can see the budget is charged */
+export const expansionWork = { steps: 0 };
+
+/** An expansion that ran out of WORK_BUDGET: the check cannot be made, so it fails closed */
 class SeriesTooSparse extends Error {}
 
 /**
@@ -269,14 +288,16 @@ class SeriesTooSparse extends Error {}
  * every candidate passes check_contracting_rules once, so that is where the
  * budget is charged.
  */
-function metered(iterator: ICAL.RecurIterator, budget: { left: number }): ICAL.RecurIterator {
+function metered(iterator: ICAL.RecurIterator, budget: { left: number }, freq: string): ICAL.RecurIterator {
+  const cost = STEP_COST[freq] ?? 45;
   const it = iterator as unknown as { check_contracting_rules?: (...args: unknown[]) => unknown };
   const check = it.check_contracting_rules;
   if (typeof check !== 'function') {
     throw new SeriesTooSparse('ical.js no longer exposes the step a rule expansion can be bounded at');
   }
   it.check_contracting_rules = function (this: unknown, ...args: unknown[]) {
-    if (--budget.left < 0) {
+    expansionWork.steps++;
+    if ((budget.left -= cost) < 0) {
       throw new SeriesTooSparse('the rule is too sparse to expand within the work limit');
     }
     return check.apply(this, args);
@@ -299,7 +320,7 @@ interface Expansion {
  * too. Each rule is expanded up to `until` (a wall clock), or EXPANSION_LIMIT
  * instances. Null where it cannot be told (a zone that cannot be resolved).
  */
-function expand(master: ICAL.Component, until = Infinity): Expansion | null {
+function expand(master: ICAL.Component, until = Infinity, limit = EXPANSION_LIMIT): Expansion | null {
   const start = startOf(master);
   if (!start) {
     return null;
@@ -312,7 +333,7 @@ function expand(master: ICAL.Component, until = Infinity): Expansion | null {
     : ICAL.Time.fromDateTimeString(jcalOf(wall, 'floating'));
   const walls = new Set([norm(start.wall)]);
   let horizon = Infinity;
-  const budget = { left: STEP_BUDGET };
+  const budget = { left: WORK_BUDGET };
   try {
     for (const rdate of master.getAllProperties('rdate')) {
       for (const stamp of propertyStamps(rdate)) {
@@ -324,7 +345,7 @@ function expand(master: ICAL.Component, until = Infinity): Expansion | null {
       if (recur.until) {
         recur.until = timeOf(norm(wallIn(master, stampOf(recur.until.toString()), frame)));
       }
-      const iterator = metered(recur.iterator(timeOf(start.wall)), budget);
+      const iterator = metered(recur.iterator(timeOf(start.wall)), budget, recur.freq);
       for (let i = 0; ; i++) {
         const next = iterator.next();
         if (!next) {
@@ -335,7 +356,7 @@ function expand(master: ICAL.Component, until = Infinity): Expansion | null {
         if (wall >= until) {
           break;
         }
-        if (i >= EXPANSION_LIMIT) {
+        if (i >= limit) {
           horizon = Math.min(horizon, wall);
           break;
         }
@@ -507,7 +528,7 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
   const start = written.has('dtstart') ? startOf(master) : null;
   // Without a new rule the series has to come out the same, moved
   const keepsRule = !['rrule', 'exrule', 'rdate'].some((name) => written.has(name));
-  const expansion = start && keepsRule ? expand(master) : null;
+  const expansion = start && keepsRule ? expand(master, Infinity, COMPARISON_LIMIT) : null;
 
   return {
     finish() {
@@ -581,7 +602,7 @@ function checkMovedSeries(master: ICAL.Component, before: Expansion, move: Move,
   }))].sort((a, b) => a - b);
   const expectedHorizon = before.horizon === Infinity ? Infinity
     : moved(inFrame(before.horizon, before.frame), move);
-  const after = expand(master, expectedHorizon);
+  const after = expand(master, expectedHorizon, COMPARISON_LIMIT);
   if (!after) {
     return;
   }

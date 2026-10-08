@@ -648,24 +648,37 @@ function startOf(master) {
   return { frame, wall: stampOf(String(valuesOf(dtstart)[0])).wall, text: dtstart.toICALString() };
 }
 var EXPANSION_LIMIT = 1e3;
-var STEP_BUDGET = 2e5;
+var COMPARISON_LIMIT = 80;
+var WORK_BUDGET = 15e4;
+var STEP_COST = {
+  SECONDLY: 1,
+  MINUTELY: 1,
+  HOURLY: 10,
+  DAILY: 3,
+  WEEKLY: 10,
+  MONTHLY: 45,
+  YEARLY: 45
+};
+var expansionWork = { steps: 0 };
 var SeriesTooSparse = class extends Error {
 };
-function metered(iterator, budget) {
+function metered(iterator, budget, freq) {
+  const cost = STEP_COST[freq] ?? 45;
   const it = iterator;
   const check = it.check_contracting_rules;
   if (typeof check !== "function") {
     throw new SeriesTooSparse("ical.js no longer exposes the step a rule expansion can be bounded at");
   }
   it.check_contracting_rules = function(...args) {
-    if (--budget.left < 0) {
+    expansionWork.steps++;
+    if ((budget.left -= cost) < 0) {
       throw new SeriesTooSparse("the rule is too sparse to expand within the work limit");
     }
     return check.apply(this, args);
   };
   return iterator;
 }
-function expand(master, until = Infinity) {
+function expand(master, until = Infinity, limit = EXPANSION_LIMIT) {
   const start = startOf(master);
   if (!start) {
     return null;
@@ -676,7 +689,7 @@ function expand(master, until = Infinity) {
   const timeOf = (wall) => day ? ICAL3.Time.fromDateString(jcalOf(wall, frame)) : ICAL3.Time.fromDateTimeString(jcalOf(wall, "floating"));
   const walls = /* @__PURE__ */ new Set([norm(start.wall)]);
   let horizon = Infinity;
-  const budget = { left: STEP_BUDGET };
+  const budget = { left: WORK_BUDGET };
   try {
     for (const rdate of master.getAllProperties("rdate")) {
       for (const stamp of propertyStamps(rdate)) {
@@ -688,7 +701,7 @@ function expand(master, until = Infinity) {
       if (recur.until) {
         recur.until = timeOf(norm(wallIn(master, stampOf(recur.until.toString()), frame)));
       }
-      const iterator = metered(recur.iterator(timeOf(start.wall)), budget);
+      const iterator = metered(recur.iterator(timeOf(start.wall)), budget, recur.freq);
       for (let i = 0; ; i++) {
         const next = iterator.next();
         if (!next) {
@@ -699,7 +712,7 @@ function expand(master, until = Infinity) {
         if (wall >= until) {
           break;
         }
-        if (i >= EXPANSION_LIMIT) {
+        if (i >= limit) {
           horizon = Math.min(horizon, wall);
           break;
         }
@@ -822,7 +835,7 @@ function startSeriesEdit(calendar, master, written) {
   const watched = references.filter((_, i) => before[i] === true);
   const start = written.has("dtstart") ? startOf(master) : null;
   const keepsRule = !["rrule", "exrule", "rdate"].some((name) => written.has(name));
-  const expansion = start && keepsRule ? expand(master) : null;
+  const expansion = start && keepsRule ? expand(master, Infinity, COMPARISON_LIMIT) : null;
   return {
     finish() {
       const now = start && startOf(master);
@@ -879,7 +892,7 @@ function checkMovedSeries(master, before, move, from, to) {
     return day ? dayOf(w) : w;
   }))].sort((a, b) => a - b);
   const expectedHorizon = before.horizon === Infinity ? Infinity : moved(inFrame(before.horizon, before.frame), move);
-  const after = expand(master, expectedHorizon);
+  const after = expand(master, expectedHorizon, COMPARISON_LIMIT);
   if (!after) {
     return;
   }

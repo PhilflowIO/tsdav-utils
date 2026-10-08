@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import ICAL from 'ical.js';
 import { updateFields } from '../src/updateFields';
+import { expansionWork } from '../src/series';
 
 // Property check of the whole-series move across DST changes: Berlin series
 // with overrides rescheduled up to days away from their occurrence (so an
@@ -126,6 +127,8 @@ describe('the expansion check is bounded', () => {
   };
 
   it.each([
+    ['HOURLY', 'RRULE:FREQ=HOURLY;BYMONTH=1;BYMONTHDAY=1;BYHOUR=9', 'DTSTART:20260101T090000Z', '2026-01-01T09:30:00Z'],
+    ['DAILY', 'RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=29', 'DTSTART:20280229T090000Z', '2028-02-29T09:30:00Z'],
     ['MINUTELY', 'RRULE:FREQ=MINUTELY;BYMONTH=12;BYMONTHDAY=31;BYHOUR=23', 'DTSTART:20261231T230000Z', '2026-12-31T23:01:00Z'],
     ['SECONDLY', 'RRULE:FREQ=SECONDLY;BYMONTH=12;BYMONTHDAY=31;BYHOUR=23;BYMINUTE=59;BYSECOND=59',
       'DTSTART:20261231T235959Z', '2026-12-31T23:59:58Z'],
@@ -143,6 +146,27 @@ describe('the expansion check is bounded', () => {
     const { ms, error } = timed(() => updateFields(input,
       { RRULE: 'FREQ=SECONDLY;BYMONTH=12;BYMONTHDAY=31;BYHOUR=23;BYMINUTE=59;BYSECOND=59' }));
     expect(error?.message).toMatch(/^Cannot check that the overrides and EXDATEs still name occurrences of the series: .*Rewrite the whole iCalendar object instead$/);
+    expect(ms).toBeLessThan(1000);
+  });
+
+  it('the budget is charged: the step counter in ical.js\' iterator is hooked', () => {
+    // fails if an ical.js release renames the method the budget hooks, which
+    // would leave expansions unbounded
+    const before = expansionWork.steps;
+    updateFields(event('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;COUNT=10'), { DTSTART: '2026-10-05T10:00:00Z' });
+    expect(expansionWork.steps - before).toBeGreaterThan(10);
+  });
+
+  it.each([
+    ['weekly for ten years', 'DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;UNTIL=20361005T090000Z', '2026-10-05T10:00:00Z'],
+    ['daily without end', 'DTSTART:20261005T090000Z', 'RRULE:FREQ=DAILY', '2026-10-05T10:00:00Z'],
+    ['every 15 minutes for a year', 'DTSTART:20260101T000000Z', 'RRULE:FREQ=MINUTELY;INTERVAL=15;UNTIL=20261231T230000Z', '2026-01-01T00:05:00Z'],
+    ['weekdays 9-17, hourly', 'DTSTART:20261005T090000Z', 'RRULE:FREQ=HOURLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9,10,11,12,13,14,15,16,17', '2026-10-05T09:30:00Z'],
+    ['weekly via hourly', 'DTSTART:20261005T090000Z', 'RRULE:FREQ=HOURLY;BYDAY=MO;BYHOUR=9', '2026-10-05T09:30:00Z'],
+    ['monthly via hourly', 'DTSTART:20261001T090000Z', 'RRULE:FREQ=HOURLY;BYMONTHDAY=1;BYHOUR=9', '2026-10-01T09:30:00Z'],
+  ])('a legitimate rule is not refused: %s', (_, dtstart, rule, moved) => {
+    const { ms, error } = timed(() => updateFields(event(dtstart, rule), { DTSTART: moved }));
+    expect(error).toBeNull();
     expect(ms).toBeLessThan(1000);
   });
 
