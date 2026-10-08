@@ -329,7 +329,8 @@ occurrence is at this moment", and the series keeps that moment's local time.
   in a zone, an existing timed `DTEND` (or a todo's `DUE`) is written in the zone
   too, at the same distance from the new start: on the wall clock where start
   and end shared a zone (a Berlin 10:00–11:00 meeting moved to 10:00 New York
-  ends at 11:00 New York), in elapsed time where they did not (a flight).
+  ends at 11:00 New York), in elapsed time where they did not (a flight: 25
+  hours stay 25 hours, also across a DST change).
   An end left behind would be read in its old zone — hours off, or before the
   start.
 - **No end before its start:** in a call with `zone` that writes DTSTART, DTEND
@@ -379,29 +380,37 @@ components (also available on its own as `generateVtimezone`, see
   Egypt's "Friday after the last Thursday of October", which can be 1 November,
   as `BYYEARDAY=-67,...,-61;BYDAY=FR`), ended by `UNTIL` where the rule ended.
   Any other change (a one-year decree) is listed by date (`RDATE`).
-- **The zone's final state comes last**, with the latest `DTSTART`s: its current
-  rule as an open `DAYLIGHT`/`STANDARD` pair, which covers an unbounded series,
-  or — where the zone no longer changes, like `America/Sao_Paulo` since 2019 or
-  `Europe/Moscow` since 2014 — its last change as an observance of its own.
-  Outlook and Exchange take the observances with the latest `DTSTART` as the
-  zone's rule (MS-OXCICAL 2.1.3.1.1.19.2), so an abolished DST rule never sits
-  there. A zone that never changes has a single `STANDARD` observance.
+- **The zone's final state comes last.** Outlook and Exchange read a zone's
+  current rule from the `STANDARD` with the latest `DTSTART` and the `DAYLIGHT`
+  with the latest `DTSTART`, each picked on its own (MS-OXCICAL
+  2.1.3.1.1.19.2 and its note 61). So both describe the final state: the
+  current rule as an open `DAYLIGHT`/`STANDARD` pair, which covers an unbounded
+  series; or — where the zone no longer changes, like `America/Sao_Paulo`
+  since 2019 or `Europe/Moscow` since 2014 — the last change as a `STANDARD`
+  and a `DAYLIGHT` with the same offsets at the same `DTSTART`, the way
+  Exchange itself writes a zone without DST (note 65). An abolished DST rule is
+  never the latest of its kind. A zone that never changes has a single
+  `STANDARD` observance.
 - `TZNAME` is the zone's abbreviation where Intl has one (`CET`/`CEST`,
   `EST`/`EDT`, `IST`), else its offset (`-03`, `+0545`).
 - A zone whose DST follows no yearly rule is listed by date until the time zone
   data settles into a rule or no change. Of the 418 zones Node 22 knows, four
   pause DST for Ramadan and are listed to 2087, where the tz database's own
   list ends: `Africa/Casablanca`, `Africa/El_Aaiun`, `Asia/Gaza`, `Asia/Hebron`
-  (about 150-210 lines). Every other zone's current rule is an `RRULE`; the
-  median `VTIMEZONE` for a 2026 value is 9 lines.
+  (162-213 lines). Every other zone's current rule is an `RRULE`; the median
+  `VTIMEZONE` for a 2026 value is 9 lines, the largest 23.
 - Before it is used, the `VTIMEZONE` is read back and compared with the zone's
   changes; the tests compare it, read with this library's reader and with
   ical.js, with Intl for 17 zones (every zone with `VTIMEZONE_ALL_ZONES=1`).
 - The same input gives the same text, and a second write finds the `VTIMEZONE`
   and adds no other. The zone's changes are cached per zone for the process (a
-  few hundred numbers at most per zone; about 1 MB for every zone at once), and
-  a new range of years only scans the years not yet scanned; the first use of
-  a zone takes some 10-40 ms.
+  few hundred numbers at most per zone; about 2 MB for every zone at once), and
+  a new range of years only scans the years not yet scanned. A value's last
+  year (an `UNTIL` in 9999, say) scans nothing more: once the zone has settled
+  into its current rule or a last fixed offset, that covers every later year.
+  The first use of a zone in a process takes some 30-60 ms (about 55 ms for
+  the very first, 180-240 ms for the four Ramadan zones), a value back in 1950
+  some 120-200 ms; after that a few ms.
 - It is only added to a `VCALENDAR`: a bare `VEVENT`/`VTODO` gets the `TZID`, and
   the `VTIMEZONE` comes with the `VCALENDAR` you wrap it in. A `VTIMEZONE` that
   no value uses any more (after a series moved into another zone) is left in
@@ -656,8 +665,11 @@ occurrences of a recurring event, todo or journal whose original start lies in
 applied, on the series' wall clock (a weekly 09:00 Berlin series stays at 09:00).
 Each occurrence has `recurrenceId`, `start` and `end` (each `{ value, tzid,
 instant }`, `instant` an ISO UTC string or `null` for dates and floating times)
-and `overridden`. An override moved into the range from outside it is not
-found (selection is by original start).
+and `overridden`. An override is a whole component (RFC 5545 3.8.4.4): it
+ends at its own `DTEND`/`DUE`, else after its own `DURATION`, else after the
+master's length, each from its own start. An override moved into the range
+from outside it is not found (selection is by original start; `until` is an
+exclusive end).
 
 It never loops: ical.js tests rule candidates one by one without a bound of its
 own (`FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0` from 1950 is billions of
