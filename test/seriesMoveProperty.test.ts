@@ -112,9 +112,178 @@ describe('a moved series keeps every occurrence on the wall clock, across DST ch
   });
 });
 
-describe('the expansion check is bounded', () => {
-  const event = (...props: string[]) => ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//EN',
-    'BEGIN:VEVENT', 'UID:s', 'DTSTAMP:20260101T000000Z', ...props, 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+describe('a move is accepted only where the rule provably moves with it', () => {
+  // The oracle: ical.js' own expansion of the series before and after, far
+  // beyond anything updateFields expands (30 years, 3000 occurrences), on a
+  // floating wall clock. Every accepted move must give exactly the occurrences
+  // before, each moved by the same distance.
+  let seed = 22;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const int = (a: number, b: number) => a + Math.floor(rnd() * (b - a + 1));
+  const pick = <T,>(list: T[]): T => list[Math.floor(rnd() * list.length)];
+  const some = <T,>(list: T[], n: number) => [...new Set(Array.from({ length: n }, () => pick(list)))];
+  const D = 86400;
+  const DAYS = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'];
+  const YEARS_30 = 30 * 366 * D;
+  const LIMIT = 3000;
+
+  const p2 = (n: number) => String(n).padStart(2, '0');
+  const fmt = (wall: number, date: boolean) => {
+    const d = new Date(wall * 1000);
+    const ymd = `${d.getUTCFullYear()}${p2(d.getUTCMonth() + 1)}${p2(d.getUTCDate())}`;
+    return date ? ymd : `${ymd}T${p2(d.getUTCHours())}${p2(d.getUTCMinutes())}${p2(d.getUTCSeconds())}`;
+  };
+  const input = (wall: number, date: boolean) => {
+    const iso = new Date(wall * 1000).toISOString();
+    return date ? iso.slice(0, 10) : iso.slice(0, 19);
+  };
+  const wallOfTime = (t: ICAL.Time) => Date.UTC(t.year, t.month - 1, t.day, t.hour, t.minute, t.second) / 1000;
+
+  /** the occurrences of DTSTART + RRULE by ical.js, up to `until` or LIMIT; complete when the rule ended first */
+  const oracle = (dtstart: ICAL.Time, rule: ICAL.Recur, until: number) => {
+    const it = rule.iterator(dtstart);
+    const walls: number[] = [];
+    let next: ICAL.Time | null;
+    while ((next = it.next())) {
+      const w = wallOfTime(next);
+      if (w > until || walls.length >= LIMIT) {
+        return { walls, complete: false, last: walls.at(-1)! };
+      }
+      walls.push(w);
+    }
+    return { walls, complete: true, last: Infinity };
+  };
+  const seriesOf = (ical: string) => {
+    const vevent = new ICAL.Component(ICAL.parse(ical)).getFirstSubcomponent('vevent')!;
+    return { dtstart: vevent.getFirstPropertyValue('dtstart') as ICAL.Time, rule: vevent.getFirstPropertyValue('rrule') as ICAL.Recur };
+  };
+  const event = (dtstart: number, date: boolean, rule: string) => ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//EN',
+    'BEGIN:VEVENT', 'UID:s', 'DTSTAMP:20260101T000000Z', 'SUMMARY:M',
+    date ? `DTSTART;VALUE=DATE:${fmt(dtstart, true)}` : `DTSTART:${fmt(dtstart, false)}`,
+    `RRULE:${rule}`, 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+
+  /**
+   * Move a series and compare with the oracle. Returns 'refused' or
+   * 'accepted'; an accepted move whose occurrences differ fails the test.
+   */
+  const check = (start: number, date: boolean, rule: string, to: number, toDate: boolean, label: string) => {
+    const before = event(start, date, rule);
+    let after: string;
+    try {
+      after = updateFields(before, { DTSTART: input(to, toDate) });
+    } catch (error) {
+      expect((error as Error).message, label).toMatch(/does not move the whole series/);
+      return 'refused';
+    }
+    const dayOf = (w: number) => Math.floor(w / D) * D;
+    const days = (dayOf(to) - dayOf(start)) / D;
+    const move = (w: number) => toDate ? dayOf(w) + days * D
+      : date ? w + days * D + (to - dayOf(to))
+      : w + (to - start);
+    const old = seriesOf(before);
+    const moved = seriesOf(after);
+    const a = oracle(old.dtstart, old.rule, start + YEARS_30);
+    const b = oracle(moved.dtstart, moved.rule, to + YEARS_30);
+    const want = [...new Set(a.walls.map(move))];
+    const horizon = Math.min(a.complete ? Infinity : move(a.last), b.complete ? Infinity : b.last);
+    expect(b.walls.filter((w) => w <= horizon).map((w) => fmt(w, toDate)), `${label}\n${before}\n${after}`)
+      .toEqual(want.filter((w) => w <= horizon).map((w) => fmt(w, toDate)));
+    return 'accepted';
+  };
+
+  const randomRule = (date: boolean) => {
+    const freq = date ? pick(['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY'])
+      : pick(['MINUTELY', 'HOURLY', 'DAILY', 'DAILY', 'WEEKLY', 'WEEKLY', 'MONTHLY', 'YEARLY']);
+    const parts = [`FREQ=${freq}`];
+    if (rnd() < 0.3) parts.push(`INTERVAL=${int(2, 3)}`);
+    if (rnd() < 0.35) parts.push(`BYDAY=${(['MONTHLY', 'YEARLY'].includes(freq) && rnd() < 0.5
+      ? [`${pick(['1', '2', '-1'])}${pick(DAYS)}`] : some(DAYS, int(1, 3))).join(',')}`);
+    if (rnd() < 0.2) parts.push(`BYMONTH=${some(['1', '3', '6', '10', '12'], int(1, 3)).join(',')}`);
+    if (freq !== 'WEEKLY' && rnd() < 0.2) parts.push(`BYMONTHDAY=${some(['1', '5', '15', '28', '31', '-1'], int(1, 2)).join(',')}`);
+    if (!date && rnd() < 0.2) parts.push(`BYHOUR=${some(['6', '9', '13', '17'], int(1, 2)).join(',')}`);
+    if (!date && freq === 'MINUTELY' && rnd() < 0.3) parts.push(`BYMINUTE=${some(['0', '15', '30'], int(1, 2)).join(',')}`);
+    if (freq === 'MONTHLY' && parts.some((x) => x.startsWith('BYDAY')) && rnd() < 0.3) parts.push('BYSETPOS=-1');
+    const end = pick(['count', 'until', 'none']);
+    if (end === 'count') parts.push(`COUNT=${int(3, 60)}`);
+    return { freq, rule: parts.join(';'), end };
+  };
+
+  it('every accepted random move keeps the occurrences, each moved (2000 series)', () => {
+    let accepted = 0;
+    for (let i = 0; i < 2000; i++) {
+      const date = rnd() < 0.2;
+      const start = Date.UTC(2026, int(0, 11), int(1, 28)) / 1000 + (date ? 0 : int(0, 23) * 3600 + pick([0, 15, 30, 45]) * 60);
+      let { freq, rule, end } = randomRule(date);
+      if (end === 'until') {
+        const span = { MINUTELY: 3600, HOURLY: 3 * D, DAILY: 60 * D, WEEKLY: 300 * D, MONTHLY: 900 * D, YEARLY: 4000 * D }[freq]!;
+        rule += `;UNTIL=${fmt(start + span, date)}`;
+      }
+      const kind = pick(['time', 'date', 'week', 'both', 'switch']);
+      const days = kind === 'week' ? 7 * int(-3, 3) : int(-40, 40);
+      const minutes = pick([15, 30, 60, 90, 300, -60, -120]);
+      let to = start;
+      let toDate = date;
+      if (kind === 'switch' && freq !== 'MINUTELY' && freq !== 'HOURLY') {
+        toDate = !date;
+        to = Math.floor(start / D) * D + days * D + (toDate ? 0 : int(6, 20) * 3600);
+      } else if (date) {
+        to = start + days * D;
+      } else {
+        to = start + (kind === 'time' ? minutes * 60 : kind === 'both' ? days * D + minutes * 60 : days * D);
+      }
+      if (to === start && toDate === date) {
+        continue;
+      }
+      if (check(start, date, rule, to, toDate, `case ${i}: ${rule} by ${kind}`) === 'accepted') {
+        accepted++;
+      }
+    }
+    console.log(`random rules and moves: ${accepted} of 2000 accepted, each checked against ical.js`);
+    expect(accepted).toBeGreaterThan(500);
+  });
+
+  it('realistic rules are accepted: weekly by weekday at a new time, daily, monthly by a date up to the 28th', () => {
+    const cases: [number, boolean, string, number, boolean][] = [];
+    for (let i = 0; i < 300; i++) {
+      const start = Date.UTC(2026, int(0, 11), int(1, 20)) / 1000 + int(6, 20) * 3600;
+      const end = pick(['', `;COUNT=${int(5, 50)}`, `;UNTIL=${fmt(start + int(30, 900) * D, false)}`]);
+      const weekday = DAYS[(new Date(start * 1000).getUTCDay() + 6) % 7];
+      cases.push([start, false, `FREQ=WEEKLY;BYDAY=${weekday}${end}`, start + pick([30, 60, -60, 120]) * 60, false]);
+      cases.push([start, false, `FREQ=WEEKLY;BYDAY=${weekday},${pick(DAYS)}${end}`, start + 7 * int(-4, 4) * D, false]);
+      cases.push([start, false, `FREQ=DAILY${end}`, start + int(-30, 30) * D + pick([0, 3600, -1800]), false]);
+      cases.push([start, false, `FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR${end}`, start + pick([3600, -3600, 7 * D]), false]);
+      const day = new Date(start * 1000).getUTCDate();
+      cases.push([start, false, `FREQ=MONTHLY${end}`, start + int(1 - day, 28 - day) * D + pick([0, 3600]), false]);
+    }
+    const refused = cases.filter(([s, d, r, t, td], i) => check(s, d, r, t, td, `realistic ${i}: ${r}`) === 'refused');
+    console.log(`realistic rules and moves: ${refused.length} of ${cases.length} refused`);
+    expect(refused.map(([, , r]) => r)).toEqual([]);
+  });
+
+  it.each([
+    ['DAILY;BYMONTH=1..11 a day later', 'FREQ=DAILY;BYMONTH=1,2,3,4,5,6,7,8,9,10,11', D],
+    ['HOURLY;BYMONTH=1 an hour later', 'FREQ=HOURLY;BYMONTH=1', 3600],
+    ['WEEKLY;BYMONTH=1..6,9..12 a day later', 'FREQ=WEEKLY;BYMONTH=1,2,3,4,5,6,9,10,11,12', D],
+  ])('refuses %s, which diverges only after hundreds of occurrences', (_, rule, distance) => {
+    const start = Date.UTC(2026, 0, 5, 9) / 1000;
+    expect(check(start, false, rule, start + distance, false, rule)).toBe('refused');
+  });
+
+  it('accepts WEEKLY;INTERVAL=2;BYDAY moved by a week, which shifts the active weeks with it', () => {
+    const start = Date.UTC(2026, 0, 5, 9) / 1000;
+    expect(check(start, false, 'FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE;WKST=SU', start + 7 * D, false, 'biweekly')).toBe('accepted');
+  });
+
+  it('refuses a monthly move across a month end, which meets months of different lengths', () => {
+    const start = Date.UTC(2026, 0, 25, 9) / 1000;
+    expect(check(start, false, 'FREQ=MONTHLY', start + 9 * D, false, 'monthly 25th -> 3rd')).toBe('refused');
+  });
+});
+
+describe('the orphan check is bounded', () => {
+  const calendar = (...lines: string[]) => ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//EN', ...lines,
+    'END:VCALENDAR', ''].join('\r\n');
+  const vevent = (...lines: string[]) => ['BEGIN:VEVENT', 'UID:s', 'DTSTAMP:20260101T000000Z', ...lines, 'END:VEVENT'];
   const timed = (f: () => void) => {
     const t0 = performance.now();
     let error: Error | null = null;
@@ -126,55 +295,41 @@ describe('the expansion check is bounded', () => {
     return { ms: performance.now() - t0, error };
   };
 
-  it.each([
-    ['HOURLY', 'RRULE:FREQ=HOURLY;BYMONTH=1;BYMONTHDAY=1;BYHOUR=9', 'DTSTART:20260101T090000Z', '2026-01-01T09:30:00Z'],
-    ['DAILY', 'RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=29', 'DTSTART:20280229T090000Z', '2028-02-29T09:30:00Z'],
-    ['MINUTELY', 'RRULE:FREQ=MINUTELY;BYMONTH=12;BYMONTHDAY=31;BYHOUR=23', 'DTSTART:20261231T230000Z', '2026-12-31T23:01:00Z'],
-    ['SECONDLY', 'RRULE:FREQ=SECONDLY;BYMONTH=12;BYMONTHDAY=31;BYHOUR=23;BYMINUTE=59;BYSECOND=59',
-      'DTSTART:20261231T235959Z', '2026-12-31T23:59:58Z'],
-  ])('a sparse %s rule fails closed, well under a second', (_, rule, dtstart, moved) => {
-    const { ms, error } = timed(() => updateFields(event(dtstart, rule), { DTSTART: moved }));
-    expect(error?.message).toMatch(/^Cannot check that moving DTSTART keeps the series' occurrences: RRULE:FREQ=\w+;.*too sparse to expand within the work limit\. Give RRULE, UNTIL and EXDATE explicitly in the same call, or rewrite the whole iCalendar object$/);
-    expect(ms).toBeLessThan(1000);
-  });
-
-  it('the orphan check of a sparse rule given in the call fails closed too', () => {
-    const input = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//EN',
-      'BEGIN:VEVENT', 'UID:s', 'DTSTAMP:20260101T000000Z', 'DTSTART:20260101T235959Z', 'RRULE:FREQ=DAILY', 'END:VEVENT',
-      'BEGIN:VEVENT', 'UID:s', 'DTSTAMP:20260101T000000Z', 'RECURRENCE-ID:20261231T235959Z',
-      'DTSTART:20261231T235959Z', 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+  it('a sparse rule given in the call fails closed, well under a second', () => {
+    const input = calendar(...vevent('DTSTART:20260101T235959Z', 'RRULE:FREQ=DAILY'),
+      ...vevent('RECURRENCE-ID:20261231T235959Z', 'DTSTART:20261231T235959Z'));
     const { ms, error } = timed(() => updateFields(input,
       { RRULE: 'FREQ=SECONDLY;BYMONTH=12;BYMONTHDAY=31;BYHOUR=23;BYMINUTE=59;BYSECOND=59' }));
     expect(error?.message).toMatch(/^Cannot check that the overrides and EXDATEs still name occurrences of the series: .*Rewrite the whole iCalendar object instead$/);
     expect(ms).toBeLessThan(1000);
   });
 
-  it('the budget is charged: the step counter in ical.js\' iterator is hooked', () => {
-    // fails if an ical.js release renames the method the budget hooks, which
-    // would leave expansions unbounded
-    const before = expansionWork.steps;
-    updateFields(event('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;COUNT=10'), { DTSTART: '2026-10-05T10:00:00Z' });
-    expect(expansionWork.steps - before).toBeGreaterThan(10);
-  });
-
   it.each([
-    ['weekly for ten years', 'DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;UNTIL=20361005T090000Z', '2026-10-05T10:00:00Z'],
-    ['daily without end', 'DTSTART:20261005T090000Z', 'RRULE:FREQ=DAILY', '2026-10-05T10:00:00Z'],
-    ['every 15 minutes for a year', 'DTSTART:20260101T000000Z', 'RRULE:FREQ=MINUTELY;INTERVAL=15;UNTIL=20261231T230000Z', '2026-01-01T00:05:00Z'],
-    ['weekdays 9-17, hourly', 'DTSTART:20261005T090000Z', 'RRULE:FREQ=HOURLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9,10,11,12,13,14,15,16,17', '2026-10-05T09:30:00Z'],
-    ['weekly via hourly', 'DTSTART:20261005T090000Z', 'RRULE:FREQ=HOURLY;BYDAY=MO;BYHOUR=9', '2026-10-05T09:30:00Z'],
-    ['monthly via hourly', 'DTSTART:20261001T090000Z', 'RRULE:FREQ=HOURLY;BYMONTHDAY=1;BYHOUR=9', '2026-10-01T09:30:00Z'],
-  ])('a legitimate rule is not refused: %s', (_, dtstart, rule, moved) => {
-    const { ms, error } = timed(() => updateFields(event(dtstart, rule), { DTSTART: moved }));
-    expect(error).toBeNull();
+    ['DAILY;INTERVAL=5000;BYMONTH=2;BYMONTHDAY=29', 'DTSTART:20280229T090000Z', 'RECURRENCE-ID:20280229T090000Z'],
+    ['WEEKLY;INTERVAL=5000;BYMONTH=2', 'DTSTART:20260202T090000Z', 'RECURRENCE-ID:20260202T090000Z'],
+    ['YEARLY;INTERVAL=5000;BYMONTH=2;BYMONTHDAY=29;BYDAY=MO', 'DTSTART:20160229T090000Z', 'RECURRENCE-ID:20160229T090000Z'],
+  ])('%s with an override, and an RDATE written: bounded', (rule, dtstart, rid) => {
+    const input = calendar(...vevent(dtstart, `RRULE:FREQ=${rule}`),
+      ...vevent(rid, dtstart.replace('DTSTART', 'DTSTART')));
+    const { ms } = timed(() => updateFields(input, { RDATE: '2030-01-01T09:00:00Z' }));
     expect(ms).toBeLessThan(1000);
   });
 
-  it('dense rules stay well inside the limit', () => {
-    const { ms, error } = timed(() => updateFields(
-      event('DTSTART:20260101T000000Z', 'RRULE:FREQ=MINUTELY', 'RRULE:FREQ=SECONDLY', 'RRULE:FREQ=HOURLY'),
-      { DTSTART: '2026-01-01T00:00:30Z' }));
-    expect(error).toBeNull();
-    expect(ms).toBeLessThan(1000);
+  it('the expansion is metered: the step counter in ical.js\' iterator is hooked', () => {
+    // fails if an ical.js release renames the method the bound hooks, which
+    // would leave the expansion unbounded
+    const before = expansionWork.steps;
+    updateFields(calendar(...vevent('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;COUNT=10'),
+      ...vevent('RECURRENCE-ID:20261102T090000Z', 'DTSTART:20261102T100000Z')), { RRULE: 'FREQ=WEEKLY;COUNT=12' });
+    expect(expansionWork.steps - before).toBeGreaterThan(3);
+  });
+
+  it('a move is decided without expanding anything', () => {
+    const before = expansionWork.steps;
+    const { ms, error } = timed(() => updateFields(calendar(...vevent('DTSTART:20261231T230000Z',
+      'RRULE:FREQ=MINUTELY;BYMONTH=12;BYMONTHDAY=31;BYHOUR=23')), { DTSTART: '2026-12-31T23:01:00Z' }));
+    expect(error?.message).toMatch(/does not move the whole series/);
+    expect(expansionWork.steps).toBe(before);
+    expect(ms).toBeLessThan(100);
   });
 });

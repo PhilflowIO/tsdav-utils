@@ -1,9 +1,10 @@
 // Run by CI inside a fresh consumer install of the packed tarball, against the
-// ical.js version npm resolves there (the package allows ^2.0.1). The series
-// move hooks ical.js internals to bound its work; this checks the hook still
-// holds on whatever ical.js a consumer gets: a move works, a rule that does
-// not follow is refused, and a sparse rule is refused quickly instead of
-// running for minutes.
+// ical.js version npm resolves there (the package allows ^2.0.1). The check
+// that a new rule keeps every override hooks ical.js internals to bound its
+// work; this checks the hook still holds on whatever ical.js a consumer gets:
+// a series move works, a rule that does not follow it is refused, a rule
+// change keeping the override is accepted, and a sparse one is refused quickly
+// instead of running for minutes.
 import { updateFields } from 'tsdav-utils';
 
 const calendar = (...lines) =>
@@ -40,10 +41,22 @@ if (!/does not move the whole series/.test(pinned ?? '')) {
 }
 console.log('✅ pinned rule refused');
 
-// 3. a sparse rule is refused within the work budget
+// 3. a new rule that keeps the override is checked, through the bounded expansion
+const kept = refusal(() => updateFields(calendar(
+  ...event('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;COUNT=10'),
+  ...event('RECURRENCE-ID:20261102T090000Z', 'DTSTART:20261102T100000Z'),
+), { RRULE: 'FREQ=WEEKLY;COUNT=12' }));
+if (kept !== null) {
+  fail(`a rule change that keeps the override was refused: ${kept}`);
+}
+console.log('✅ rule change checked');
+
+// 4. a sparse new rule is refused within the work budget
 const t0 = Date.now();
-const sparse = refusal(() => updateFields(calendar(...event('DTSTART:20261231T230000Z',
-  'RRULE:FREQ=MINUTELY;BYMONTH=12;BYMONTHDAY=31;BYHOUR=23')), { DTSTART: '2026-12-31T23:01:00Z' }));
+const sparse = refusal(() => updateFields(calendar(
+  ...event('DTSTART:20260101T235959Z', 'RRULE:FREQ=DAILY'),
+  ...event('RECURRENCE-ID:20261231T235959Z', 'DTSTART:20261231T235959Z'),
+), { RRULE: 'FREQ=SECONDLY;BYMONTH=12;BYMONTHDAY=31;BYHOUR=23;BYMINUTE=59;BYSECOND=59' }));
 const ms = Date.now() - t0;
 if (!/too sparse to expand within the work limit/.test(sparse ?? '') || ms > 5000) {
   fail(`a sparse rule was not refused within the budget (${ms} ms): ${sparse}`);

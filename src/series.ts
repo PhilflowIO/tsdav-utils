@@ -21,11 +21,13 @@ import { fieldsOf, unknownZone, wallOf, zoneOf } from './zone';
  * the master and its exceptions, CalRecurrenceInfo.onStartDateChange).
  *
  * The invariant: the occurrences after are the occurrences before, each moved
- * by that distance. A rule part that pins days (BYDAY=MO, BYMONTHDAY=5) does
- * not move with DTSTART, so when the caller gives no new RRULE the expansion
- * is compared before and after, and a difference throws. When the caller does
+ * by that distance. Whether a move keeps it is decided from the rule itself,
+ * not by expanding it (see moveBreaksRule): a part that pins days or times
+ * (BYDAY=MO, BYMONTHDAY=5, BYHOUR=9) does not move with DTSTART, so a move it
+ * does not follow throws and suggests the rule to give. When the caller does
  * give RRULE or RDATE, the occurrences are theirs to choose, but an override or
- * EXDATE that named an occurrence before must still name one.
+ * EXDATE that named an occurrence before must still name one; that is checked
+ * by expanding the series up to the furthest of them.
  */
 
 const DAY = 86400;
@@ -57,11 +59,6 @@ function stampOf(jcal: string, tzid?: unknown): Stamp {
   }
   return typeof tzid === 'string' && tzid ? { wall, kind: 'tzid', tzid } : { wall, kind: 'floating' };
 }
-
-/** A wall clock in a frame, as the stamp of a value written there */
-const inFrame = (wall: number, frame: Anchor): Stamp => frame.form === 'tzid'
-  ? { wall, kind: 'tzid', tzid: frame.tzid }
-  : { wall, kind: frame.form };
 
 /** The values of a property as jCal strings (PERIOD values are arrays) */
 const valuesOf = (property: ICAL.Property): unknown[] => (property.toJSON() as unknown[]).slice(3);
@@ -251,31 +248,29 @@ function startOf(master: ICAL.Component): { frame: Anchor; wall: number; text: s
 }
 
 /**
- * Occurrences expanded per rule before an expansion stops and is partial: up
- * to the latest override or EXDATE that is checked, and for comparing the
- * series before and after a move. A rule part that pins days shows within the
- * first weeks or months, so that comparison needs fewer.
- */
-const EXPANSION_LIMIT = 1000;
-const COMPARISON_LIMIT = 80;
-
-/**
  * The work ical.js may do expanding the rules of a series once, in units of
  * about a microsecond. A sparse rule (FREQ=MINUTELY;BYMONTH=12;BYMONTHDAY=31)
  * makes it test every minute of the year to find the next occurrence; this
- * caps that work deterministically. A write expands at most three times, so
- * the worst case stays well under a second even on a loaded machine.
+ * caps that work deterministically. A write expands at most twice, so the
+ * worst case stays well under a second even on a loaded machine.
  */
 const WORK_BUDGET = 150000;
 
 /**
- * What testing one candidate costs per FREQ, in the units of WORK_BUDGET
- * (measured with ical.js 2.2: a SECONDLY candidate about 1 us, an HOURLY or
- * WEEKLY one 10 us, a MONTHLY or YEARLY one 45 us).
+ * What testing one candidate costs, in the units of WORK_BUDGET (measured with
+ * ical.js 2.2): per FREQ, and for DAILY and WEEKLY also per day the iterator
+ * steps over, which it does one by one, so INTERVAL=5000 costs 5000 times more.
  */
-const STEP_COST: Record<string, number> = {
-  SECONDLY: 1, MINUTELY: 1, HOURLY: 10, DAILY: 3, WEEKLY: 10, MONTHLY: 45, YEARLY: 45,
-};
+function stepCost(recur: ICAL.Recur): number {
+  const interval = Math.max(1, recur.interval || 1);
+  switch (recur.freq) {
+    case 'SECONDLY': case 'MINUTELY': return 3;
+    case 'HOURLY': return 10;
+    case 'DAILY': return 5 + Math.ceil(interval * 0.15);
+    case 'WEEKLY': return 15 + Math.ceil(interval * 7 * 0.15);
+    default: return 45;
+  }
+}
 
 /** Candidates tested since the module loaded, so a test can see the budget is charged */
 export const expansionWork = { steps: 0 };
@@ -283,44 +278,48 @@ export const expansionWork = { steps: 0 };
 /** An expansion that ran out of WORK_BUDGET: the check cannot be made, so it fails closed */
 class SeriesTooSparse extends Error {}
 
+/** The iterator has passed the furthest wall clock the expansion needs */
+class HorizonReached extends Error {}
+
 /**
- * Count the candidates a RecurIterator tests. next() has no bound of its own;
- * every candidate passes check_contracting_rules once, so that is where the
- * budget is charged.
+ * Bound a RecurIterator. next() has no bound of its own; every candidate it
+ * tests passes check_contracting_rules once, so that is where the work is
+ * charged against the budget, and where a search past `horizon` (a wall
+ * clock) is cut short: nothing beyond it is needed.
  */
-function metered(iterator: ICAL.RecurIterator, budget: { left: number }, freq: string): ICAL.RecurIterator {
-  const cost = STEP_COST[freq] ?? 45;
-  const it = iterator as unknown as { check_contracting_rules?: (...args: unknown[]) => unknown };
+function bounded(iterator: ICAL.RecurIterator, budget: { left: number }, recur: ICAL.Recur, horizon: number): ICAL.RecurIterator {
+  const cost = stepCost(recur);
+  const it = iterator as unknown as {
+    check_contracting_rules?: (...args: unknown[]) => unknown;
+    last?: ICAL.Time;
+  };
   const check = it.check_contracting_rules;
   if (typeof check !== 'function') {
     throw new SeriesTooSparse('ical.js no longer exposes the step a rule expansion can be bounded at');
   }
-  it.check_contracting_rules = function (this: unknown, ...args: unknown[]) {
+  it.check_contracting_rules = function (this: typeof it, ...args: unknown[]) {
     expansionWork.steps++;
     if ((budget.left -= cost) < 0) {
       throw new SeriesTooSparse('the rule is too sparse to expand within the work limit');
+    }
+    const last = this.last;
+    if (last && wallOf(last.year, last.month, last.day, last.hour, last.minute, last.second) > horizon) {
+      throw new HorizonReached();
     }
     return check.apply(this, args);
   };
   return iterator;
 }
 
-/** The occurrences of a series on its wall clock, ascending; partial when a rule went on past the limit */
-interface Expansion {
-  frame: Anchor;
-  walls: number[];
-  /** the last wall clock the expansion vouches for: Infinity when it is complete */
-  horizon: number;
-}
-
 /**
- * The occurrences of the series as it stands — DTSTART, the instances of each
- * RRULE and the RDATEs (EXDATE does not count: an override of an excluded
- * instance still names it), on the series' wall clock with UNTIL read on it
- * too. Each rule is expanded up to `until` (a wall clock), or EXPANSION_LIMIT
- * instances. Null where it cannot be told (a zone that cannot be resolved).
+ * The occurrences of the series as it stands up to `until` (a wall clock of the
+ * series' frame) — DTSTART, the instances of each RRULE and the RDATEs (EXDATE
+ * does not count: an override of an excluded instance still names it), on the
+ * series' wall clock with UNTIL read on it too. Null where it cannot be told
+ * (a zone that cannot be resolved); throws SeriesTooSparse when the budget
+ * runs out first.
  */
-function expand(master: ICAL.Component, until = Infinity, limit = EXPANSION_LIMIT): Expansion | null {
+function expand(master: ICAL.Component, until: number): Set<number> | null {
   const start = startOf(master);
   if (!start) {
     return null;
@@ -332,7 +331,6 @@ function expand(master: ICAL.Component, until = Infinity, limit = EXPANSION_LIMI
     ? ICAL.Time.fromDateString(jcalOf(wall, frame))
     : ICAL.Time.fromDateTimeString(jcalOf(wall, 'floating'));
   const walls = new Set([norm(start.wall)]);
-  let horizon = Infinity;
   const budget = { left: WORK_BUDGET };
   try {
     for (const rdate of master.getAllProperties('rdate')) {
@@ -345,20 +343,19 @@ function expand(master: ICAL.Component, until = Infinity, limit = EXPANSION_LIMI
       if (recur.until) {
         recur.until = timeOf(norm(wallIn(master, stampOf(recur.until.toString()), frame)));
       }
-      const iterator = metered(recur.iterator(timeOf(start.wall)), budget, recur.freq);
-      for (let i = 0; ; i++) {
-        const next = iterator.next();
-        if (!next) {
-          break;
+      // a date series compares days; its last candidate day starts at `until`
+      const iterator = bounded(recur.iterator(timeOf(start.wall)), budget, recur, day ? until + DAY - 1 : until);
+      try {
+        for (let next = iterator.next(); next; next = iterator.next()) {
+          const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
+          if (wall > until) {
+            break;
+          }
+          walls.add(wall);
         }
-        const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
-        walls.add(wall);
-        if (wall >= until) {
-          break;
-        }
-        if (i >= limit) {
-          horizon = Math.min(horizon, wall);
-          break;
+      } catch (error) {
+        if (!(error instanceof HorizonReached)) {
+          throw error;
         }
       }
     }
@@ -368,7 +365,7 @@ function expand(master: ICAL.Component, until = Infinity, limit = EXPANSION_LIMI
     }
     return null;
   }
-  return { frame, walls: [...walls].sort((a, b) => a - b), horizon };
+  return walls;
 }
 
 /** Which stamps name an occurrence of the series; undefined where it cannot be told */
@@ -389,15 +386,12 @@ function occurrences(master: ICAL.Component, stamps: (Stamp | undefined)[]): (bo
     }
   });
   const known = targets.filter((t): t is number => t !== undefined);
-  const expansion = known.length ? expand(master, Math.max(...known)) : null;
-  if (!expansion) {
+  // no override or EXDATE lies beyond the furthest one, so nothing past it is needed
+  const walls = known.length ? expand(master, Math.max(...known)) : null;
+  if (!walls) {
     return stamps.map(() => undefined);
   }
-  const walls = new Set(expansion.walls);
-  return targets.map((t) => t === undefined ? undefined
-    : walls.has(t) ? true
-    : t > expansion.horizon ? undefined
-    : false);
+  return targets.map((t) => t === undefined ? undefined : walls.has(t));
 }
 
 /** An override or exclusion that has to keep naming an occurrence */
@@ -521,14 +515,16 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
     }))),
   ];
   const shaping = SHAPING.filter((name) => written.has(name));
+  // A move alone keeps every occurrence or is refused (checkMove); only a new
+  // rule can leave an override or EXDATE without its occurrence
+  const ruleWritten = written.has('rrule') || written.has('rdate');
   // Only what names an occurrence now has to keep naming one; an override that
   // was already stale is not this call's doing
-  const before = shaping.length && references.length ? occurrences(master, referenceStamps(references)) : [];
+  const before = ruleWritten && references.length ? occurrences(master, referenceStamps(references)) : [];
   const watched = references.filter((_, i) => before[i] === true);
   const start = written.has('dtstart') ? startOf(master) : null;
   // Without a new rule the series has to come out the same, moved
   const keepsRule = !['rrule', 'exrule', 'rdate'].some((name) => written.has(name));
-  const expansion = start && keepsRule ? expand(master, Infinity, COMPARISON_LIMIT) : null;
 
   return {
     finish() {
@@ -566,8 +562,8 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
               `(${(error as Error).message}): rewrite the whole iCalendar object with the override moved`);
           }
         }
-        if (expansion) {
-          checkMovedSeries(master, expansion, move, start.text, now.text);
+        if (keepsRule) {
+          checkMove(master, move, start.text, now.text);
         }
       }
 
@@ -589,41 +585,103 @@ function startSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Component
   };
 }
 
+const SUB_DAILY = new Set(['SECONDLY', 'MINUTELY', 'HOURLY']);
+const FREQS = new Set([...SUB_DAILY, 'DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY']);
+/** Parts that pick dates; BYDAY is handled on its own */
+const DATE_PARTS = ['BYMONTH', 'BYMONTHDAY', 'BYYEARDAY', 'BYWEEKNO', 'BYSETPOS'];
+const TIME_PARTS = ['BYHOUR', 'BYMINUTE', 'BYSECOND'];
+const KNOWN_PARTS = new Set([...DATE_PARTS, ...TIME_PARTS, 'BYDAY']);
+
 /**
- * Throw when the series after a DTSTART move does not have the occurrences it
- * had before, each moved by the same distance — when the rule pins days or
- * times the move does not change (BYDAY=MO and a start moved to Tuesday).
+ * Why moving a series by `move` would change which occurrences a rule gives,
+ * beyond moving each by the same distance — or null when it provably does
+ * not. Decided from the rule alone, never by expanding it: a move splits into
+ * a change of date (whole days) and of time of day, and
+ *
+ *  - a rule without BY parts is a grid from DTSTART (every n seconds ... weeks)
+ *    and moves with it, except that MONTHLY and YEARLY land on DTSTART's day of
+ *    the month, which only shifts uniformly within the same month between the
+ *    1st and the 28th (every month has those days; a move across a month end
+ *    meets months of different lengths);
+ *  - BYHOUR, BYMINUTE and BYSECOND pin times of day: no change of time;
+ *  - more than daily, any date-picking part (BYDAY, BYMONTH, ...) cuts the grid
+ *    at day boundaries, which the moved grid crosses elsewhere: no move at all;
+ *  - BYMONTH, BYMONTHDAY, BYYEARDAY, BYWEEKNO and BYSETPOS pin dates: no change
+ *    of date; BYDAY pins weekdays, which a DAILY or WEEKLY rule keeps under a
+ *    move by whole weeks (whatever INTERVAL and WKST), and no other rule does;
+ *  - a switch between all-day and timed changes the time of day.
+ *
+ * Anything else — an unknown FREQ or part — is not proven, so it counts as a
+ * change too.
  */
-function checkMovedSeries(master: ICAL.Component, before: Expansion, move: Move, from: string, to: string) {
-  const day = move.to.form === 'date';
-  const expected = [...new Set(before.walls.map((wall) => {
-    const w = moved(inFrame(wall, before.frame), move);
-    return day ? dayOf(w) : w;
-  }))].sort((a, b) => a - b);
-  const expectedHorizon = before.horizon === Infinity ? Infinity
-    : moved(inFrame(before.horizon, before.frame), move);
-  const after = expand(master, expectedHorizon, COMPARISON_LIMIT);
-  if (!after) {
-    return;
+function moveBreaksRule(recur: ICAL.Recur, move: Move): string | null {
+  const parts = Object.entries((recur.parts ?? {}) as Record<string, unknown[]>)
+    .filter(([, values]) => Array.isArray(values) && values.length).map(([name]) => name);
+  const unknown = parts.find((name) => !KNOWN_PARTS.has(name));
+  if (!FREQS.has(recur.freq)) {
+    return `has FREQ=${recur.freq}, whose occurrences updateFields cannot tell`;
   }
-  const horizon = Math.min(expectedHorizon, after.horizon);
-  const want = expected.filter((w) => w <= horizon);
-  const have = after.walls.filter((w) => w <= horizon);
-  const i = want.findIndex((w, k) => w !== have[k]);
-  const at = i >= 0 ? i : want.length < have.length ? want.length : -1;
-  if (at < 0) {
-    return;
+  if (unknown) {
+    return `has ${unknown}, whose effect on a move updateFields cannot tell`;
   }
-  const show = (wall: number) => icalForm(jcalOf(wall, move.to));
-  const lost = want[at] !== undefined && (have[at] === undefined || want[at] < have[at]);
-  const difference = lost ? `would lose the occurrence on ${show(want[at])}` : `would gain one on ${show(have[at])}`;
-  const rule = master.getFirstProperty('rrule');
-  const suggestion = rule
-    ? suggestedRule(rule.getFirstValue() as ICAL.Recur, move.toWall, move.to.form !== 'date')
-    : null;
-  throw new Error(`Moving DTSTART (${from} to ${to}) does not move the whole series: ` +
-    `${rule ? rule.toICALString() : 'its rule'} keeps it on its old days or times, so the series ${difference}. ` +
-    `Give RRULE in the same call to fit the new start${suggestion ? ` (e.g. RRULE "${suggestion}")` : ''}; ` +
-    'to start the series later without moving it, give RRULE, UNTIL and EXDATE explicitly, or rewrite the whole ' +
-    'iCalendar object');
+  const switched = (move.from.form === 'date') !== (move.to.form === 'date');
+  const days = Math.round((dayOf(move.toWall) - dayOf(move.fromWall)) / DAY);
+  const timeChanged = switched || (move.toWall - dayOf(move.toWall)) !== (move.fromWall - dayOf(move.fromWall));
+  const has = (names: string[]) => parts.filter((name) => names.includes(name));
+
+  if (SUB_DAILY.has(recur.freq)) {
+    if (switched) {
+      return `repeats more often than daily, which an all-day series cannot`;
+    }
+    const dateParts = has([...DATE_PARTS, 'BYDAY']);
+    if (dateParts.length && (days !== 0 || timeChanged)) {
+      return `repeats more often than daily within ${dateParts.join(' and ')}, whose limits the moved times cross elsewhere`;
+    }
+  }
+  const timeParts = has(TIME_PARTS);
+  if (timeParts.length && timeChanged) {
+    return `has ${timeParts.join(' and ')}, which ${timeParts.length > 1 ? 'pin' : 'pins'} the time of day the move changes`;
+  }
+  if (days === 0) {
+    return null;
+  }
+  const dateParts = has(DATE_PARTS);
+  if (dateParts.length) {
+    return `has ${dateParts.join(' and ')}, which ${dateParts.length > 1 ? 'pin' : 'pins'} the dates the move changes`;
+  }
+  if (parts.includes('BYDAY') && !(['DAILY', 'WEEKLY'].includes(recur.freq) && days % 7 === 0)) {
+    return 'has BYDAY, which pins weekdays: only a DAILY or WEEKLY rule follows a move, and only by whole weeks';
+  }
+  if (recur.freq === 'MONTHLY' || recur.freq === 'YEARLY') {
+    const from = fieldsOf(move.fromWall);
+    const to = fieldsOf(move.toWall);
+    if (from.year !== to.year || from.month !== to.month || from.day > 28 || to.day > 28) {
+      return `repeats on DTSTART's day of the month, which only follows a move within the same month ` +
+        'between the 1st and the 28th';
+    }
+  }
+  return null;
+}
+
+/**
+ * Throw when a move would change the occurrences of a rule (RRULE or EXRULE)
+ * the call does not write, naming why and suggesting the rule to give.
+ */
+function checkMove(master: ICAL.Component, move: Move, from: string, to: string) {
+  for (const property of master.getAllProperties()) {
+    if (!isRecurProperty(master, property.name)) {
+      continue;
+    }
+    const recur = property.getFirstValue() as ICAL.Recur;
+    const why = moveBreaksRule(recur, move);
+    if (!why) {
+      continue;
+    }
+    const upper = property.name.toUpperCase();
+    const suggestion = suggestedRule(recur, move.toWall, move.to.form !== 'date');
+    throw new Error(`Moving DTSTART (${from} to ${to}) does not move the whole series: ${property.toICALString()} ` +
+      `${why}, so the moved series would not have the same occurrences, each moved. Give ${upper} in the same ` +
+      `call to fit the new start${suggestion ? ` (e.g. ${upper} "${suggestion}")` : ''}; to start the series ` +
+      'later without moving it, give RRULE, UNTIL and EXDATE explicitly, or rewrite the whole iCalendar object');
+  }
 }

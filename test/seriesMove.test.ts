@@ -238,8 +238,9 @@ describe('a rule that does not move with DTSTART is refused, naming the rule to 
     for (const input of [mondays(), mondays(override('RECURRENCE-ID:20261012T090000Z', 'DTSTART:20261012T130000Z'))]) {
       expect(() => updateFields(input, { DTSTART: '2026-10-06T09:00:00Z' }))
         .toThrow('Moving DTSTART (DTSTART:20261005T090000Z to DTSTART:20261006T090000Z) does not move the whole ' +
-          'series: RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3 keeps it on its old days or times, so the series would gain ' +
-          'one on 20261012T090000Z. Give RRULE in the same call to fit the new start (e.g. RRULE "FREQ=WEEKLY;COUNT=3;BYDAY=TU")');
+          'series: RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3 has BYDAY, which pins weekdays: only a DAILY or WEEKLY rule ' +
+          'follows a move, and only by whole weeks, so the moved series would not have the same occurrences, each ' +
+          'moved. Give RRULE in the same call to fit the new start (e.g. RRULE "FREQ=WEEKLY;COUNT=3;BYDAY=TU")');
     }
   });
 

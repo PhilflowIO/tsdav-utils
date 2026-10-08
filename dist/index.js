@@ -562,7 +562,6 @@ function stampOf(jcal, tzid) {
   }
   return typeof tzid === "string" && tzid ? { wall, kind: "tzid", tzid } : { wall, kind: "floating" };
 }
-var inFrame = (wall, frame) => frame.form === "tzid" ? { wall, kind: "tzid", tzid: frame.tzid } : { wall, kind: frame.form };
 var valuesOf = (property) => property.toJSON().slice(3);
 var propertyStamps = (property) => {
   const tzid = property.getParameter("tzid");
@@ -685,23 +684,30 @@ function startOf(master) {
   }
   return { frame, wall: stampOf(String(valuesOf(dtstart)[0])).wall, text: dtstart.toICALString() };
 }
-var EXPANSION_LIMIT = 1e3;
-var COMPARISON_LIMIT = 80;
 var WORK_BUDGET = 15e4;
-var STEP_COST = {
-  SECONDLY: 1,
-  MINUTELY: 1,
-  HOURLY: 10,
-  DAILY: 3,
-  WEEKLY: 10,
-  MONTHLY: 45,
-  YEARLY: 45
-};
+function stepCost(recur) {
+  const interval = Math.max(1, recur.interval || 1);
+  switch (recur.freq) {
+    case "SECONDLY":
+    case "MINUTELY":
+      return 3;
+    case "HOURLY":
+      return 10;
+    case "DAILY":
+      return 5 + Math.ceil(interval * 0.15);
+    case "WEEKLY":
+      return 15 + Math.ceil(interval * 7 * 0.15);
+    default:
+      return 45;
+  }
+}
 var expansionWork = { steps: 0 };
 var SeriesTooSparse = class extends Error {
 };
-function metered(iterator, budget, freq) {
-  const cost = STEP_COST[freq] ?? 45;
+var HorizonReached = class extends Error {
+};
+function bounded(iterator, budget, recur, horizon) {
+  const cost = stepCost(recur);
   const it = iterator;
   const check = it.check_contracting_rules;
   if (typeof check !== "function") {
@@ -712,11 +718,15 @@ function metered(iterator, budget, freq) {
     if ((budget.left -= cost) < 0) {
       throw new SeriesTooSparse("the rule is too sparse to expand within the work limit");
     }
+    const last = this.last;
+    if (last && wallOf(last.year, last.month, last.day, last.hour, last.minute, last.second) > horizon) {
+      throw new HorizonReached();
+    }
     return check.apply(this, args);
   };
   return iterator;
 }
-function expand(master, until = Infinity, limit = EXPANSION_LIMIT) {
+function expand(master, until) {
   const start = startOf(master);
   if (!start) {
     return null;
@@ -726,7 +736,6 @@ function expand(master, until = Infinity, limit = EXPANSION_LIMIT) {
   const norm = (wall) => day ? dayOf(wall) : wall;
   const timeOf = (wall) => day ? import_ical3.default.Time.fromDateString(jcalOf(wall, frame)) : import_ical3.default.Time.fromDateTimeString(jcalOf(wall, "floating"));
   const walls = /* @__PURE__ */ new Set([norm(start.wall)]);
-  let horizon = Infinity;
   const budget = { left: WORK_BUDGET };
   try {
     for (const rdate of master.getAllProperties("rdate")) {
@@ -739,20 +748,18 @@ function expand(master, until = Infinity, limit = EXPANSION_LIMIT) {
       if (recur.until) {
         recur.until = timeOf(norm(wallIn(master, stampOf(recur.until.toString()), frame)));
       }
-      const iterator = metered(recur.iterator(timeOf(start.wall)), budget, recur.freq);
-      for (let i = 0; ; i++) {
-        const next = iterator.next();
-        if (!next) {
-          break;
+      const iterator = bounded(recur.iterator(timeOf(start.wall)), budget, recur, day ? until + DAY2 - 1 : until);
+      try {
+        for (let next = iterator.next(); next; next = iterator.next()) {
+          const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
+          if (wall > until) {
+            break;
+          }
+          walls.add(wall);
         }
-        const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
-        walls.add(wall);
-        if (wall >= until) {
-          break;
-        }
-        if (i >= limit) {
-          horizon = Math.min(horizon, wall);
-          break;
+      } catch (error) {
+        if (!(error instanceof HorizonReached)) {
+          throw error;
         }
       }
     }
@@ -762,7 +769,7 @@ function expand(master, until = Infinity, limit = EXPANSION_LIMIT) {
     }
     return null;
   }
-  return { frame, walls: [...walls].sort((a, b) => a - b), horizon };
+  return walls;
 }
 function occurrences(master, stamps) {
   const frame = frameOf(master);
@@ -781,12 +788,11 @@ function occurrences(master, stamps) {
     }
   });
   const known = targets.filter((t) => t !== void 0);
-  const expansion = known.length ? expand(master, Math.max(...known)) : null;
-  if (!expansion) {
+  const walls = known.length ? expand(master, Math.max(...known)) : null;
+  if (!walls) {
     return stamps.map(() => void 0);
   }
-  const walls = new Set(expansion.walls);
-  return targets.map((t) => t === void 0 ? void 0 : walls.has(t) ? true : t > expansion.horizon ? void 0 : false);
+  return targets.map((t) => t === void 0 ? void 0 : walls.has(t));
 }
 function referenceStamps(refs) {
   return refs.map((ref) => {
@@ -869,11 +875,11 @@ function startSeriesEdit(calendar, master, written) {
     })))
   ];
   const shaping = SHAPING.filter((name) => written.has(name));
-  const before = shaping.length && references.length ? occurrences(master, referenceStamps(references)) : [];
+  const ruleWritten = written.has("rrule") || written.has("rdate");
+  const before = ruleWritten && references.length ? occurrences(master, referenceStamps(references)) : [];
   const watched = references.filter((_, i) => before[i] === true);
   const start = written.has("dtstart") ? startOf(master) : null;
   const keepsRule = !["rrule", "exrule", "rdate"].some((name) => written.has(name));
-  const expansion = start && keepsRule ? expand(master, Infinity, COMPARISON_LIMIT) : null;
   return {
     finish() {
       const now = start && startOf(master);
@@ -907,8 +913,8 @@ function startSeriesEdit(calendar, master, written) {
             throw new Error(`DTSTART changed, and the override for ${line} cannot follow it (${error.message}): rewrite the whole iCalendar object with the override moved`);
           }
         }
-        if (expansion) {
-          checkMovedSeries(master, expansion, move, start.text, now.text);
+        if (keepsRule) {
+          checkMove(master, move, start.text, now.text);
         }
       }
       if (!watched.length) {
@@ -923,31 +929,70 @@ function startSeriesEdit(calendar, master, written) {
     }
   };
 }
-function checkMovedSeries(master, before, move, from, to) {
-  const day = move.to.form === "date";
-  const expected = [...new Set(before.walls.map((wall) => {
-    const w = moved(inFrame(wall, before.frame), move);
-    return day ? dayOf(w) : w;
-  }))].sort((a, b) => a - b);
-  const expectedHorizon = before.horizon === Infinity ? Infinity : moved(inFrame(before.horizon, before.frame), move);
-  const after = expand(master, expectedHorizon, COMPARISON_LIMIT);
-  if (!after) {
-    return;
+var SUB_DAILY = /* @__PURE__ */ new Set(["SECONDLY", "MINUTELY", "HOURLY"]);
+var FREQS = /* @__PURE__ */ new Set([...SUB_DAILY, "DAILY", "WEEKLY", "MONTHLY", "YEARLY"]);
+var DATE_PARTS = ["BYMONTH", "BYMONTHDAY", "BYYEARDAY", "BYWEEKNO", "BYSETPOS"];
+var TIME_PARTS = ["BYHOUR", "BYMINUTE", "BYSECOND"];
+var KNOWN_PARTS = /* @__PURE__ */ new Set([...DATE_PARTS, ...TIME_PARTS, "BYDAY"]);
+function moveBreaksRule(recur, move) {
+  const parts = Object.entries(recur.parts ?? {}).filter(([, values]) => Array.isArray(values) && values.length).map(([name]) => name);
+  const unknown = parts.find((name) => !KNOWN_PARTS.has(name));
+  if (!FREQS.has(recur.freq)) {
+    return `has FREQ=${recur.freq}, whose occurrences updateFields cannot tell`;
   }
-  const horizon = Math.min(expectedHorizon, after.horizon);
-  const want = expected.filter((w) => w <= horizon);
-  const have = after.walls.filter((w) => w <= horizon);
-  const i = want.findIndex((w, k) => w !== have[k]);
-  const at = i >= 0 ? i : want.length < have.length ? want.length : -1;
-  if (at < 0) {
-    return;
+  if (unknown) {
+    return `has ${unknown}, whose effect on a move updateFields cannot tell`;
   }
-  const show = (wall) => icalForm(jcalOf(wall, move.to));
-  const lost = want[at] !== void 0 && (have[at] === void 0 || want[at] < have[at]);
-  const difference = lost ? `would lose the occurrence on ${show(want[at])}` : `would gain one on ${show(have[at])}`;
-  const rule = master.getFirstProperty("rrule");
-  const suggestion = rule ? suggestedRule(rule.getFirstValue(), move.toWall, move.to.form !== "date") : null;
-  throw new Error(`Moving DTSTART (${from} to ${to}) does not move the whole series: ${rule ? rule.toICALString() : "its rule"} keeps it on its old days or times, so the series ${difference}. Give RRULE in the same call to fit the new start${suggestion ? ` (e.g. RRULE "${suggestion}")` : ""}; to start the series later without moving it, give RRULE, UNTIL and EXDATE explicitly, or rewrite the whole iCalendar object`);
+  const switched = move.from.form === "date" !== (move.to.form === "date");
+  const days = Math.round((dayOf(move.toWall) - dayOf(move.fromWall)) / DAY2);
+  const timeChanged = switched || move.toWall - dayOf(move.toWall) !== move.fromWall - dayOf(move.fromWall);
+  const has = (names) => parts.filter((name) => names.includes(name));
+  if (SUB_DAILY.has(recur.freq)) {
+    if (switched) {
+      return `repeats more often than daily, which an all-day series cannot`;
+    }
+    const dateParts2 = has([...DATE_PARTS, "BYDAY"]);
+    if (dateParts2.length && (days !== 0 || timeChanged)) {
+      return `repeats more often than daily within ${dateParts2.join(" and ")}, whose limits the moved times cross elsewhere`;
+    }
+  }
+  const timeParts = has(TIME_PARTS);
+  if (timeParts.length && timeChanged) {
+    return `has ${timeParts.join(" and ")}, which ${timeParts.length > 1 ? "pin" : "pins"} the time of day the move changes`;
+  }
+  if (days === 0) {
+    return null;
+  }
+  const dateParts = has(DATE_PARTS);
+  if (dateParts.length) {
+    return `has ${dateParts.join(" and ")}, which ${dateParts.length > 1 ? "pin" : "pins"} the dates the move changes`;
+  }
+  if (parts.includes("BYDAY") && !(["DAILY", "WEEKLY"].includes(recur.freq) && days % 7 === 0)) {
+    return "has BYDAY, which pins weekdays: only a DAILY or WEEKLY rule follows a move, and only by whole weeks";
+  }
+  if (recur.freq === "MONTHLY" || recur.freq === "YEARLY") {
+    const from = fieldsOf(move.fromWall);
+    const to = fieldsOf(move.toWall);
+    if (from.year !== to.year || from.month !== to.month || from.day > 28 || to.day > 28) {
+      return `repeats on DTSTART's day of the month, which only follows a move within the same month between the 1st and the 28th`;
+    }
+  }
+  return null;
+}
+function checkMove(master, move, from, to) {
+  for (const property of master.getAllProperties()) {
+    if (!isRecurProperty(master, property.name)) {
+      continue;
+    }
+    const recur = property.getFirstValue();
+    const why = moveBreaksRule(recur, move);
+    if (!why) {
+      continue;
+    }
+    const upper = property.name.toUpperCase();
+    const suggestion = suggestedRule(recur, move.toWall, move.to.form !== "date");
+    throw new Error(`Moving DTSTART (${from} to ${to}) does not move the whole series: ${property.toICALString()} ${why}, so the moved series would not have the same occurrences, each moved. Give ${upper} in the same call to fit the new start${suggestion ? ` (e.g. ${upper} "${suggestion}")` : ""}; to start the series later without moving it, give RRULE, UNTIL and EXDATE explicitly, or rewrite the whole iCalendar object`);
+  }
 }
 
 // src/updateFields.ts
