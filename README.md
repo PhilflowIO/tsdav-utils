@@ -468,9 +468,34 @@ Values are matched by the instant they name, whatever zone each is written in,
 read with RFC 5545 3.3.5 (in the hour a DST change shows twice, `00:30Z` and
 `01:30Z` on 25 October in Berlin are two different values, and only the first
 names the 02:30 occurrence); by date in an all-day series, by wall clock in a
-floating one. A value that names no instant to compare — a floating value in a
-series with a zone, a zone without known rules — matches only itself and is
-left as it is.
+floating one. A value that names no instant — a floating value in a series
+with a zone, a value with `Z` in a floating series — names no occurrence: it
+excludes nothing, matches only itself, and is left as it is (a zone without
+known rules is compared as written too). This is one rule for every check, for
+the list edits and for `expandOccurrences`.
+
+**A date in the list of a timed series** (`EXDATE;VALUE=DATE:20261210` next to
+a 10:00 DTSTART) excludes every occurrence that day, on the series' wall clock.
+RFC 5545 leaves it open; this follows the dominant reader (ical.js, which
+Thunderbird uses) for interoperability. So a time that day is held by it
+already (`'add'` and `cancelOccurrences` write nothing more — after checking the
+time is an occurrence), `'replace'` keeps the date while a time that day is in
+the new list, `'remove'` takes it given as a date (`'2026-12-10'`), and
+`restoreOccurrences` of any occurrence that day removes it (which brings back
+every occurrence of that day).
+
+**A value at a wall clock the DST change skips.** On the night clocks go
+forward, an occurrence at 02:30 Berlin is read as 01:30Z (RFC 5545 3.3.5) — the
+same instant as 03:30 that night. An `EXDATE` written as `03:30` or `01:30Z`
+names it for this library, but clients that match on the wall clock would still
+show it, and a later move could not tell which occurrence it names. So an
+`EXDATE` the call writes (any mode, and `cancelOccurrences`) that names such an
+occurrence by its twin is written as the occurrence's own wall clock
+(`EXDATE;TZID=Europe/Berlin:20260329T023000`); an `RDATE` there would repeat the
+occurrence under another name and is refused, `DST_AMBIGUOUS` (`fix-value`).
+
+**A value in the list that cannot be read** (`EXDATE:garbage`) is refused in
+every mode, `INVALID_VALUE` (`rewrite-object`): the write has to read the list.
 
 - **`'replace'` is a minimal change.** Values the list holds and the call gives
   again stay where they are, on their own line, in their own zone, with their
@@ -496,14 +521,18 @@ left as it is.
   updateFields(event, { EXDATE: '2026-12-31T10:00:00' }, { lists: { EXDATE: 'add' } });
   // EXDATE;TZID=Europe/Berlin:20261231T100000 is added; nothing else changes
   ```
-- **`'remove'`** — the values given leave whatever line holds them; a line left
-  empty goes. A value the list does not hold is refused, `NOT_IN_LIST`
-  (`fix-value`), naming the list.
+- **`'remove'`** — the values given leave whatever line holds them, matched
+  against the values held directly (by instant, never through a wall clock, so
+  `EXDATE:20261025T013000Z` in the second pass of a repeated hour is removed by
+  `'2026-10-25T01:30:00Z'`; a date given as a date). A line left empty goes. A
+  value the list does not hold is refused, `NOT_IN_LIST` (`fix-value`), naming
+  the list.
 
 In every mode the values given are typed and zoned as for a new line: DTSTART's
 zone and value type (under `zone`, that zone's `TZID`) — never the zone of a
-line the list holds. In a list in a `TZID`, a value with `Z` or an offset next
-to wall-clock ones is written as its wall clock there. In a floating series a
+line the list holds. A list given with both wall-clock values and values with
+`Z` or an offset in a series in a `TZID` is written as the instants they name, in
+UTC. In a floating series a
 value with `Z` or an offset names no occurrence and is refused,
 `ZONE_MISMATCH` (`fix-value`: drop the zone). With DTSTART in the same call,
 `'add'` and `'remove'` meet the moved series: the lines held move with it
@@ -521,6 +550,9 @@ without a zone; or the date). Where the series cannot be checked (no DTSTART)
 it throws `SERIES_UNVERIFIABLE`; where it cannot be checked within the work
 limit, `CHECK_LIMIT_EXCEEDED` (`rewrite-object`). A list given whole
 (`'replace'`) is not checked: it states the list as given, like any other value.
+So on a UTC series with `floatingTime: 'local'`, a wall-clock value read in the
+host's time zone is checked by `'add'` and `cancelOccurrences` (an hour off is
+refused) but written as given by `'replace'`.
 
 **An `EXDATE` may not exclude an overridden occurrence** (in any mode): the
 override (the component with that `RECURRENCE-ID`) would apply to nothing. It
@@ -542,13 +574,16 @@ it**. An id may also carry `Z` or an offset; it is matched by instant (by date i
 an all-day series).
 
 - `cancelOccurrences` adds an `EXDATE` for each, in the series' own form and
-  zone, and removes the override of each, so no override is left applying to
+  zone (an id with `Z` or an offset as its wall clock there, where that reads
+  back as the same instant), and removes the override of each, so no override is left applying to
   nothing. An occurrence cancelled already is left as it is. An id that is no
   occurrence of the series is refused, `UNKNOWN_OCCURRENCE` (`fix-value`),
   naming the occurrence the series has that day.
 - `restoreOccurrences` removes the `EXDATE` values naming each, whatever line and
-  zone they are on. An id no `EXDATE` names is refused, `NOT_IN_LIST`
-  (`fix-value`). An override removed by a cancel does not come back.
+  zone they are on, matched by instant directly (any stored form can be
+  removed), and a date of a timed series excluding the occurrence's day (see
+  above). An id no `EXDATE` names is refused, `NOT_IN_LIST` (`fix-value`). An
+  override removed by a cancel does not come back.
 
 ```typescript
 const { occurrences } = expandOccurrences(event.data, { budget, until: '2027-01-01T00:00:00Z' });
@@ -780,7 +815,8 @@ Instants are a `Date` or a string with `Z`/an offset; wall-clock times are
 
 **`expandOccurrences(object, { budget, until, from?, limit?, type? })`** — the
 occurrences of a recurring event, todo or journal whose original start lies in
-`[from, until)`: DTSTART, `RRULE` and `RDATE`, without `EXDATE`s, overrides
+`[from, until)`: DTSTART, `RRULE` and `RDATE`, without the occurrences `EXDATE`s exclude (by
+instant, a date of a timed series its whole day; see [Lists of dates](#lists-of-dates-exdate-and-rdate)), overrides
 applied, on the series' wall clock (a weekly 09:00 Berlin series stays at 09:00).
 Each occurrence has `recurrenceId`, `start` and `end` (each `{ value, tzid,
 instant }`, `instant` an ISO UTC string or `null` for dates and floating times)
