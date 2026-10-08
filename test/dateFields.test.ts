@@ -155,10 +155,10 @@ describe('date-times without a zone', () => {
     expect(lines(out, 'EXDATE')[0]).toMatch(/^EXDATE:\d{8}T\d{6}Z,20261027T180000Z$/);
   });
 
-  it('join zoned values in a list in a TZID, which are written as their wall clock there', () => {
+  it('join zoned values in a list in a TZID as the instants they name, written as UTC', () => {
     const out = updateFields(vtodo('DTSTART;TZID=Europe/Berlin:20260101T100000'),
       { EXDATE: '2026-10-26T18:00:00,2026-10-27T18:00:00Z' });
-    expect(lines(out, 'EXDATE')).toEqual(['EXDATE;TZID=Europe/Berlin:20261026T180000,20261027T190000']);
+    expect(lines(out, 'EXDATE')).toEqual(['EXDATE:20261026T170000Z,20261027T180000Z']);
   });
 
   it('in a list are read in DTSTART\'s zone, not in the zone of a line the list holds', () => {

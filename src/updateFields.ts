@@ -372,7 +372,9 @@ export function editFields(
       return start.utc !== null && end.utc !== null ? [{ name, length: end.utc - start.utc, elapsed: true }] : [];
     }) : [];
   for (const [key, value] of entries) {
-    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, zone) &&
+    // values to remove are only matched against the list, in whatever form it holds them
+    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, zone,
+      lists.get(key.toLowerCase()) === 'remove') &&
         !setRecurValue(actualComponent, key, value, floatingTime, zone)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }

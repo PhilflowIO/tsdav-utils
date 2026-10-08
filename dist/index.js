@@ -522,7 +522,7 @@ function utcOfWall(component, upper, tzid, value) {
 var asUtc = (value) => ({ kind: "utc", jcal: `${value.jcal}Z` });
 var anchorIs = (anchor, named) => named.utc ? anchor.form === "utc" : anchor.form === "tzid" && anchor.tzid === named.tzid;
 var anchorText = (anchor) => anchor.form === "tzid" ? `in "${anchor.tzid}"` : anchor.form === "utc" ? "in UTC" : anchor.form;
-function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime = "as-given", named = null) {
+function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime = "as-given", named = null, matchOnly = false) {
   const shape = dateProperty(component, name);
   if (!shape) {
     return false;
@@ -546,13 +546,13 @@ function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime 
   const existing = shape.multiValue ? null : component.getFirstProperty(lower);
   const anchor = anchorOf(component, lower);
   const why = ["exdate", "rdate"].includes(lower) ? "otherwise it names no occurrence of the series" : "RFC 5545 requires the same value type";
-  if (anchor?.form === "date" && !isDate) {
+  if (anchor?.form === "date" && !isDate && !matchOnly) {
     throw refuse("VALUE_TYPE_MISMATCH", `${upper} must be a date: DTSTART is a date (all-day), and ${why}`, upper);
   }
-  if (anchor && anchor.form !== "date" && isDate) {
+  if (anchor && anchor.form !== "date" && isDate && !matchOnly) {
     throw refuse("VALUE_TYPE_MISMATCH", `${upper} needs a time: DTSTART has one, and ${why}`, upper);
   }
-  if (shape.multiValue && anchor?.form === "floating" && !named && parsed.some((p) => p.kind === "utc")) {
+  if (shape.multiValue && anchor?.form === "floating" && !named && !matchOnly && parsed.some((p) => p.kind === "utc")) {
     throw refuse("ZONE_MISMATCH", `${upper}: DTSTART is a local time without a zone (floating), so a value with "Z" or an offset names no occurrence of the series: drop the zone and give the wall-clock time, e.g. "${parsed.find((p) => p.kind === "utc").jcal.replace(/Z$/, "")}"`, upper);
   }
   const own = existing?.getParameter("tzid");
@@ -573,13 +573,13 @@ function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime 
   if (absoluteTime === "keep-zone" && zone2 && !named) {
     parsed = parsed.map((p) => p.kind === "utc" ? wallInZone(component, upper, zone2, p) : p);
   }
+  if (shape.multiValue && zone2 && parsed.some((p) => p.kind === "utc") && parsed.some((p) => p.kind === "floating")) {
+    parsed = parsed.map((p) => p.kind === "floating" ? utcOfWall(component, upper, zone2, p) : p);
+  }
   const floating = parsed.some((p) => p.kind === "floating");
   const wallClock = !floating ? null : zone2 ? "tzid" : anchor?.form === "floating" ? "floating" : floatingTime === "local" ? "utc" : anchor?.form === "utc" || UTC_ONLY.has(lower) ? null : "floating";
   if (floating && wallClock === null) {
     throw refuse("ZONE_MISMATCH", UTC_ONLY.has(lower) ? `${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"` : `${upper} has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"`, upper);
-  }
-  if (shape.multiValue && floating && wallClock === "tzid" && zone2) {
-    parsed = parsed.map((p) => p.kind === "utc" ? wallInZone(component, upper, zone2, p) : p);
   }
   if (floating && wallClock !== "utc" && parsed.some((p) => p.kind === "utc")) {
     throw refuse(
@@ -812,15 +812,29 @@ function instantKey(master, stamp) {
     return written;
   }
 }
-function lineKeys(master, property) {
+function dayKeyOf(master, stamp) {
+  const frame = frameOf(master);
+  if (!frame || frame.form === "date" || stamp.kind === "date") {
+    return null;
+  }
+  if (stamp.kind === "floating" !== (frame.form === "floating")) {
+    return null;
+  }
   try {
-    return propertyStamps(property).map((stamp) => instantKey(master, stamp));
+    return `day ${dayOf(wallIn(master, stamp, frame))}`;
   } catch {
     return null;
   }
 }
+function lineKeys(master, property) {
+  return propertyStamps(property).map((stamp) => instantKey(master, stamp));
+}
 function listKeys(master, name) {
-  return new Set(master.getAllProperties(name).flatMap((property) => lineKeys(master, property) ?? []));
+  return new Set(master.getAllProperties(name).flatMap((property) => lineKeys(master, property)));
+}
+function holds(master, keys, stamp) {
+  const day = dayKeyOf(master, stamp);
+  return keys.has(instantKey(master, stamp)) || day !== null && keys.has(day);
 }
 function keepValues(master, line, keep) {
   const values = valuesOf(line);
@@ -831,6 +845,7 @@ function keepValues(master, line, keep) {
     line.setValues(kept);
   }
 }
+var covers = (keys, g) => keys.has(g.key) || g.day !== null && keys.has(g.day);
 var DateListEdit = class {
   /**
    * @param modes - lower-case list name ("exdate", "rdate") to its mode, for
@@ -843,7 +858,7 @@ var DateListEdit = class {
     this.held = new Set(master.getAllProperties());
   }
   apply() {
-    const outcome = { addedExdates: [], givenExdates: /* @__PURE__ */ new Set() };
+    const outcome = { addedExdates: [], givenExdates: [], written: /* @__PURE__ */ new Map() };
     for (const [name, mode] of this.modes) {
       const lines = this.master.getAllProperties(name);
       const fresh = lines.filter((line2) => !this.held.has(line2));
@@ -851,6 +866,7 @@ var DateListEdit = class {
         continue;
       }
       const old = lines.filter((line2) => this.held.has(line2));
+      const oldKeys = old.map((property) => lineKeys(this.master, property));
       const given = this.given(name, fresh);
       const [line, ...rest] = fresh;
       for (const extra of rest) {
@@ -858,30 +874,29 @@ var DateListEdit = class {
       }
       if (mode === "remove") {
         this.master.removeProperty(line);
-        this.remove(name, old, given);
+        this.remove(name, old, oldKeys, given);
         continue;
       }
-      const wanted = new Set(given.map((g) => g.key));
       const present = /* @__PURE__ */ new Set();
-      for (const property of old) {
-        const keys = lineKeys(this.master, property);
-        if (mode === "add") {
-          keys?.forEach((key) => present.add(key));
-        } else if (!keys) {
-          this.master.removeProperty(property);
-        } else {
-          keepValues(this.master, property, (i) => wanted.has(keys[i]) && Boolean(present.add(keys[i])));
-        }
+      if (mode === "add") {
+        oldKeys.flat().forEach((key) => present.add(key));
+      } else {
+        const wanted = new Set(given.flatMap((g) => g.day === null ? [g.key] : [g.key, g.day]));
+        old.forEach((property, n) => keepValues(this.master, property, (i) => {
+          const key = oldKeys[n][i];
+          return wanted.has(key) && Boolean(present.add(key));
+        }));
       }
-      const added = given.filter((g) => !present.has(g.key));
+      const added = given.filter((g) => !covers(present, g));
       if (added.length) {
         line.setValues(added.map((g) => g.value));
+        outcome.written.set(name, line);
       } else {
         this.master.removeProperty(line);
       }
       if (name === "exdate" && mode === "add") {
-        outcome.addedExdates.push(...added);
-        given.forEach((g) => outcome.givenExdates.add(g.key));
+        outcome.addedExdates.push(...given.filter((g) => !present.has(g.key)));
+        outcome.givenExdates.push(...given);
       }
     }
     return outcome;
@@ -897,27 +912,34 @@ var DateListEdit = class {
           return [];
         }
         seen.add(key);
-        return [{ key, value: values[i], stamp, label: `${name.toUpperCase()} ${icalForm(String(values[i]))}` }];
+        return [{
+          key,
+          day: dayKeyOf(this.master, stamp),
+          value: values[i],
+          stamp,
+          label: `${name.toUpperCase()} ${icalForm(String(values[i]))}`
+        }];
       });
     });
   }
-  /** Take values out of a list; refused, naming them, where the list does not hold one */
-  remove(name, old, given) {
+  /**
+   * Take values out of a list, each matched directly against the values held,
+   * by instant (or as a date given as a date); refused, naming them, where the
+   * list does not hold one. restoreOccurrences also takes a date of the
+   * occurrence's day.
+   */
+  remove(name, old, oldKeys, given) {
     const upper = name.toUpperCase();
-    const remove = new Set(given.map((g) => g.key));
-    const holds = new Set(old.flatMap((property) => lineKeys(this.master, property) ?? []));
-    const missing = given.filter((g) => !holds.has(g.key));
+    const held = new Set(oldKeys.flat());
+    const byDay = this.purpose === "restore";
+    const missing = given.filter((g) => byDay ? !covers(held, g) : !held.has(g.key));
     if (missing.length) {
       const list = old.map((property) => property.toICALString()).join(", ");
       const values = missing.map((g) => icalForm(String(g.value))).join(", ");
       throw new UpdateFieldsError("NOT_IN_LIST", this.purpose === "restore" ? `${values} ${missing.length > 1 ? "are" : "is"} not cancelled: no EXDATE names ${missing.length > 1 ? "them" : "it"} (${list || "the series has no EXDATE"}). Give the original start of a cancelled occurrence` : `${missing.map((g) => g.label).join(", ")} ${missing.length > 1 ? "are" : "is"} not in the list (${list || `the object has no ${upper}`}), so there is nothing to remove. Give a value the list holds, at the same instant (in any zone)`, { remedy: "fix-value", property: upper });
     }
-    for (const property of old) {
-      const keys = lineKeys(this.master, property);
-      if (keys) {
-        keepValues(this.master, property, (i) => !remove.has(keys[i]));
-      }
-    }
+    const remove = new Set(given.flatMap((g) => g.day === null || !byDay ? [g.key] : [g.key, g.day]));
+    old.forEach((property, n) => keepValues(this.master, property, (i) => !remove.has(oldKeys[n][i])));
   }
 };
 
@@ -1489,16 +1511,44 @@ function occurrences(master, stamps, labels) {
   if (!frame) {
     throw new SeriesUnverifiable("the series has no DTSTART");
   }
-  const targets = stamps.map((stamp, i) => {
+  const targets = targetWalls(master, frame, stamps, labels);
+  const walls = expand(master, Math.max(0, ...targets.filter((t) => t !== null)));
+  return namesOccurrence(master, frame, stamps, walls);
+}
+var namesNothing = (stamp, frame) => frame.form !== "date" && stamp.kind !== "date" && stamp.kind === "floating" !== (frame.form === "floating");
+function targetWalls(master, frame, stamps, labels) {
+  return stamps.map((stamp, i) => {
+    if (namesNothing(stamp, frame)) {
+      return null;
+    }
     try {
       const wall = wallIn(master, stamp, frame);
-      return frame.form === "date" ? dayOf(wall) : wall;
+      return frame.form === "date" ? dayOf(wall) : stamp.kind === "date" ? wall + DAY2 - 1 : wall;
     } catch (error) {
       throw new SeriesUnverifiable(`${labels[i]}: ${error.message}`, error);
     }
   });
-  const walls = expand(master, Math.max(...targets));
-  return targets.map((t) => walls.has(t));
+}
+function namesOccurrence(master, frame, stamps, walls) {
+  const zoned = frame.form === "utc" || frame.form === "tzid";
+  const instants = zoned ? new Set([...walls].map((wall) => occurrenceInstant(master, wall, frame))) : null;
+  const days = new Set([...walls].map(dayOf));
+  return stamps.map((stamp) => {
+    if (frame.form === "date") {
+      return walls.has(dayOf(wallIn(master, stamp, frame)));
+    }
+    if (stamp.kind === "date") {
+      return days.has(dayOf(stamp.wall));
+    }
+    if (namesNothing(stamp, frame)) {
+      return false;
+    }
+    if (!instants) {
+      return walls.has(stamp.wall);
+    }
+    const instant = instantOf(master, stamp, frame);
+    return instant !== null && instants.has(instant);
+  });
 }
 function referenceStamps(refs) {
   return refs.map((ref) => {
@@ -1551,36 +1601,23 @@ function checkAddedExdates(master, added, cancel) {
   if (!frame) {
     throw new SeriesUnverifiable("the series has no DTSTART");
   }
-  const targets = added.map(({ stamp, label }) => {
-    try {
-      const wall = wallIn(master, stamp, frame);
-      return frame.form === "date" ? dayOf(wall) : wall;
-    } catch (error) {
-      throw new SeriesUnverifiable(`${label}: ${error.message}`, error);
-    }
-  });
+  const targets = targetWalls(master, frame, added.map((a) => a.stamp), added.map((a) => a.label));
   let walls;
   try {
-    walls = expand(master, Math.max(...targets) + DAY2);
+    walls = expand(master, Math.max(0, ...targets.filter((t) => t !== null)) + DAY2);
   } catch (error) {
     if (!(error instanceof SeriesTooSparse)) {
       throw error;
     }
     throw new UpdateFieldsError("CHECK_LIMIT_EXCEEDED", `Cannot verify that ${added.map((a) => a.label).join(", ")} names an occurrence of the series: ${error.message}. Rewrite the whole iCalendar object with the exclusions it should have`, { remedy: "rewrite-object", property: "EXDATE" });
   }
-  const instants = frame.form === "utc" || frame.form === "tzid" ? new Set([...walls].map((wall) => occurrenceInstant(master, wall, frame))) : null;
-  const lost = added.filter(({ stamp }, i) => {
-    if (!instants) {
-      return !walls.has(targets[i]);
-    }
-    const instant = instantOf(master, stamp, frame);
-    return instant === null || !instants.has(instant);
-  });
+  const named = namesOccurrence(master, frame, added.map((a) => a.stamp), walls);
+  const lost = added.filter((_, i) => !named[i]);
   if (!lost.length) {
     return;
   }
   const target = targets[added.indexOf(lost[0])];
-  const sameDay = [...walls].filter((wall) => dayOf(wall) === dayOf(target)).sort((x, y) => x - y)[0];
+  const sameDay = target === null ? void 0 : [...walls].filter((wall) => dayOf(wall) === dayOf(target)).sort((x, y) => x - y)[0];
   const first = Math.min(...walls);
   const series = ["dtstart", "rrule", "rdate"].flatMap((name) => master.getAllProperties(name)).map((property) => property.toICALString()).join(", ");
   const what = lost.map((a) => cancel ? icalForm(String(a.value)) : a.label).join(", ");
@@ -1590,6 +1627,73 @@ function checkAddedExdates(master, added, cancel) {
     `${what} ${lost.length > 1 ? "name" : "names"} no occurrence of the series (${series})${hint}, so ${cancel ? "there is nothing to cancel" : "it would exclude nothing"}. Give the original start of an occurrence as ${occurrenceForm(frame, sameDay ?? first)}`,
     { remedy: "fix-value", property: "EXDATE" }
   );
+}
+function settleGapTwins(master, outcome) {
+  const frame = frameOf(master);
+  if (!frame || frame.form !== "tzid" || !zoneOf(master, frame.tzid)) {
+    return;
+  }
+  for (const [name, line] of outcome.written) {
+    if (line.type === "period" || !master.getAllProperties(name).includes(line)) {
+      continue;
+    }
+    const stamps = propertyStamps(line);
+    const twins = stamps.map((stamp) => gapTwin(master, stamp, frame));
+    const found = twins.filter((t) => t !== null);
+    if (!found.length) {
+      continue;
+    }
+    const walls = expand(master, Math.max(...found.map((t) => Math.max(t.wall, t.other))));
+    const values = valuesOf(line);
+    const clash = twins.map((t) => t !== null && walls.has(t.other) && (name === "rdate" || !walls.has(t.wall)));
+    if (!clash.some(Boolean)) {
+      continue;
+    }
+    if (name === "rdate") {
+      const i = clash.indexOf(true);
+      throw new UpdateFieldsError("DST_AMBIGUOUS", `RDATE ${icalForm(String(values[i]))} names the same instant as the occurrence at ${icalForm(jcalOf(twins[i].other, "floating"))} in "${frame.tzid}", a wall-clock time the DST change skips, which the series has already: leave it out, or give another time`, { remedy: "fix-value", property: "RDATE" });
+    }
+    const kept = values.filter((_, i) => !clash[i]);
+    if (kept.length) {
+      line.setValues(kept);
+    } else {
+      master.removeProperty(line);
+    }
+    const own = new import_ical3.default.Property("exdate", master);
+    writeInstants(own, twins.filter((_, i) => clash[i]).map((t) => t.other), frame);
+    master.addProperty(own);
+  }
+}
+function inSeriesForm(master, line) {
+  const frame = frameOf(master);
+  if (!line || frame?.form !== "tzid" || !master.getAllProperties("exdate").includes(line)) {
+    return;
+  }
+  const series = zoneOf(master, frame.tzid);
+  if (!series) {
+    return;
+  }
+  const stamps = propertyStamps(line);
+  const walls = stamps.map((stamp) => {
+    if (stamp.kind !== "utc") {
+      return null;
+    }
+    const wall = series.fromUtc(stamp.wall);
+    return series.toUtc(wall) === stamp.wall ? wall : null;
+  });
+  if (!walls.some((wall) => wall !== null)) {
+    return;
+  }
+  const values = valuesOf(line);
+  const rest = values.filter((_, i) => walls[i] === null);
+  const own = new import_ical3.default.Property("exdate", master);
+  writeInstants(own, walls.filter((wall) => wall !== null), frame);
+  if (rest.length) {
+    line.setValues(rest);
+  } else {
+    master.removeProperty(line);
+  }
+  master.addProperty(own);
 }
 function noSeries(lists) {
   return {
@@ -1668,12 +1772,9 @@ function startSeriesEdit(calendar, master, written, source, lists, shapes) {
   ];
   const shaping = SHAPING.filter((name) => written.has(name) || name === "rdate" && lists?.modes.get("rdate") === "remove");
   const ruleWritten = shapes;
-  const overrideKey = (c) => lineKeys(master, c.getFirstProperty("recurrence-id"))?.[0] ?? null;
+  const ridOf = (c) => propertyStamps(c.getFirstProperty("recurrence-id"))[0];
   const exdateBefore = lists?.modes.has("exdate") ? listKeys(master, "exdate") : null;
-  const excludedBefore = new Set(exdateBefore ? overrides.filter((c) => {
-    const key = overrideKey(c);
-    return key !== null && exdateBefore.has(key);
-  }) : []);
+  const excludedBefore = new Set(exdateBefore ? overrides.filter((c) => holds(master, exdateBefore, ridOf(c))) : []);
   const before = ruleWritten && references.length ? occurrences(master, referenceStamps(references), references.map((ref) => ref.label)) : [];
   const watched = references.filter((_, i) => before[i] === true);
   const start = written.has("dtstart") ? startOf(master) : null;
@@ -1756,22 +1857,26 @@ function startSeriesEdit(calendar, master, written, source, lists, shapes) {
       if (lists) {
         const outcome = lists.apply();
         checkAddedExdates(master, outcome.addedExdates, lists.purpose === "cancel");
+        settleGapTwins(master, outcome);
         if (lists.purpose === "cancel") {
+          inSeriesForm(master, outcome.written.get("exdate"));
+        }
+        if (lists.purpose === "cancel") {
+          const cancelled = new Set(outcome.givenExdates.map((g) => g.key));
           for (const override of overrides) {
-            const key = overrideKey(override);
-            if (key !== null && outcome.givenExdates.has(key)) {
+            if (holds(master, cancelled, ridOf(override))) {
               calendar.removeSubcomponent(override);
               removed.add(override);
             }
           }
         }
         const exdatesNow = listKeys(master, "exdate");
-        const keep = watched.map((ref, i) => ref.property.name === "recurrence-id" ? !removed.has(ref.property.parent) : exdatesNow.has(instantKey(master, watchedStamps[i])));
+        const keep = watched.map((ref, i) => ref.property.name === "recurrence-id" ? !removed.has(ref.property.parent) : holds(master, exdatesNow, watchedStamps[i]));
         stillWatched = watched.filter((_, i) => keep[i]);
         watchedStamps = watchedStamps.filter((_, i) => keep[i]);
         if (exdateBefore) {
           const after2 = exdatesNow;
-          const hit = overrides.filter((c) => !removed.has(c) && !excludedBefore.has(c) && after2.has(overrideKey(c) ?? ""));
+          const hit = overrides.filter((c) => !removed.has(c) && !excludedBefore.has(c) && holds(master, after2, ridOf(c)));
           if (hit.length) {
             const ids = hit.map((c) => c.getFirstProperty("recurrence-id").toICALString()).join(", ");
             throw new UpdateFieldsError("ORPHANED_EXCEPTIONS", `EXDATE would exclude the occurrence ${hit.length > 1 ? "overrides replace" : "an override replaces"} (${ids}), so the override would silently stop applying (RFC 5545 3.8.4.4). Leave that occurrence out of EXDATE, or cancel it with cancelOccurrences, which removes the override too`, { remedy: "fix-value", property: "EXDATE" });
@@ -2649,7 +2754,15 @@ function editFields(calendarObject, fields, options, purpose) {
     return start2.utc !== null && end.utc !== null ? [{ name, length: end.utc - start2.utc, elapsed: true }] : [];
   }) : [];
   for (const [key, value] of entries) {
-    if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, zone2) && !setRecurValue(actualComponent, key, value, floatingTime, zone2)) {
+    if (!setDateValue(
+      actualComponent,
+      key,
+      value,
+      floatingTime,
+      absoluteTime,
+      zone2,
+      lists.get(key.toLowerCase()) === "remove"
+    ) && !setRecurValue(actualComponent, key, value, floatingTime, zone2)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }
@@ -2692,7 +2805,7 @@ function cancelOccurrences(calendarObject, ids, options = {}) {
   return editFields(
     calendarObject,
     { EXDATE: idList(ids, "cancelOccurrences") },
-    { type: options?.type, absoluteTime: "keep-zone", lists: { EXDATE: "add" } },
+    { type: options?.type, lists: { EXDATE: "add" } },
     "cancel"
   );
 }
@@ -2700,7 +2813,7 @@ function restoreOccurrences(calendarObject, ids, options = {}) {
   return editFields(
     calendarObject,
     { EXDATE: idList(ids, "restoreOccurrences") },
-    { type: options?.type, absoluteTime: "keep-zone", lists: { EXDATE: "remove" } },
+    { type: options?.type, lists: { EXDATE: "remove" } },
     "restore"
   );
 }
@@ -2929,19 +3042,28 @@ function expandOccurrences(calendarObject, options) {
   const end = boundIn(master, frame, until, "until");
   const start = options.from === void 0 ? -Infinity : boundIn(master, frame, options.from, "from");
   let found;
-  let excluded;
   const zoned = frame.form === "utc" || frame.form === "tzid";
-  const occurrenceKey = (wall) => zoned ? occurrenceInstant(master, wall, frame) : wall;
+  const excludedInstants = /* @__PURE__ */ new Set();
+  const excludedDays = /* @__PURE__ */ new Set();
+  const excludedWalls = /* @__PURE__ */ new Set();
+  const excluded = (wall) => excludedDays.has(dayOf(wall)) || (zoned ? excludedInstants.has(occurrenceInstant(master, wall, frame)) : excludedWalls.has(wall));
   const overrides = /* @__PURE__ */ new Map();
   try {
     found = expandWalls(master, end - 1, budget);
-    excluded = new Set(master.getAllProperties("exdate").filter((p) => p.type !== "period").flatMap((p) => propertyStamps(p).flatMap((stamp) => {
-      if (!zoned) {
-        return [norm(wallIn(master, stamp, frame))];
+    for (const stamp of master.getAllProperties("exdate").filter((p) => p.type !== "period").flatMap(propertyStamps)) {
+      if (frame.form === "date") {
+        excludedDays.add(dayOf(wallIn(master, stamp, frame)));
+      } else if (stamp.kind === "date") {
+        excludedDays.add(dayOf(stamp.wall));
+      } else if (zoned) {
+        const instant = instantOf(master, stamp, frame);
+        if (instant !== null) {
+          excludedInstants.add(instant);
+        }
+      } else if (stamp.kind === "floating") {
+        excludedWalls.add(stamp.wall);
       }
-      const instant = stamp.kind === "date" ? null : instantOf(master, stamp, frame);
-      return instant === null ? [] : [instant];
-    })));
+    }
     const uid = master.getFirstPropertyValue("uid");
     for (const c of root.name === "vcalendar" ? root.getAllSubcomponents(master.name) : []) {
       const rid = c.getFirstProperty("recurrence-id");
@@ -2958,7 +3080,7 @@ function expandOccurrences(calendarObject, options) {
   const occurrences2 = [];
   let limited = false;
   for (const wall of [...found.walls].sort((a, b) => a - b)) {
-    if (wall < norm(start) || excluded.has(occurrenceKey(wall))) {
+    if (wall < norm(start) || excluded(wall)) {
       continue;
     }
     if (occurrences2.length === limit) {

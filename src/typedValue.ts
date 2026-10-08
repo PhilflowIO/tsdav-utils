@@ -363,6 +363,7 @@ export function setDateValue(
   floatingTime: FloatingTime = 'keep',
   absoluteTime: AbsoluteTime = 'as-given',
   named: NamedZone | null = null,
+  matchOnly = false,
 ): boolean {
   const shape = dateProperty(component, name);
   if (!shape) {
@@ -395,14 +396,17 @@ export function setDateValue(
   const why = ['exdate', 'rdate'].includes(lower)
     ? 'otherwise it names no occurrence of the series'
     : 'RFC 5545 requires the same value type';
-  if (anchor?.form === 'date' && !isDate) {
+  // Values only to be matched against a list (list mode "remove") may take
+  // any form a value in the list can have: a date next to a timed DTSTART, an
+  // instant in a floating series
+  if (anchor?.form === 'date' && !isDate && !matchOnly) {
     throw refuse('VALUE_TYPE_MISMATCH', `${upper} must be a date: DTSTART is a date (all-day), and ${why}`, upper);
   }
-  if (anchor && anchor.form !== 'date' && isDate) {
+  if (anchor && anchor.form !== 'date' && isDate && !matchOnly) {
     throw refuse('VALUE_TYPE_MISMATCH', `${upper} needs a time: DTSTART has one, and ${why}`, upper);
   }
   // A floating series has no zone: an instant names no occurrence of it
-  if (shape.multiValue && anchor?.form === 'floating' && !named && parsed.some((p) => p.kind === 'utc')) {
+  if (shape.multiValue && anchor?.form === 'floating' && !named && !matchOnly && parsed.some((p) => p.kind === 'utc')) {
     throw refuse('ZONE_MISMATCH', `${upper}: DTSTART is a local time without a zone (floating), so a value with "Z" ` +
       'or an offset names no occurrence of the series: drop the zone and give the wall-clock time, e.g. ' +
       `"${parsed.find((p) => p.kind === 'utc')!.jcal.replace(/Z$/, '')}"`, upper);
@@ -444,6 +448,15 @@ export function setDateValue(
     parsed = parsed.map((p) => p.kind === 'utc' ? wallInZone(component, upper, zone, p) : p);
   }
 
+  // One line has one zone. In a list each value only names an instant, so
+  // wall-clock values in a TZID next to UTC ones are written as the instants
+  // they name (RFC 5545 3.3.5), which every value has — rather than UTC values
+  // as wall clocks, which an instant in the second pass of a repeated hour
+  // does not have
+  if (shape.multiValue && zone && parsed.some((p) => p.kind === 'utc') && parsed.some((p) => p.kind === 'floating')) {
+    parsed = parsed.map((p) => p.kind === 'floating' ? utcOfWall(component, upper, zone!, p) : p);
+  }
+
   const floating = parsed.some((p) => p.kind === 'floating');
   // Where a wall-clock value ends up: in a TZID, floating, or converted to UTC
   const wallClock: 'tzid' | 'floating' | 'utc' | null = !floating ? null
@@ -457,11 +470,6 @@ export function setDateValue(
     throw refuse('ZONE_MISMATCH', UTC_ONLY.has(lower)
       ? `${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"`
       : `${upper} has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"`, upper);
-  }
-  // One line has one zone. In a list each value only names an instant, so a
-  // UTC value joins wall-clock values in a TZID as its wall clock there
-  if (shape.multiValue && floating && wallClock === 'tzid' && zone) {
-    parsed = parsed.map((p) => p.kind === 'utc' ? wallInZone(component, upper, zone!, p) : p);
   }
   // Elsewhere wall-clock values that stay wall-clock (in a TZID, or
   // floating) cannot share it with UTC values

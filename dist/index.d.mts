@@ -284,8 +284,11 @@ interface OccurrenceEditOptions {
 declare function cancelOccurrences(calendarObject: CalendarObjectInput, ids: readonly string[], options?: OccurrenceEditOptions): string;
 /**
  * Restore cancelled occurrences: the EXDATE values naming them are removed,
- * whatever line and zone each is written in. An override removed when the
- * occurrence was cancelled does not come back; the occurrence is the series'.
+ * whatever line and zone each is written in, matched by instant directly (an
+ * EXDATE in the second pass of a repeated hour can be removed by its UTC
+ * value), and a date in a timed series that excludes the occurrence's day
+ * goes too. An override removed when the occurrence was cancelled does not
+ * come back; the occurrence is the series'.
  *
  * @param ids - the original starts, in the same forms as for cancelOccurrences
  * @throws {UpdateFieldsError} NOT_IN_LIST for an id no EXDATE names; otherwise

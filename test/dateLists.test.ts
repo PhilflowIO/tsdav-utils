@@ -218,10 +218,9 @@ describe('values are matched by instant, not by wall clock', () => {
   it('refuses to add the second pass, which names no occurrence', () => {
     expect(isUpdateFieldsError(thrown(() => updateFields(fold(), { EXDATE: '2026-10-25T01:30:00Z' },
       { lists: { EXDATE: 'add' } })), 'UNMATCHED_EXDATE')).toBe(true);
-    // written in the series' zone, the second pass has no wall clock of its own there
     const error = thrown(() => cancelOccurrences(fold(), ['2026-10-25T01:30:00Z']));
-    expect(isUpdateFieldsError(error, 'DST_AMBIGUOUS')).toBe(true);
-    expect(error).toMatchObject({ remedy: 'fix-value' });
+    expect(isUpdateFieldsError(error, 'UNKNOWN_OCCURRENCE')).toBe(true);
+    expect(error.message).toMatch(/that day it has one at 20261025T023000/);
   });
 
   it('removes only the pass given', () => {
@@ -247,6 +246,119 @@ describe('values are matched by instant, not by wall clock', () => {
     // a value the call writes in UTC is refused, naming it
     expect(() => updateFields(input, { RDATE: '2026-12-26T10:00:00Z' }, { lists: { RDATE: 'add' } }))
       .toThrow(/^RDATE: DTSTART is a local time without a zone \(floating\).*"2026-12-26T10:00:00"/);
+  });
+});
+
+describe('a value at a wall clock the DST change skips', () => {
+  // daily at 02:30 Berlin; on 29 March 2026 02:30 does not exist and is read
+  // as 01:30Z (RFC 5545 3.3.5), the same instant as 03:30 that day
+  const gap = (...extra: string[]) =>
+    calendar(...event('DTSTART;TZID=Europe/Berlin:20260325T023000', 'RRULE:FREQ=DAILY;COUNT=10', ...extra));
+  const day = (ics: string) => expandOccurrences(ics, { budget: createRecurrenceBudget(), until: '2026-04-10T00:00:00Z' })
+    .occurrences.map((o) => o.recurrenceId.value).filter((v) => v.startsWith('2026-03-29'));
+
+  it.each([
+    ['cancel by UTC', (ics: string) => cancelOccurrences(ics, ['2026-03-29T01:30:00Z'])],
+    ['cancel by offset', (ics: string) => cancelOccurrences(ics, ['2026-03-29T03:30:00+02:00'])],
+    ['add the twin wall clock', (ics: string) => updateFields(ics, { EXDATE: '2026-03-29T03:30:00' }, { lists: { EXDATE: 'add' } })],
+    ['replace with the twin wall clock', (ics: string) => updateFields(ics, { EXDATE: '2026-03-29T03:30:00' })],
+  ])('an EXDATE (%s) is written as the occurrence\'s own wall clock', (_, write) => {
+    const out = write(gap());
+    expect(lines(out, 'EXDATE')).toEqual(['EXDATE;TZID=Europe/Berlin:20260329T023000']);
+    expect(day(out)).toEqual([]);
+    // later edits read it without a doubt
+    expect(lines(updateFields(out, { DTSTART: '2026-03-25T04:30:00' }), 'EXDATE')).toEqual(['EXDATE;TZID=Europe/Berlin:20260329T043000']);
+  });
+
+  it.each([
+    ['add', { lists: { RDATE: 'add' as ListMode } }],
+    ['replace', {}],
+  ])('an RDATE that would repeat the occurrence under the twin is refused (%s)', (_, options) => {
+    const error = thrown(() => updateFields(gap(), { RDATE: '2026-03-29T03:30:00' }, options));
+    expect(isUpdateFieldsError(error, 'DST_AMBIGUOUS')).toBe(true);
+    expect(error).toMatchObject({ remedy: 'fix-value', property: 'RDATE' });
+  });
+});
+
+describe('remove and restore match the values held directly', () => {
+  const fold = (...extra: string[]) =>
+    calendar(...event('DTSTART;TZID=Europe/Berlin:20261020T023000', 'RRULE:FREQ=DAILY;COUNT=10', ...extra));
+
+  it('cancel writes an instant as the series\' wall clock; the second pass of a repeated hour is no occurrence', () => {
+    // an hourly series steps on the wall clock: 02:00 occurs once, at its first pass (00:00Z)
+    const hourly = calendar(...event('DTSTART;TZID=Europe/Berlin:20261025T000000', 'RRULE:FREQ=HOURLY;COUNT=6'));
+    expect(lines(cancelOccurrences(hourly, ['2026-10-25T00:00:00Z']), 'EXDATE'))
+      .toEqual(['EXDATE;TZID=Europe/Berlin:20261025T020000']);
+    const error = thrown(() => cancelOccurrences(hourly, ['2026-10-25T01:00:00Z']));
+    expect(isUpdateFieldsError(error, 'UNKNOWN_OCCURRENCE')).toBe(true);
+    expect(error).toMatchObject({ remedy: 'fix-value' });
+  });
+
+  it('restore removes an EXDATE in the second pass of a repeated hour by its UTC value', () => {
+    expect(lines(restoreOccurrences(fold('EXDATE:20261025T013000Z', 'EXDATE:20261024T003000Z'),
+      ['2026-10-25T01:30:00Z']), 'EXDATE')).toEqual(['EXDATE:20261024T003000Z']);
+  });
+
+  it('a floating EXDATE in a zoned series names nothing: it blocks no rule change, and is kept', () => {
+    const input = calendar(...event('DTSTART;TZID=Europe/Berlin:20260913T010000', 'RRULE:FREQ=MONTHLY;COUNT=3',
+      'RDATE;TZID=Europe/Berlin:20260915T040000', 'EXDATE:20260915T040000'));
+    expect(lines(updateFields(input, { RDATE: '2026-10-20T04:00:00' }), 'EXDATE')).toEqual(['EXDATE:20260915T040000']);
+    expect(lines(updateFields(input, { RDATE: '2026-09-15T04:00:00' }, { lists: { RDATE: 'remove' } }), 'RDATE')).toEqual([]);
+    expect(starts(input)).toContain('2026-09-15T04:00:00');
+  });
+
+  it('refuses an unreadable value in the list in every mode, as the write needs to read it', () => {
+    for (const mode of ['replace', 'add', 'remove'] as ListMode[]) {
+      const error = thrown(() => updateFields(berlin('EXDATE:garbage', 'EXDATE:20261210T090000Z'),
+        { EXDATE: '2026-12-10T10:00:00' }, { lists: { EXDATE: mode } }));
+      expect(isUpdateFieldsError(error, 'INVALID_VALUE')).toBe(true);
+      expect(error).toMatchObject({ remedy: 'rewrite-object', property: 'EXDATE' });
+    }
+  });
+});
+
+describe('a date in the list of a timed series holds every occurrence that day (as ical.js reads it)', () => {
+  const dated = berlin('EXDATE;VALUE=DATE:20261210');
+
+  it('expandOccurrences leaves the day out', () => {
+    expect(starts(dated)).not.toContain('2026-12-10T10:00:00');
+  });
+
+  it('a time that day added or cancelled is held already; restore by the time removes the date', () => {
+    expect(updateFields(dated, { EXDATE: '2026-12-10T10:00:00' }, { lists: { EXDATE: 'add' } })).toBe(updateFields(dated, {}));
+    expect(lines(cancelOccurrences(dated, ['2026-12-10T10:00:00']), 'EXDATE')).toEqual(['EXDATE;VALUE=DATE:20261210']);
+    // a time that day that is no occurrence is still refused, not taken as held
+    expect(isUpdateFieldsError(thrown(() => updateFields(dated, { EXDATE: '2026-12-10T11:00:00' }, { lists: { EXDATE: 'add' } })),
+      'UNMATCHED_EXDATE')).toBe(true);
+    const restored = restoreOccurrences(dated, ['2026-12-10T10:00:00']);
+    expect(lines(restored, 'EXDATE')).toEqual([]);
+    expect(starts(restored)).toContain('2026-12-10T10:00:00');
+  });
+
+  it('remove of a time matches only that time: the date stays, or the time is not in the list', () => {
+    expect(isUpdateFieldsError(thrown(() => updateFields(dated, { EXDATE: '2026-12-10T10:00:00' }, { lists: { EXDATE: 'remove' } })),
+      'NOT_IN_LIST')).toBe(true);
+    expect(lines(updateFields(berlin('EXDATE;VALUE=DATE:20261210', 'EXDATE:20261210T090000Z'), { EXDATE: '2026-12-10T10:00:00' },
+      { lists: { EXDATE: 'remove' } }), 'EXDATE')).toEqual(['EXDATE;VALUE=DATE:20261210']);
+  });
+
+  it('remove takes the date given as a date', () => {
+    expect(lines(updateFields(berlin('EXDATE;VALUE=DATE:20261210,20261217'), { EXDATE: '2026-12-10' },
+      { lists: { EXDATE: 'remove' } }), 'EXDATE')).toEqual(['EXDATE;VALUE=DATE:20261217']);
+  });
+
+  it('replace keeps the date while a time that day is in the new list, and drops it otherwise', () => {
+    expect(lines(updateFields(dated, { EXDATE: '2026-12-10T10:00:00,2026-12-17T10:00:00' }), 'EXDATE'))
+      .toEqual(['EXDATE;VALUE=DATE:20261210', 'EXDATE;TZID=Europe/Berlin:20261217T100000']);
+    expect(lines(updateFields(dated, { EXDATE: '2026-12-17T10:00:00' }), 'EXDATE'))
+      .toEqual(['EXDATE;TZID=Europe/Berlin:20261217T100000']);
+  });
+
+  it('an override on that day counts as excluded', () => {
+    expect(isUpdateFieldsError(thrown(() => updateFields(overridden(), { EXDATE: '2026-12-17' }, { lists: { EXDATE: 'remove' } })),
+      'NOT_IN_LIST')).toBe(true);
+    const out = updateFields(overridden('EXDATE;VALUE=DATE:20261217'), { SUMMARY: 'y' });
+    expect(lines(out, 'EXDATE')).toEqual(['EXDATE;VALUE=DATE:20261217']);
   });
 });
 

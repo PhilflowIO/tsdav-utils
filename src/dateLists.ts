@@ -10,16 +10,17 @@ import type { ListMode } from './types';
  * lines and comma lists (RFC 5545 3.8.5.1, 3.8.5.2), each line with its own
  * TZID and parameters. A write gives values for the list and a mode:
  *
- *  - replace: the values are the whole list. Values already there whose
- *    instant is among them stay where they are, on their own line, in their
- *    own zone; the others go; the rest of the values given are added. So
- *    restating the list changes nothing, byte for byte.
+ *  - replace: the values are the whole list. Values already there that are
+ *    among them stay where they are, on their own line, in their own zone; the
+ *    others go; the rest of the values given are added. So restating the list
+ *    changes nothing, byte for byte.
  *  - add: the values join the list; one it holds already is not written twice.
  *  - remove: the values leave the list; one it does not hold is refused.
  *
- * Values are matched by instant, read on the series' wall clock (see
- * instantKey), so "2026-12-24T09:00:00Z" matches
- * "EXDATE;TZID=Europe/Berlin:20261224T100000".
+ * Values are matched by the instant they name (see instantKey), so
+ * "2026-12-24T09:00:00Z" matches "EXDATE;TZID=Europe/Berlin:20261224T100000".
+ * A date in a timed series stands for every occurrence that day (see
+ * dayKeyOf), as ical.js and Thunderbird read it, so it holds any time that day.
  */
 
 /** Who asks, for the wording of a refusal: updateFields, or the occurrence helpers */
@@ -29,10 +30,11 @@ export type ListPurpose = 'cancel' | 'restore' | null;
  * What identifies a value of a list. In a timed series with a zone, the
  * instant it names, whatever zone it is written in, read with RFC 5545 3.3.5
  * (so in the hour a DST change shows twice, 00:30Z and 01:30Z are two values);
- * a date there is a whole day of its own. In an all-day series, the date; in a
- * floating series, the wall clock. Where it names nothing to compare (a
- * floating value in a zoned series, UTC in a floating one, a zone without
- * known rules, no DTSTART) the value as written, so it matches only itself.
+ * a date there is a whole day of its own ("day ..."). In an all-day series,
+ * the date; in a floating series, the wall clock. Where it names nothing to
+ * compare (a floating value in a zoned series, UTC in a floating one, a zone
+ * without known rules, no DTSTART) the value as written, so it matches only
+ * itself.
  */
 export function instantKey(master: ICAL.Component, stamp: Stamp): string {
   const written = `as written ${stamp.kind} ${stamp.tzid ?? ''} ${stamp.wall}`;
@@ -58,18 +60,41 @@ export function instantKey(master: ICAL.Component, stamp: Stamp): string {
   }
 }
 
-/** The keys of a line's values, or null when the object's line does not parse */
-export function lineKeys(master: ICAL.Component, property: ICAL.Property): string[] | null {
+/**
+ * The day a timed value of a timed series falls on, on the series' wall
+ * clock, in the form instantKey gives a date ("day ..."): a date in the list
+ * holds every occurrence that day. Null where there is no such day to tell.
+ */
+export function dayKeyOf(master: ICAL.Component, stamp: Stamp): string | null {
+  const frame = frameOf(master);
+  if (!frame || frame.form === 'date' || stamp.kind === 'date') {
+    return null;
+  }
+  // a floating value in a zoned series, or an instant in a floating one, names nothing
+  if ((stamp.kind === 'floating') !== (frame.form === 'floating')) {
+    return null;
+  }
   try {
-    return propertyStamps(property).map((stamp) => instantKey(master, stamp));
+    return `day ${dayOf(wallIn(master, stamp, frame))}`;
   } catch {
     return null;
   }
 }
 
+/** The keys of a line's values; a value in the object that does not parse is refused (INVALID_VALUE) */
+export function lineKeys(master: ICAL.Component, property: ICAL.Property): string[] {
+  return propertyStamps(property).map((stamp) => instantKey(master, stamp));
+}
+
 /** Every key a list holds, in the series as it stands */
 export function listKeys(master: ICAL.Component, name: string): Set<string> {
-  return new Set(master.getAllProperties(name).flatMap((property) => lineKeys(master, property) ?? []));
+  return new Set(master.getAllProperties(name).flatMap((property) => lineKeys(master, property)));
+}
+
+/** Whether a list's keys hold a value: at its instant, or as a date of its day */
+export function holds(master: ICAL.Component, keys: Set<string>, stamp: Stamp): boolean {
+  const day = dayKeyOf(master, stamp);
+  return keys.has(instantKey(master, stamp)) || (day !== null && keys.has(day));
 }
 
 /** Keep only some of a line's values; a line left empty goes */
@@ -84,19 +109,30 @@ function keepValues(master: ICAL.Component, line: ICAL.Property, keep: (index: n
 }
 
 /** One value the call gave */
-interface Given {
+export interface Given {
   key: string;
+  /** the day it falls on, which a date in the list holds (see dayKeyOf) */
+  day: string | null;
   value: unknown;
   stamp: Stamp;
   label: string;
 }
 
+/** Whether keys hold a given value, at its instant or as a date of its day */
+const covers = (keys: Set<string>, g: Given) => keys.has(g.key) || (g.day !== null && keys.has(g.day));
+
 /** What a list edit did, for the checks that follow it */
 export interface ListOutcome {
-  /** the EXDATE values the call added that the list did not hold, in the series' form */
+  /**
+   * the EXDATE values the call added that the list did not hold at their
+   * instant, in the series' form — one held only by a date of its day too, so
+   * a time that names no occurrence is not let through as held
+   */
   addedExdates: Given[];
-  /** the keys of every EXDATE value the call added, held before or not */
-  givenExdates: Set<string>;
+  /** every EXDATE value the call added, held before or not */
+  givenExdates: Given[];
+  /** per list, the line the call wrote its new values on, if any */
+  written: Map<string, ICAL.Property>;
 }
 
 /**
@@ -117,7 +153,7 @@ export class DateListEdit {
   }
 
   apply(): ListOutcome {
-    const outcome: ListOutcome = { addedExdates: [], givenExdates: new Set() };
+    const outcome: ListOutcome = { addedExdates: [], givenExdates: [], written: new Map() };
     for (const [name, mode] of this.modes) {
       const lines = this.master.getAllProperties(name);
       const fresh = lines.filter((line) => !this.held.has(line));
@@ -126,6 +162,8 @@ export class DateListEdit {
         continue;
       }
       const old = lines.filter((line) => this.held.has(line));
+      // every mode reads the list: a value there that does not parse is refused
+      const oldKeys = old.map((property) => lineKeys(this.master, property));
       const given = this.given(name, fresh);
       const [line, ...rest] = fresh;
       for (const extra of rest) {
@@ -133,31 +171,31 @@ export class DateListEdit {
       }
       if (mode === 'remove') {
         this.master.removeProperty(line);
-        this.remove(name, old, given);
+        this.remove(name, old, oldKeys, given);
         continue;
       }
-      const wanted = new Set(given.map((g) => g.key));
       const present = new Set<string>();
-      for (const property of old) {
-        const keys = lineKeys(this.master, property);
-        if (mode === 'add') {
-          keys?.forEach((key) => present.add(key));
-        } else if (!keys) {
-          // a value that does not parse is not among the ones given
-          this.master.removeProperty(property);
-        } else {
-          keepValues(this.master, property, (i) => wanted.has(keys[i]) && Boolean(present.add(keys[i])));
-        }
+      if (mode === 'add') {
+        oldKeys.flat().forEach((key) => present.add(key));
+      } else {
+        // a value stays when it is given again: at its instant, or a date of
+        // a timed series when a value that day is given
+        const wanted = new Set(given.flatMap((g) => g.day === null ? [g.key] : [g.key, g.day]));
+        old.forEach((property, n) => keepValues(this.master, property, (i) => {
+          const key = oldKeys[n][i];
+          return wanted.has(key) && Boolean(present.add(key));
+        }));
       }
-      const added = given.filter((g) => !present.has(g.key));
+      const added = given.filter((g) => !covers(present, g));
       if (added.length) {
         line.setValues(added.map((g) => g.value));
+        outcome.written.set(name, line);
       } else {
         this.master.removeProperty(line);
       }
       if (name === 'exdate' && mode === 'add') {
-        outcome.addedExdates.push(...added);
-        given.forEach((g) => outcome.givenExdates.add(g.key));
+        outcome.addedExdates.push(...given.filter((g) => !present.has(g.key)));
+        outcome.givenExdates.push(...given);
       }
     }
     return outcome;
@@ -174,17 +212,26 @@ export class DateListEdit {
           return [];
         }
         seen.add(key);
-        return [{ key, value: values[i], stamp, label: `${name.toUpperCase()} ${icalForm(String(values[i]))}` }];
+        return [{ key, day: dayKeyOf(this.master, stamp), value: values[i], stamp,
+          label: `${name.toUpperCase()} ${icalForm(String(values[i]))}` }];
       });
     });
   }
 
-  /** Take values out of a list; refused, naming them, where the list does not hold one */
-  private remove(name: string, old: ICAL.Property[], given: Given[]) {
+  /**
+   * Take values out of a list, each matched directly against the values held,
+   * by instant (or as a date given as a date); refused, naming them, where the
+   * list does not hold one. restoreOccurrences also takes a date of the
+   * occurrence's day.
+   */
+  private remove(name: string, old: ICAL.Property[], oldKeys: string[][], given: Given[]) {
     const upper = name.toUpperCase();
-    const remove = new Set(given.map((g) => g.key));
-    const holds = new Set(old.flatMap((property) => lineKeys(this.master, property) ?? []));
-    const missing = given.filter((g) => !holds.has(g.key));
+    const held = new Set(oldKeys.flat());
+    // A value is removed where the list holds it; restoring an occurrence also
+    // takes away a date of a timed series that excludes its day (every
+    // occurrence that day comes back), as the occurrence would stay excluded
+    const byDay = this.purpose === 'restore';
+    const missing = given.filter((g) => byDay ? !covers(held, g) : !held.has(g.key));
     if (missing.length) {
       const list = old.map((property) => property.toICALString()).join(', ');
       const values = missing.map((g) => icalForm(String(g.value))).join(', ');
@@ -195,11 +242,7 @@ export class DateListEdit {
           `(${list || `the object has no ${upper}`}), so there is nothing to remove. Give a value the list holds, ` +
           'at the same instant (in any zone)', { remedy: 'fix-value', property: upper });
     }
-    for (const property of old) {
-      const keys = lineKeys(this.master, property);
-      if (keys) {
-        keepValues(this.master, property, (i) => !remove.has(keys[i]));
-      }
-    }
+    const remove = new Set(given.flatMap((g) => g.day === null || !byDay ? [g.key] : [g.key, g.day]));
+    old.forEach((property, n) => keepValues(this.master, property, (i) => !remove.has(oldKeys[n][i])));
   }
 }
