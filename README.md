@@ -480,9 +480,12 @@ RFC 5545 leaves it open; this follows the dominant reader (ical.js, which
 Thunderbird uses) for interoperability. So a time that day is held by it
 already (`'add'` and `cancelOccurrences` write nothing more — after checking the
 time is an occurrence), `'replace'` keeps the date while a time that day is in
-the new list, `'remove'` takes it given as a date (`'2026-12-10'`), and
-`restoreOccurrences` of any occurrence that day removes it (which brings back
-every occurrence of that day).
+the new list, and `'remove'` takes it given as a date (`'2026-12-10'`), which brings
+back every occurrence that day; `'remove'` of a single time held only by such a
+date is refused, `NOT_IN_LIST`, saying so. `restoreOccurrences` brings back
+exactly the occurrences it is given: it removes the date and excludes each other
+occurrence of that day the date excluded on its own line, in the series' form
+(restoring every occurrence of the day leaves nothing in its place).
 
 **A value at a wall clock the DST change skips.** On the night clocks go
 forward, an occurrence at 02:30 Berlin is read as 01:30Z (RFC 5545 3.3.5) — the
@@ -581,8 +584,8 @@ an all-day series).
   naming the occurrence the series has that day.
 - `restoreOccurrences` removes the `EXDATE` values naming each, whatever line and
   zone they are on, matched by instant directly (any stored form can be
-  removed), and a date of a timed series excluding the occurrence's day (see
-  above). An id no `EXDATE` names is refused, `NOT_IN_LIST` (`fix-value`). An
+  removed). A date of a timed series excluding the occurrence's day is replaced
+  by exclusions of the other occurrences of that day (see above). An id no `EXDATE` names is refused, `NOT_IN_LIST` (`fix-value`). An
   override removed by a cancel does not come back.
 
 ```typescript
