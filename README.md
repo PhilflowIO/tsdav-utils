@@ -171,6 +171,12 @@ Updates arbitrary properties on a calendar/todo/contact object.
     `updateFields(todo.data, { DUE: '...' }, { type: 'vtodo' })` writes into the todo
     instead of the event
 
+- **options.append**: `('EXDATE' | 'RDATE')[]` (optional)
+  - The lists to add the values given to, instead of replacing them: the values
+    join the ones the object holds, and one already there is not written twice
+    (see [Lists of dates](#lists-of-dates-exdate-and-rdate))
+  - Throws `INVALID_INPUT` for anything but a list of `EXDATE` and `RDATE`
+
 #### Returns
 
 - `string`: Updated iCal string ready for `tsdav.updateCalendarObject()`
@@ -272,8 +278,61 @@ throws naming the accepted forms.
 
 Apart from following DTSTART, each value is encoded on its own. Keeping related
 properties consistent — DUE vs. DURATION, say — is the caller's job; an RRULE
-`UNTIL` follows DTSTART (see [Recurrence rules](#recurrence-rules)). Like every other property, only the first
-`EXDATE`/`RDATE` line is replaced.
+`UNTIL` follows DTSTART (see [Recurrence rules](#recurrence-rules)). `EXDATE` and
+`RDATE` are lists, written as a whole or added to (see the next section).
+
+### Lists of dates: `EXDATE` and `RDATE`
+
+`EXDATE` and `RDATE` each hold one set of dates, which an object may spread over
+several lines and comma lists (RFC 5545 3.8.5.1, 3.8.5.2). A write treats the set
+as one:
+
+- **A plain write sets the whole list.** Every line of the property goes, and the
+  values given are written on one line. Give every value the list should keep:
+
+  ```typescript
+  // EXDATE:20261210T090000Z / EXDATE:20261224T090000Z,20261231T090000Z
+  updateFields(event, { EXDATE: '2026-12-24T09:00:00Z' });
+  // EXDATE:20261224T090000Z — the 10th and 31st occur again
+  ```
+
+  A wall-clock value is read in the zone of the first line, else DTSTART's, as
+  above; a set written with DTSTART in the same call is the new series' and is
+  not moved.
+- **`{ append: ['EXDATE'] }` adds to it**, for a caller that wants to cancel one
+  more occurrence without knowing the ones cancelled already:
+
+  ```typescript
+  updateFields(event, { EXDATE: '2026-12-31T10:00:00' }, { append: ['EXDATE'] });
+  // the lines already there stay; EXDATE;TZID=Europe/Berlin:20261231T100000 is added
+  ```
+
+  - The values are added on a line of their own, typed and zoned as a new line
+    would be (DTSTART's zone and value type); the lines already there are kept
+    as written.
+  - A value the list already holds is dropped, as is a repeat within the call:
+    the same instant, whatever zone each is written in (in an all-day series, the
+    same date). Where an instant cannot be told (no DTSTART, a zone without
+    known rules) values are compared as written. A call that adds nothing new
+    leaves the list as it was.
+  - With DTSTART in the same call, the lines already there move with the series
+    (see [Recurring events and todos](#recurring-events-and-todos)) and the added
+    values are the moved series' own: `{ DTSTART: '…T10:00:00Z', EXDATE:
+    '…T10:00:00Z' }` excludes the 10:00 occurrence.
+  - **An added `EXDATE` has to name an occurrence** of the series as the call
+    leaves it (DTSTART, the `RRULE` and the `RDATE`s, including ones written in
+    the same call). One that names none would exclude nothing, and the
+    occurrence meant to be cancelled would silently stay — most often a time
+    given in the wrong zone — so it throws `UNMATCHED_EXDATE` (`fix-value`),
+    naming the value and the series. Where the series cannot be checked (no
+    DTSTART) it throws `SERIES_UNVERIFIABLE`, as for a new rule. A plain write is
+    not checked: it states the list as given, like any other value.
+  - An added `RDATE` only adds occurrences, so nothing is checked beyond its
+    form; periods (`VALUE=PERIOD`) already in the list are kept.
+  - Naming a property the call does not write is allowed, so a caller can pass
+    `{ append: ['EXDATE', 'RDATE'] }` on every call.
+
+Removing a single value is not offered: read the list and write it whole.
 
 ## Recurrence rules
 
@@ -438,7 +497,7 @@ follow the master's `DTSTART` (see above).
   // DTSTART:20261012T140000Z — the whole series, moved instance included, an hour later
   ```
 - **When the call gives `RRULE` or `RDATE`, the occurrences are the caller's** —
-  values the call writes are never moved — but every override and `EXDATE` that
+  values the call writes or adds are never moved — but every override and `EXDATE` that
   named an occurrence before must still name one. If one would not, `updateFields`
   throws, naming each: give an `RRULE` that keeps those occurrences and `EXDATE`
   with the exclusions the new series should have, or rewrite the whole object to
@@ -514,7 +573,7 @@ unreadable one is refused (`INVALID_RULE`) rather than rewritten.
 
 | Code | When | Remedy |
 |---|---|---|
-| `INVALID_INPUT` | an argument has the wrong type: `calendarObject` not a string or `{ data: string }`, `fields` or `options` not an object, a non-string to `parseDateValue`, several top-level components in one text | `fix-value` |
+| `INVALID_INPUT` | an argument has the wrong type: `calendarObject` not a string or `{ data: string }`, `fields` or `options` not an object, a non-string to `parseDateValue`, several top-level components in one text, `options.append` not a list of `EXDATE` and `RDATE` | `fix-value` |
 | `INVALID_ICALENDAR` | the iCalendar or vCard text does not parse (`cause`: the ical.js error) | `rewrite-object` |
 | `INVALID_TYPE` | `options.type` (or `seriesMaster`'s type) is not `vevent`, `vtodo` or `vjournal` | `fix-value` |
 | `INVALID_FLOATING_TIME` | `options.floatingTime` is not `keep` or `local` | `fix-value` |
@@ -533,8 +592,9 @@ unreadable one is refused (`INVALID_RULE`) rather than rewritten.
 | `RECURRENCE_ID_ON_MASTER` | `RECURRENCE-ID` written on the series master | `rewrite-object` |
 | `SERIES_MOVE_REFUSED` | a DTSTART move the series cannot follow exactly: the rule pins the old start (`suggestion` holds the rule to give, when there is one), or an existing `UNTIL`, `EXDATE` or `RDATE` cannot move with it; or an override cannot, or the switch to all-day would change what a value names | `same-call`; `rewrite-object` for an override or the switch to all-day |
 | `ORPHANED_EXCEPTIONS` | a new `RRULE` or `RDATE` leaves an override or `EXDATE` naming no occurrence | `same-call` |
+| `UNMATCHED_EXDATE` | an `EXDATE` added with `options.append` names no occurrence of the series, so it would exclude nothing | `fix-value` |
 | `DST_AMBIGUOUS` | a value of the series sits at a DST change, where the wall clock does not name one instant; or, under `absoluteTime: 'keep-zone'`, an instant falls in the second pass of the repeated hour | `same-call` for `UNTIL`; `rewrite-object` for a value sharing its instant with a skipped occurrence, or an override; `fix-value` under `keep-zone` |
-| `CHECK_LIMIT_EXCEEDED` | the series is too sparse, or the override or `EXDATE` furthest ahead too far, to check within the work limit | `rewrite-object` on a new rule; `same-call` on a move |
+| `CHECK_LIMIT_EXCEEDED` | the series is too sparse, or the override or `EXDATE` furthest ahead too far, to check within the work limit | `rewrite-object` on a new rule; `same-call` on a move; `fix-value` for an added `EXDATE` (give the whole list instead) |
 | `SERIES_UNVERIFIABLE` | whether the overrides and `EXDATE`s still name occurrences cannot be checked: the series has no DTSTART | `rewrite-object` |
 
 A refusal reported inside another keeps its code: an `UNTIL` in the repeated
