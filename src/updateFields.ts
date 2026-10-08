@@ -3,8 +3,9 @@ import { COMPONENT_TYPES } from './types';
 import type { CalendarObjectInput, ComponentType, FieldUpdates, UpdateFieldsOptions } from './types';
 import { beginSeriesEdit } from './series';
 import { UpdateFieldsError } from './errors';
-import { setDateValue, setRecurValue } from './typedValue';
-import { ianaZoneName, vtimezoneIn } from './zone';
+import { pad, setDateValue, setRecurValue } from './typedValue';
+import type { NamedZone } from './typedValue';
+import { fieldsOf, ianaZoneName, isUtcZone, vtimezoneIn, wallOf, zoneOf } from './zone';
 import { ensureVtimezone } from './vtimezone';
 
 /** A value's type for an error message: "null", "an array", "a number" */
@@ -91,9 +92,9 @@ export function seriesMaster(calendar: ICAL.Component, type?: ComponentType): IC
  * spelled there, or an IANA zone the runtime knows, spelled as the time zone
  * data spells it ("europe/berlin" is written "Europe/Berlin").
  */
-function namedZone(root: ICAL.Component, zone: string): string {
+function namedZone(root: ICAL.Component, zone: string): NamedZone {
   if (vtimezoneIn(root, zone)) {
-    return zone;
+    return { utc: false, tzid: zone };
   }
   const name = ianaZoneName(zone);
   if (!name) {
@@ -102,8 +103,43 @@ function namedZone(root: ICAL.Component, zone: string): string {
       (/^[+-]\d/.test(zone.trim()) ? '; for a fixed offset give the values with it ("2026-10-26T18:00:00+02:00") instead' : ''),
     { remedy: 'fix-value' });
   }
-  return name;
+  // UTC under any name is written as UTC is: with Z, without TZID or VTIMEZONE
+  return isUtcZone(name) ? { utc: true, tzid: name } : { utc: false, tzid: name };
 }
+
+/** A timed DTSTART, DTEND or DUE: its wall clock, the instant when its zone is known, and its frame */
+interface Moment {
+  wall: number;
+  utc: number | null;
+  frame: string;
+}
+
+/** The moment a date-time property names, or null for a date, a missing property, or an unreadable value */
+function momentOf(component: ICAL.Component, name: string): Moment | null {
+  const property = component.getFirstProperty(name);
+  if (!property || property.type === 'date') {
+    return null;
+  }
+  const m = /^(\d{4,})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(Z)?$/i.exec(String((property.toJSON() as unknown[])[3]));
+  if (!m) {
+    return null;
+  }
+  const wall = wallOf(...([1, 2, 3, 4, 5, 6].map((i) => Number(m[i])) as [number, number, number, number, number, number]));
+  const tzid = property.getParameter('tzid');
+  if (m[7]) {
+    return { wall, utc: wall, frame: 'utc' };
+  }
+  if (typeof tzid === 'string' && tzid) {
+    const zone = zoneOf(component, tzid);
+    return { wall, utc: zone ? zone.toUtc(wall) : null, frame: `tzid:${tzid}` };
+  }
+  return { wall, utc: null, frame: 'floating' };
+}
+
+const wallText = (wall: number) => {
+  const f = fieldsOf(wall);
+  return `${pad(f.year, 4)}-${pad(f.month)}-${pad(f.day)}T${pad(f.hour)}:${pad(f.minute)}:${pad(f.second)}`;
+};
 
 /**
  * Update arbitrary fields on a calendar/todo/vcard object
@@ -238,6 +274,7 @@ export function updateFields(
     ? seriesMaster(component, type)
     : component;
   const zone = options.zone === undefined ? null : namedZone(component, options.zone.trim());
+  const isEvent = ['vevent', 'vtodo', 'vjournal'].includes(actualComponent.name);
 
   // 4. Update properties using field-agnostic loop
   //    Date and date-time properties and recurrence rules are parsed and
@@ -256,20 +293,54 @@ export function updateFields(
   const written = new Set(entries.map(([key]) => key.toLowerCase()));
   const series = beginSeriesEdit(component.name === 'vcalendar' ? component : null, actualComponent, written,
     icalString);
+  // A DTSTART written in a zone takes the end along that the call does not
+  // write: an end left in the old zone would be read there, hours off, or
+  // before the new start. The duration is kept on the wall clock (as measured
+  // where start and end share a zone, else in elapsed time).
+  const ends = zone && isEvent && written.has('dtstart') ? ['dtend', 'due'].filter((name) => !written.has(name))
+    .flatMap((name) => {
+      const start = momentOf(actualComponent, 'dtstart');
+      const end = momentOf(actualComponent, name);
+      if (!start || !end) {
+        return [];
+      }
+      const length = start.frame === end.frame ? end.wall - start.wall
+        : start.utc !== null && end.utc !== null ? end.utc - start.utc : null;
+      return length === null ? [] : [{ name, length }];
+    }) : [];
   for (const [key, value] of entries) {
     if (!setDateValue(actualComponent, key, value, floatingTime, absoluteTime, zone) &&
         !setRecurValue(actualComponent, key, value, floatingTime, zone)) {
       actualComponent.updatePropertyWithValue(key.toLowerCase(), value);
     }
   }
+  const start = ends.length ? momentOf(actualComponent, 'dtstart') : null;
+  for (const { name, length } of start ? ends : []) {
+    setDateValue(actualComponent, name, wallText(start!.wall + length), floatingTime, absoluteTime, zone);
+  }
   series.finish();
+
+  // In a zone, no end is written before its start (RFC 5545 3.8.2.2, 3.8.2.3)
+  if (zone && isEvent && ['dtstart', 'dtend', 'due'].some((name) => written.has(name))) {
+    const begin = momentOf(actualComponent, 'dtstart');
+    for (const name of ['dtend', 'due']) {
+      const end = momentOf(actualComponent, name);
+      const before = begin && end && (begin.utc !== null && end.utc !== null ? end.utc < begin.utc
+        : begin.frame === end.frame && end.wall < begin.wall);
+      if (before) {
+        const upper = name.toUpperCase();
+        throw new UpdateFieldsError('END_BEFORE_START', `${upper} ${wallText(end!.wall)} would lie before DTSTART ` +
+          `${wallText(begin!.wall)}: give ${upper} after the start`, { remedy: 'fix-value', property: upper });
+      }
+    }
+  }
 
   // A TZID the call wrote needs its VTIMEZONE in the VCALENDAR (RFC 5545
   // 3.6.5); one already there is kept. A bare component has no VCALENDAR to
   // hold it.
-  if (zone && [...written].some((name) =>
-    actualComponent.getAllProperties(name).some((p: ICAL.Property) => p.getParameter('tzid') === zone))) {
-    ensureVtimezone(component, zone);
+  if (zone && !zone.utc && [...written, ...ends.map((e) => e.name)].some((name) =>
+    actualComponent.getAllProperties(name).some((p: ICAL.Property) => p.getParameter('tzid') === zone.tzid))) {
+    ensureVtimezone(component, zone.tzid);
   }
 
   // 5. Serialize back to iCal string

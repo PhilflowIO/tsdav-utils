@@ -214,11 +214,19 @@ export function vtimezoneZone(vtimezone: ICAL.Component): Zone {
   });
 }
 
+/** IANA zones by lower-cased name, so each name's Intl format is built once per process */
+const ianaZones = new Map<string, Zone>();
+
 /** A zone from the runtime's IANA time zone data, or null for an unknown name */
 export function ianaZone(tzid: string): Zone | null {
   // Intl also takes a UTC offset ("+01:00") as a time zone; that is no TZID
-  if (/^[+-]/.test(tzid.trim())) {
+  if (typeof tzid !== 'string' || /^[+-]/.test(tzid.trim())) {
     return null;
+  }
+  const key = tzid.toLowerCase();
+  const cached = ianaZones.get(key);
+  if (cached) {
+    return cached;
   }
   let format: Intl.DateTimeFormat;
   try {
@@ -230,12 +238,14 @@ export function ianaZone(tzid: string): Zone | null {
   } catch {
     return null;
   }
-  return zoneFrom((utc) => {
+  const zone = zoneFrom((utc) => {
     const parts = Object.fromEntries(format.formatToParts(new Date(utc * 1000)).map((p) => [p.type, p.value]));
     const year = parts.era === 'BC' || parts.era === 'B' ? 1 - Number(parts.year) : Number(parts.year);
     return wallOf(year, Number(parts.month), Number(parts.day),
       Number(parts.hour), Number(parts.minute), Number(parts.second)) - utc;
   });
+  ianaZones.set(key, zone);
+  return zone;
 }
 
 /**
@@ -260,12 +270,20 @@ export function vtimezoneIn(component: ICAL.Component, tzid: string): ICAL.Compo
 
 let lowerNames: Map<string, string> | null = null;
 
+/** Whether a zone name is spelled as the tz database spells names: each part starts upper-case ("US/Eastern", "Etc/GMT+5") */
+const properCase = (name: string) => name.split('/').every((part) => /^[A-Z]/.test(part));
+
 /**
  * An IANA zone name as the time zone data spells it, or null when the runtime
  * does not know it. Intl reads names case-insensitively, but other readers of
- * a TZID may not, so "europe/berlin" comes back as "Europe/Berlin". A name is
- * not replaced by the one Intl links it to ("Asia/Kolkata" stays, although
- * some runtimes report it as "Asia/Calcutta"): the caller's name is kept.
+ * a TZID may not:
+ *  - a name the runtime lists is spelled as listed ("europe/berlin" is
+ *    "Europe/Berlin");
+ *  - an alias the runtime links to another name is kept when it is spelled
+ *    properly ("Asia/Kolkata" stays, although some runtimes link it to
+ *    "Asia/Calcutta", "US/Eastern" stays);
+ *  - an alias spelled otherwise ("us/eastern") becomes the name it links to
+ *    ("America/New_York"), the one spelling the runtime can vouch for.
  */
 export function ianaZoneName(name: string): string | null {
   if (!ianaZone(name)) {
@@ -279,8 +297,16 @@ export function ianaZoneName(name: string): string | null {
   if (listed) {
     return listed;
   }
+  return properCase(name) ? name : new Intl.DateTimeFormat('en-US', { timeZone: name }).resolvedOptions().timeZone;
+}
+
+/** Whether an IANA name is UTC under another name ("Etc/UTC", "GMT", "Zulu"), which is written with Z, not a TZID */
+export function isUtcZone(name: string): boolean {
+  if (!ianaZone(name)) {
+    return false;
+  }
   const resolved = new Intl.DateTimeFormat('en-US', { timeZone: name }).resolvedOptions().timeZone;
-  return resolved.toLowerCase() === name.toLowerCase() ? resolved : name;
+  return ['UTC', 'Etc/UTC', 'Etc/GMT', 'GMT', 'Etc/UCT', 'Etc/Zulu', 'Etc/Universal'].includes(resolved);
 }
 
 /** The error for a TZID zoneOf cannot resolve */

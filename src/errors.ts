@@ -42,6 +42,8 @@ const CODES = [
   'DUPLICATE_RULE_PART',
   /** a rule is otherwise invalid: a bad value, no FREQ, a combination RFC 5545 rules out, or unreadable in the object */
   'INVALID_RULE',
+  /** under options.zone, DTEND or DUE would lie before DTSTART */
+  'END_BEFORE_START',
   /** RECURRENCE-ID written on the series master */
   'RECURRENCE_ID_ON_MASTER',
   /** a DTSTART move the series (its rule, UNTIL, EXDATE, RDATE or overrides) cannot follow exactly */
