@@ -50,6 +50,7 @@ var import_ical2 = __toESM(require("ical.js"));
 
 // src/zone.ts
 var import_ical = __toESM(require("ical.js"));
+var DAY = 86400;
 function wallOf(y, mo, d, h = 0, mi = 0, s = 0) {
   const t = new Date(Date.UTC(2e3, mo - 1, d, h, mi, s));
   t.setUTCFullYear(y, mo - 1, d);
@@ -66,23 +67,99 @@ function fieldsOf(wall) {
     second: t.getUTCSeconds()
   };
 }
-function timezoneOf(component, tzid) {
+var wallOfTime = (t) => wallOf(t.year, t.month, t.day, t.hour, t.minute, t.second);
+function zoneFrom(offsetAt) {
+  return {
+    offsetAt,
+    fromUtc: (utc) => utc + offsetAt(utc),
+    toUtc: (wall) => {
+      const before = offsetAt(wall - 2 * DAY);
+      const after = offsetAt(wall + 2 * DAY);
+      const fits = [wall - before, wall - after].filter((utc) => utc + offsetAt(utc) === wall);
+      return fits.length ? Math.min(...fits) : wall - before;
+    }
+  };
+}
+function vtimezoneOf(component, tzid) {
   let root = component;
   while (root.parent) {
     root = root.parent;
   }
-  const vtimezone = root.getAllSubcomponents("vtimezone").find((tz) => tz.getFirstPropertyValue("tzid") === tzid);
-  return vtimezone ? new import_ical.default.Timezone(vtimezone) : null;
+  return root.getAllSubcomponents("vtimezone").find((tz) => tz.getFirstPropertyValue("tzid") === tzid) ?? null;
 }
-function vtimezoneZone(tz) {
-  const convert2 = (wall, from, to) => {
-    const t = import_ical.default.Time.fromData(fieldsOf(wall), from).convertToZone(to);
-    return wallOf(t.year, t.month, t.day, t.hour, t.minute, t.second);
+var offsetSeconds = (value) => value && typeof value.toSeconds === "function" ? value.toSeconds() : 0;
+var ONSET_LIMIT = 1e4;
+function transitionsOf(vtimezone, horizon) {
+  const list = [];
+  for (const observance of vtimezone.getAllSubcomponents()) {
+    if (observance.name !== "standard" && observance.name !== "daylight") {
+      continue;
+    }
+    const from = offsetSeconds(observance.getFirstPropertyValue("tzoffsetfrom"));
+    const to = offsetSeconds(observance.getFirstPropertyValue("tzoffsetto"));
+    const start = observance.getFirstPropertyValue("dtstart");
+    if (!start) {
+      continue;
+    }
+    const onsets = /* @__PURE__ */ new Set([wallOfTime(start)]);
+    for (const rdate of observance.getAllProperties("rdate")) {
+      for (const value of rdate.getValues()) {
+        const t = value instanceof import_ical.default.Period ? value.start : value;
+        onsets.add(wallOfTime(t));
+      }
+    }
+    for (const property of observance.getAllProperties("rrule")) {
+      const recur = property.getFirstValue().clone();
+      if (recur.until) {
+        const until = wallOfTime(recur.until) + (recur.until.zone === import_ical.default.Timezone.utcTimezone ? from : 0);
+        recur.until = import_ical.default.Time.fromData({ ...fieldsOf(until), isDate: recur.until.isDate });
+      }
+      const iterator = recur.iterator(import_ical.default.Time.fromData(fieldsOf(wallOfTime(start))));
+      for (let i = 0; i < ONSET_LIMIT; i++) {
+        const next = iterator.next();
+        if (!next || wallOfTime(next) - from > horizon) {
+          break;
+        }
+        onsets.add(wallOfTime(next));
+      }
+    }
+    for (const onset of onsets) {
+      list.push({ at: onset - from, from, to });
+    }
+  }
+  return list.sort((a, b) => a.at - b.at);
+}
+var transitionCache = /* @__PURE__ */ new WeakMap();
+function vtimezoneZone(vtimezone) {
+  const transitions = (utc) => {
+    let cached = transitionCache.get(vtimezone);
+    if (!cached || cached.horizon < utc + DAY * 400) {
+      const horizon = utc + DAY * 366 * 10;
+      cached = { horizon, list: transitionsOf(vtimezone, horizon) };
+      transitionCache.set(vtimezone, cached);
+    }
+    return cached.list;
   };
-  return {
-    toUtc: (wall) => convert2(wall, tz, import_ical.default.Timezone.utcTimezone),
-    fromUtc: (utc) => convert2(utc, import_ical.default.Timezone.utcTimezone, tz)
-  };
+  return zoneFrom((utc) => {
+    const list = transitions(utc);
+    if (!list.length) {
+      return 0;
+    }
+    let lo = 0;
+    let hi = list.length - 1;
+    if (list[0].at > utc) {
+      return list[0].from;
+    }
+    while (lo < hi) {
+      const mid = lo + hi + 1 >> 1;
+      if (list[mid].at <= utc) {
+        lo = mid;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return list[lo].to;
+  });
 }
 function ianaZone(tzid) {
   let format;
@@ -101,7 +178,7 @@ function ianaZone(tzid) {
   } catch {
     return null;
   }
-  const fromUtc = (utc) => {
+  return zoneFrom((utc) => {
     const parts = Object.fromEntries(format.formatToParts(new Date(utc * 1e3)).map((p) => [p.type, p.value]));
     const year = parts.era === "BC" || parts.era === "B" ? 1 - Number(parts.year) : Number(parts.year);
     return wallOf(
@@ -111,21 +188,12 @@ function ianaZone(tzid) {
       Number(parts.hour),
       Number(parts.minute),
       Number(parts.second)
-    );
-  };
-  return {
-    fromUtc,
-    // The offset at the wall clock read as UTC, then once more at the guess:
-    // exact outside a DST change, and in a gap or overlap one of its sides
-    toUtc: (wall) => {
-      const guess = wall - (fromUtc(wall) - wall);
-      return wall - (fromUtc(guess) - guess);
-    }
-  };
+    ) - utc;
+  });
 }
 function zoneOf(component, tzid) {
-  const tz = timezoneOf(component, tzid);
-  return tz ? vtimezoneZone(tz) : ianaZone(tzid);
+  const vtimezone = vtimezoneOf(component, tzid);
+  return vtimezone ? vtimezoneZone(vtimezone) : ianaZone(tzid);
 }
 function unknownZone(tzid) {
   return `the zone "${tzid}" has no VTIMEZONE in the document and is no IANA time zone`;
@@ -477,7 +545,7 @@ function setRecurValue(component, name, raw, floatingTime = "keep") {
 }
 
 // src/series.ts
-var DAY = 86400;
+var DAY2 = 86400;
 var JCAL = /^(\d{4,})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(Z)?)?$/i;
 function stampOf(jcal, tzid) {
   const m = JCAL.exec(jcal);
@@ -500,7 +568,7 @@ var propertyStamps = (property) => {
   const tzid = property.getParameter("tzid");
   return valuesOf(property).map((v) => stampOf(String(Array.isArray(v) ? v[0] : v), tzid));
 };
-var dayOf = (wall) => Math.floor(wall / DAY) * DAY;
+var dayOf = (wall) => Math.floor(wall / DAY2) * DAY2;
 function jcalOf(wall, frame) {
   const form = typeof frame === "string" ? frame : frame.form;
   const f = fieldsOf(wall);
@@ -540,8 +608,8 @@ var byDays = (move) => move.from.form === "date" || move.to.form === "date";
 function moved(stamp, move) {
   const wall = wallIn(move.component, stamp, move.from);
   if (byDays(move) || stamp.kind === "date") {
-    const days = (dayOf(wall) - dayOf(move.fromWall)) / DAY;
-    return (move.to.form === "date" ? dayOf(move.toWall) : move.toWall) + days * DAY;
+    const days = (dayOf(wall) - dayOf(move.fromWall)) / DAY2;
+    return (move.to.form === "date" ? dayOf(move.toWall) : move.toWall) + days * DAY2;
   }
   return move.toWall + (wall - move.fromWall);
 }
@@ -575,14 +643,14 @@ function wallOut(component, wall, frame, own) {
 }
 function moveOverrideTimes(override, before, after, move) {
   const component = move.component;
-  const days = (dayOf(after.wall) - dayOf(before.wall)) / DAY;
+  const days = (dayOf(after.wall) - dayOf(before.wall)) / DAY2;
   const floating = move.from.form === "floating" || move.to.form === "floating";
   for (const name of ["dtstart", "dtend", "due"]) {
     for (const property of override.getAllProperties(name)) {
       const [stamp] = propertyStamps(property);
       let wall;
       if (stamp.kind === "date" || byDays(move)) {
-        wall = stamp.wall + days * DAY;
+        wall = stamp.wall + days * DAY2;
       } else if (floating || stamp.kind === "floating") {
         wall = stamp.wall + (after.wall - before.wall);
       } else {
@@ -597,7 +665,7 @@ function moveOverrideTimes(override, before, after, move) {
 function moveUntil(property, move) {
   const recur = property.getFirstValue();
   const until = stampOf(recur.until.toString());
-  const wall = move.from.form !== "date" && move.to.form === "date" ? dayOf(move.toWall) + Math.floor((wallIn(move.component, until, move.from) - move.fromWall) / DAY) * DAY : moved(until, move);
+  const wall = move.from.form !== "date" && move.to.form === "date" ? dayOf(move.toWall) + Math.floor((wallIn(move.component, until, move.from) - move.fromWall) / DAY2) * DAY2 : moved(until, move);
   if (move.to.form === "date") {
     recur.until = import_ical3.default.Time.fromDateString(jcalOf(wall, move.to));
   } else if (move.to.form === "tzid") {

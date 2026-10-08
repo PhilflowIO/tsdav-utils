@@ -28,16 +28,24 @@ const basic = (wall: number) => {
   return `${d.getUTCFullYear()}${p2(d.getUTCMonth() + 1)}${p2(d.getUTCDate())}T` +
     `${p2(d.getUTCHours())}${p2(d.getUTCMinutes())}00`;
 };
-const timeAt = (wall: number) => {
-  const d = new Date(wall * 1000);
-  return ICAL.Time.fromData({
-    year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate(),
-    hour: d.getUTCHours(), minute: d.getUTCMinutes(), second: 0,
-  }, berlin);
+// The oracle reads Berlin time with Intl, not ical.js: ical.js' convertToZone
+// is wrong around DST changes (ical.js#847), which is the kind of defect this
+// test is there to catch.
+const intl = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Europe/Berlin', hourCycle: 'h23',
+  year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric',
+});
+/** the Berlin wall clock of a UTC instant */
+const berlinWall = (utc: number) => {
+  const p = Object.fromEntries(intl.formatToParts(new Date(utc * 1000)).map((x) => [x.type, x.value]));
+  return Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day),
+    Number(p.hour), Number(p.minute), Number(p.second)) / 1000;
 };
+/** the UTC instant of a Berlin wall clock (the generator keeps clear of the changes) */
+const berlinUtc = (wall: number) => [wall - 2 * 3600, wall - 3600].find((utc) => berlinWall(utc) === wall)!;
 /** a Berlin wall clock as a property line, in the zone or in UTC */
 const line = (name: string, wall: number, utc: boolean) => utc
-  ? `${name}:${basic(wallOf(timeAt(wall).convertToZone(ICAL.Timezone.utcTimezone)))}Z`
+  ? `${name}:${basic(berlinUtc(wall))}Z`
   : `${name};TZID=Europe/Berlin:${basic(wall)}`;
 
 /** every occurrence as "Berlin wall clock + summary", overrides applied */
@@ -52,7 +60,10 @@ const expandBerlin = (ical: string): string[] => {
   let next: ICAL.Time | null;
   while ((next = it.next()) && out.length < 50) {
     const details = event.getOccurrenceDetails(next);
-    out.push(`${wallOf(details.startDate.convertToZone(berlin))} ${details.item.summary}`);
+    const start = details.startDate;
+    // a UTC start by its instant; a Berlin one is already the wall clock
+    const wall = start.zone === ICAL.Timezone.utcTimezone ? berlinWall(start.toUnixTime()) : wallOf(start);
+    out.push(`${wall} ${details.item.summary}`);
   }
   return out.sort();
 };

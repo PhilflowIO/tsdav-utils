@@ -8,6 +8,8 @@ import ICAL from 'ical.js';
  * on the host timezone.
  */
 
+const DAY = 86400;
+
 /** Seconds of a naive calendar; years 0-99 are not mapped onto 1900-1999 */
 export function wallOf(y: number, mo: number, d: number, h = 0, mi = 0, s = 0): number {
   const t = new Date(Date.UTC(2000, mo - 1, d, h, mi, s));
@@ -24,37 +26,144 @@ export function fieldsOf(wall: number) {
   };
 }
 
+const wallOfTime = (t: ICAL.Time) => wallOf(t.year, t.month, t.day, t.hour, t.minute, t.second);
+
 /** Converts between a zone's wall clock and UTC (both as naive seconds) */
 export interface Zone {
-  toUtc(wall: number): number;
+  /** the zone's UTC offset in seconds at a UTC instant */
+  offsetAt(utc: number): number;
   fromUtc(utc: number): number;
+  /**
+   * The UTC instant of a wall clock, as RFC 5545 3.3.5 reads one a DST change
+   * makes ambiguous or nonexistent: an ambiguous time (fall back) is its first
+   * occurrence, and a nonexistent one (spring forward) is read with the offset
+   * before the gap, so it lands as far past the gap as it was into it
+   * (02:30 in a 02:00-03:00 gap is 03:30).
+   */
+  toUtc(wall: number): number;
 }
 
-/**
- * The VTIMEZONE a TZID refers to, from the document the component is in, or
- * null.
- */
-export function timezoneOf(component: ICAL.Component, tzid: string): ICAL.Timezone | null {
+/** A Zone from its offset function; at most one change in any four days is assumed */
+function zoneFrom(offsetAt: (utc: number) => number): Zone {
+  return {
+    offsetAt,
+    fromUtc: (utc) => utc + offsetAt(utc),
+    toUtc: (wall) => {
+      const before = offsetAt(wall - 2 * DAY);
+      const after = offsetAt(wall + 2 * DAY);
+      const fits = [wall - before, wall - after].filter((utc) => utc + offsetAt(utc) === wall);
+      return fits.length ? Math.min(...fits) : wall - before;
+    },
+  };
+}
+
+/** The VTIMEZONE a TZID refers to, from the document the component is in, or null */
+function vtimezoneOf(component: ICAL.Component, tzid: string): ICAL.Component | null {
   let root = component;
   while (root.parent) {
     root = root.parent;
   }
-  const vtimezone = root.getAllSubcomponents('vtimezone')
-    .find((tz) => tz.getFirstPropertyValue('tzid') === tzid);
-  return vtimezone ? new ICAL.Timezone(vtimezone) : null;
+  return root.getAllSubcomponents('vtimezone').find((tz) => tz.getFirstPropertyValue('tzid') === tzid) ?? null;
 }
 
-function vtimezoneZone(tz: ICAL.Timezone): Zone {
-  const convert = (wall: number, from: ICAL.Timezone, to: ICAL.Timezone) => {
-    const t = ICAL.Time.fromData(fieldsOf(wall), from).convertToZone(to);
-    return wallOf(t.year, t.month, t.day, t.hour, t.minute, t.second);
-  };
-  return {
-    toUtc: (wall) => convert(wall, tz, ICAL.Timezone.utcTimezone),
-    fromUtc: (utc) => convert(utc, ICAL.Timezone.utcTimezone, tz),
-  };
+/** One change of offset: from `at` (a UTC instant) on, the offset is `to` */
+interface Transition {
+  at: number;
+  from: number;
+  to: number;
 }
 
+const offsetSeconds = (value: unknown) =>
+  value && typeof (value as ICAL.UtcOffset).toSeconds === 'function' ? (value as ICAL.UtcOffset).toSeconds() : 0;
+
+/** Onsets per rule expanded before the expansion of a VTIMEZONE observance stops */
+const ONSET_LIMIT = 10000;
+
+/**
+ * The transitions of a VTIMEZONE up to a UTC instant, ascending. Each STANDARD
+ * or DAYLIGHT observance starts at its DTSTART and at each RDATE and RRULE
+ * instance — local times on the clock that runs before it, so the instant is
+ * the onset minus TZOFFSETFROM. RRULE's UNTIL is UTC (RFC 5545 3.6.5).
+ */
+function transitionsOf(vtimezone: ICAL.Component, horizon: number): Transition[] {
+  const list: Transition[] = [];
+  for (const observance of vtimezone.getAllSubcomponents()) {
+    if (observance.name !== 'standard' && observance.name !== 'daylight') {
+      continue;
+    }
+    const from = offsetSeconds(observance.getFirstPropertyValue('tzoffsetfrom'));
+    const to = offsetSeconds(observance.getFirstPropertyValue('tzoffsetto'));
+    const start = observance.getFirstPropertyValue('dtstart') as ICAL.Time | null;
+    if (!start) {
+      continue;
+    }
+    const onsets = new Set([wallOfTime(start)]);
+    for (const rdate of observance.getAllProperties('rdate')) {
+      for (const value of rdate.getValues() as (ICAL.Time | ICAL.Period)[]) {
+        const t = value instanceof ICAL.Period ? value.start : value;
+        onsets.add(wallOfTime(t));
+      }
+    }
+    for (const property of observance.getAllProperties('rrule')) {
+      const recur = (property.getFirstValue() as ICAL.Recur).clone();
+      if (recur.until) {
+        const until = wallOfTime(recur.until) + (recur.until.zone === ICAL.Timezone.utcTimezone ? from : 0);
+        recur.until = ICAL.Time.fromData({ ...fieldsOf(until), isDate: recur.until.isDate });
+      }
+      const iterator = recur.iterator(ICAL.Time.fromData(fieldsOf(wallOfTime(start))));
+      for (let i = 0; i < ONSET_LIMIT; i++) {
+        const next = iterator.next();
+        if (!next || wallOfTime(next) - from > horizon) {
+          break;
+        }
+        onsets.add(wallOfTime(next));
+      }
+    }
+    for (const onset of onsets) {
+      list.push({ at: onset - from, from, to });
+    }
+  }
+  return list.sort((a, b) => a.at - b.at);
+}
+
+const transitionCache = new WeakMap<ICAL.Component, { horizon: number; list: Transition[] }>();
+
+/** A zone from a VTIMEZONE's own observances, read in UTC */
+function vtimezoneZone(vtimezone: ICAL.Component): Zone {
+  const transitions = (utc: number) => {
+    let cached = transitionCache.get(vtimezone);
+    if (!cached || cached.horizon < utc + DAY * 400) {
+      const horizon = utc + DAY * 366 * 10;
+      cached = { horizon, list: transitionsOf(vtimezone, horizon) };
+      transitionCache.set(vtimezone, cached);
+    }
+    return cached.list;
+  };
+  return zoneFrom((utc) => {
+    const list = transitions(utc);
+    if (!list.length) {
+      return 0;
+    }
+    // the last transition at or before the instant; before the first, the
+    // offset the first one changes from
+    let lo = 0;
+    let hi = list.length - 1;
+    if (list[0].at > utc) {
+      return list[0].from;
+    }
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (list[mid].at <= utc) {
+        lo = mid;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return list[lo].to;
+  });
+}
+
+/** A zone from the runtime's IANA time zone data, or null for an unknown name */
 function ianaZone(tzid: string): Zone | null {
   let format: Intl.DateTimeFormat;
   try {
@@ -66,21 +175,12 @@ function ianaZone(tzid: string): Zone | null {
   } catch {
     return null;
   }
-  const fromUtc = (utc: number) => {
+  return zoneFrom((utc) => {
     const parts = Object.fromEntries(format.formatToParts(new Date(utc * 1000)).map((p) => [p.type, p.value]));
     const year = parts.era === 'BC' || parts.era === 'B' ? 1 - Number(parts.year) : Number(parts.year);
     return wallOf(year, Number(parts.month), Number(parts.day),
-      Number(parts.hour), Number(parts.minute), Number(parts.second));
-  };
-  return {
-    fromUtc,
-    // The offset at the wall clock read as UTC, then once more at the guess:
-    // exact outside a DST change, and in a gap or overlap one of its sides
-    toUtc: (wall) => {
-      const guess = wall - (fromUtc(wall) - wall);
-      return wall - (fromUtc(guess) - guess);
-    },
-  };
+      Number(parts.hour), Number(parts.minute), Number(parts.second)) - utc;
+  });
 }
 
 /**
@@ -88,10 +188,14 @@ function ianaZone(tzid: string): Zone | null {
  * server and every other client reads the TZID against), else the IANA zone of
  * that name from the runtime's time zone data (servers often omit the
  * VTIMEZONE of a well-known zone). Null for a name that is neither.
+ *
+ * A VTIMEZONE is read from its own transitions, in UTC, not with ical.js'
+ * Time.convertToZone, which gets the offset wrong for up to five hours around
+ * each change when converting from UTC.
  */
 export function zoneOf(component: ICAL.Component, tzid: string): Zone | null {
-  const tz = timezoneOf(component, tzid);
-  return tz ? vtimezoneZone(tz) : ianaZone(tzid);
+  const vtimezone = vtimezoneOf(component, tzid);
+  return vtimezone ? vtimezoneZone(vtimezone) : ianaZone(tzid);
 }
 
 /** The error for a TZID zoneOf cannot resolve */

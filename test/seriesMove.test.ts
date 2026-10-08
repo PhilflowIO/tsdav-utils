@@ -270,6 +270,36 @@ describe('a rule that does not move with DTSTART is refused, naming the rule to 
   });
 });
 
+describe('UTC values near a DST change are read with the VTIMEZONE\'s own transitions', () => {
+  // ical.js' convertToZone from UTC is off by an hour for up to five hours
+  // around each change (ical.js#847); these instants fall in that window
+  const NEW_YORK = [
+    'BEGIN:VTIMEZONE', 'TZID:America/New_York',
+    'BEGIN:DAYLIGHT', 'TZOFFSETFROM:-0500', 'TZOFFSETTO:-0400', 'TZNAME:EDT',
+    'DTSTART:19700308T020000', 'RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU', 'END:DAYLIGHT',
+    'BEGIN:STANDARD', 'TZOFFSETFROM:-0400', 'TZOFFSETTO:-0500', 'TZNAME:EST',
+    'DTSTART:19701101T020000', 'RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU', 'END:STANDARD',
+    'END:VTIMEZONE',
+  ];
+
+  it('an UNTIL just after the fall-back change keeps the last occurrence', () => {
+    // daily 23:15 New York; UNTIL is the 31 Oct occurrence (23:15 EDT = 03:15Z)
+    const ny = calendar(NEW_YORK,
+      master('DTSTART;TZID=America/New_York:20261025T231500', 'RRULE:FREQ=DAILY;UNTIL=20261101T031500Z'));
+    const out = updateFields(ny, { DTSTART: '2026-10-18T23:15:00' });
+    expect(prop(masterOf(out), 'RRULE')).toEqual(['RRULE:FREQ=DAILY;UNTIL=20261025T031500Z']);
+  });
+
+  it('a UTC override just after the spring-forward change moves on the Berlin wall clock', () => {
+    // 29 Mar 01:15Z is 03:15 CEST; a week earlier 03:15 CET is 02:15Z
+    const out = updateFields(calendar(BERLIN,
+      master('DTSTART;TZID=Europe/Berlin:20260322T090000', 'RRULE:FREQ=WEEKLY;COUNT=3'),
+      override('RECURRENCE-ID;TZID=Europe/Berlin:20260329T090000', 'DTSTART:20260329T011500Z'),
+    ), { DTSTART: '2026-03-15T09:00:00' });
+    expect(prop(overridesOf(out)[0], 'DTSTART')).toEqual(['DTSTART:20260322T021500Z']);
+  });
+});
+
 describe('moving DTSTART moves EXDATE and RDATE with the series', () => {
   const weekly = calendar(master('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;COUNT=4',
     'EXDATE:20261012T090000Z,20261019T090000Z', 'RDATE:20261008T150000Z'));
