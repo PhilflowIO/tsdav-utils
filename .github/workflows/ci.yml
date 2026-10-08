@@ -71,7 +71,7 @@ jobs:
 
       # Installed under the name `tsdav-utils`, the way consumers alias
       # @philflow/tsdav-utils, and imported both ways the exports map offers.
-      - name: Install the packed tarball and import it
+      - name: Install the packed tarball, import it and move a series
         run: |
           TARBALL="$GITHUB_WORKSPACE/$(npm pack --ignore-scripts | tail -1)"
           CONSUMER=$(mktemp -d)
@@ -86,3 +86,9 @@ jobs:
             const m = require('tsdav-utils');
             if (typeof m.updateFields !== 'function' || typeof m.seriesMaster !== 'function') process.exit(1);
             console.log('✅ CJS require');"
+          # The series move bounds its work through an ical.js internal; run it
+          # against the ical.js this fresh install resolved, so a release that
+          # breaks the hook turns CI red instead of a consumer's calendar.
+          npm ls ical.js
+          cp "$GITHUB_WORKSPACE/test/consumer-smoke.mjs" .
+          timeout 120 node consumer-smoke.mjs

@@ -50,7 +50,9 @@ describe('date-time values are written as the instant the caller gave', () => {
   });
 
   it('RECURRENCE-ID and LAST-MODIFIED on an event keep their instant', () => {
-    const out = updateFields(vevent(), {
+    // RECURRENCE-ID is written on an instance that has one (a lone detached
+    // instance); on a series master it is refused (recurrence.test.ts)
+    const out = updateFields(vevent('RECURRENCE-ID:20260101T100000Z'), {
       'RECURRENCE-ID': '2026-10-26T20:00:00+02:00',
       'LAST-MODIFIED': '2026-10-26T20:00:00+02:00',
     });

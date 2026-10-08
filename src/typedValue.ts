@@ -1,5 +1,6 @@
 import ICAL from 'ical.js';
 import type { FloatingTime } from './types';
+import { fieldsOf, wallOf, zoneOf } from './zone';
 
 /**
  * Typed writes for date and date-time properties.
@@ -61,13 +62,13 @@ const DATE_TIME_EXTENDED = new RegExp(
 const DATE_TIME_BASIC = new RegExp(
   `^(\\d{4})(\\d{2})(\\d{2})T(\\d{2})(\\d{2})(\\d{2})${ZONE}?$`, 'i');
 
-const pad = (n: number, width = 2) => String(n).padStart(width, '0');
+export const pad = (n: number, width = 2) => String(n).padStart(width, '0');
 
 /**
  * Milliseconds since the epoch of a UTC wall-clock time. Date.UTC maps years
  * 0-99 onto 1900-1999, so the year is set separately.
  */
-function utcMillis(y: number, mo: number, d: number, h = 0, mi = 0, s = 0): number {
+export function utcMillis(y: number, mo: number, d: number, h = 0, mi = 0, s = 0): number {
   const t = new Date(Date.UTC(2000, mo - 1, d, h, mi, s));
   t.setUTCFullYear(y, mo - 1, d);
   return t.getTime();
@@ -202,7 +203,7 @@ function dateProperty(component: ICAL.Component, name: string): DateProperty | n
 const ANCHORED = new Set(['vevent', 'vtodo', 'vjournal']);
 
 /** How a DTSTART is written, which the other date-times have to follow */
-type Anchor =
+export type Anchor =
   | { form: 'date' }
   | { form: 'utc' }
   | { form: 'floating' }
@@ -224,6 +225,14 @@ function anchorOf(component: ICAL.Component, name: string): Anchor | null {
   if (name === 'dtstart' || UTC_ONLY.has(name) || !ANCHORED.has(component.name)) {
     return null;
   }
+  return frameOf(component);
+}
+
+/**
+ * The form of an event's, todo's or journal's DTSTART — date, UTC, floating
+ * or wall clock in a TZID — or null when it has none.
+ */
+export function frameOf(component: ICAL.Component): Anchor | null {
   const dtstart = component.getFirstProperty('dtstart');
   if (!dtstart) {
     return null;
@@ -492,26 +501,20 @@ function parseRuleParts(raw: string): Map<string, string> {
     throw new Error('BYDAY with an ordinal ("1MO", "-1FR") is only allowed with FREQ=MONTHLY or ' +
       'FREQ=YEARLY, and not together with BYWEEKNO (RFC 5545 3.3.10)');
   }
+  // Within a month a weekday occurs at most five times (RFC 5545 3.3.10:
+  // MONTHLY, or YEARLY with BYMONTH); ical.js refuses "6MO" only when it expands
+  const tooFar = (parts.get('BYDAY') ?? '').split(',')
+    .find((d) => Math.abs(Number(/^([+-]?\d+)/.exec(d)?.[1] ?? 0)) > 5);
+  if (tooFar && (freq === 'MONTHLY' || parts.has('BYMONTH'))) {
+    throw new Error(`BYDAY: "${tooFar}" counts past the fifth weekday of a month; within a month the ordinal is ` +
+      '1 to 5 or -5 to -1 (RFC 5545 3.3.10)');
+  }
   if (parts.has('BYSETPOS') && ![...parts.keys()].some((k) => k.startsWith('BY') && k !== 'BYSETPOS')) {
     throw new Error('BYSETPOS needs another BYxxx part to select from (RFC 5545 3.3.10)');
   }
   return parts;
 }
 
-/**
- * The VTIMEZONE a TZID refers to, from the document the component is in, or
- * null. Only the document is consulted: it is what a server and every other
- * client will read the TZID against.
- */
-function timezoneOf(component: ICAL.Component, tzid: string): ICAL.Timezone | null {
-  let root = component;
-  while (root.parent) {
-    root = root.parent;
-  }
-  const vtimezone = root.getAllSubcomponents('vtimezone')
-    .find((tz) => tz.getFirstPropertyValue('tzid') === tzid);
-  return vtimezone ? new ICAL.Timezone(vtimezone) : null;
-}
 
 /**
  * UNTIL in the form RFC 5545 3.3.10 ties to DTSTART: a DATE next to an
@@ -521,9 +524,10 @@ function timezoneOf(component: ICAL.Component, tzid: string): ICAL.Timezone | nu
  * instant allows it:
  *
  *  - a time without a zone next to a TZID DTSTART is wall clock in that zone
- *    and is converted to UTC with the document's VTIMEZONE. Without one the
- *    zone's rules are unknown, so it throws and asks for a UTC or offset value
- *    rather than guess an offset that may be hours off;
+ *    and is converted to UTC with the zone's rules (see zoneOf). For a zone
+ *    with neither a VTIMEZONE nor an IANA name the rules are unknown, so it
+ *    throws and asks for a UTC or offset value rather than guess an offset
+ *    that may be hours off;
  *  - next to a UTC DTSTART a time without a zone follows floatingTime as for
  *    DTEND: refused under "keep", host-local converted to UTC under "local";
  *  - a value with a zone next to a floating DTSTART names an instant that a
@@ -560,18 +564,15 @@ function untilTime(
 
   if (parsed.kind === 'floating') {
     if (anchor?.form === 'tzid') {
-      const tz = timezoneOf(component, anchor.tzid);
-      if (!tz) {
-        throw fail(`has no zone, and DTSTART's zone "${anchor.tzid}" has no VTIMEZONE in the document to ` +
-          'convert it to UTC with (RFC 5545 3.3.10 requires UTC here): give it a zone, ' +
+      const zone = zoneOf(component, anchor.tzid);
+      if (!zone) {
+        throw fail(`has no zone, and DTSTART's zone "${anchor.tzid}" has no VTIMEZONE in the document and is no ` +
+          'IANA time zone to convert it to UTC with (RFC 5545 3.3.10 requires UTC here): give it a zone, ' +
           'e.g. "2026-10-26T18:00:00Z" or "2026-10-26T18:00:00+01:00"');
       }
       const wall = ICAL.Time.fromDateTimeString(parsed.jcal);
-      const zoned = ICAL.Time.fromData({
-        year: wall.year, month: wall.month, day: wall.day,
-        hour: wall.hour, minute: wall.minute, second: wall.second,
-      }, tz);
-      return zoned.convertToZone(ICAL.Timezone.utcTimezone);
+      const utc = fieldsOf(zone.toUtc(wallOf(wall.year, wall.month, wall.day, wall.hour, wall.minute, wall.second)));
+      return ICAL.Time.fromData(utc, ICAL.Timezone.utcTimezone);
     }
     if (anchor?.form === 'floating') {
       return ICAL.Time.fromDateTimeString(parsed.jcal);
@@ -590,119 +591,8 @@ function untilTime(
 }
 
 /** Whether a property is RECUR-typed in the component's design set */
-function isRecurProperty(component: ICAL.Component, name: string): boolean {
+export function isRecurProperty(component: ICAL.Component, name: string): boolean {
   return (designSetFor(component).property as Record<string, any>)[name.toLowerCase()]?.defaultType === 'recur';
-}
-
-const isUtcTime = (t: ICAL.Time) => !t.isDate && t.zone?.tzid === 'UTC';
-const dateString = (t: ICAL.Time) => `${pad(t.year, 4)}-${pad(t.month)}-${pad(t.day)}`;
-const dateTimeString = (t: ICAL.Time) =>
-  `${dateString(t)}T${pad(t.hour)}:${pad(t.minute)}:${pad(t.second)}`;
-
-/** A UTC time as wall clock in a TZID, read with the document's VTIMEZONE */
-function wallClockIn(component: ICAL.Component, t: ICAL.Time, tzid: string): ICAL.Time {
-  const tz = timezoneOf(component, tzid);
-  if (!tz) {
-    throw new Error(`the old DTSTART's zone "${tzid}" has no VTIMEZONE in the document to read it in`);
-  }
-  return t.convertToZone(tz);
-}
-
-/**
- * An existing UNTIL as the input string untilTime takes, moved into the form
- * the new DTSTART needs where the instant allows it:
- *
- *  - to a date (all-day DTSTART): the UNTIL's calendar date in the old
- *    DTSTART's frame — its zone for a TZID DTSTART, else the UNTIL's own;
- *  - from a date to a date-time: the end of that day (UNTIL is inclusive) as
- *    wall clock in the zone the new DTSTART's wall clock belongs to, passed
- *    zoneless for untilTime to convert or keep: the TZID, floating, or for a
- *    UTC DTSTART under floatingTime "local" the host zone. A UTC DTSTART under
- *    "keep" has no other zone to go by, so the day ends at 23:59:59 UTC;
- *  - a UTC UNTIL to a floating DTSTART: the wall clock in the old DTSTART's
- *    zone; with no old zone there is no wall clock to give, so it throws;
- *  - everything else as it is, for untilTime to accept, convert or refuse
- *    (a floating UNTIL next to a new UTC DTSTART follows floatingTime).
- */
-function untilInput(
-  component: ICAL.Component,
-  old: ICAL.Time,
-  oldAnchor: Anchor | null,
-  newAnchor: Anchor | null,
-  floatingTime: FloatingTime,
-): string {
-  if (newAnchor?.form === 'date') {
-    return dateString(isUtcTime(old) && oldAnchor?.form === 'tzid'
-      ? wallClockIn(component, old, oldAnchor.tzid)
-      : old);
-  }
-  if (old.isDate) {
-    if (!newAnchor) {
-      return dateString(old);
-    }
-    const utcDay = newAnchor.form === 'utc' && floatingTime === 'keep';
-    return `${dateString(old)}T23:59:59${utcDay ? 'Z' : ''}`;
-  }
-  if (isUtcTime(old)) {
-    if (newAnchor?.form === 'floating') {
-      if (oldAnchor?.form !== 'tzid') {
-        throw new Error('it is in UTC and the new DTSTART is floating, and without a zone a UTC instant has no wall clock');
-      }
-      return dateTimeString(wallClockIn(component, old, oldAnchor.tzid));
-    }
-    return `${dateTimeString(old)}Z`;
-  }
-  return dateTimeString(old);
-}
-
-/** A RECUR property whose UNTIL has to follow a DTSTART about to be written */
-export interface PendingUntil {
-  property: ICAL.Property;
-  until: ICAL.Time;
-  anchor: Anchor | null;
-}
-
-/**
- * The RECUR properties (RRULE, EXRULE) with an UNTIL that a DTSTART write is
- * going to leave behind, captured with the DTSTART form they were written
- * against. Call before DTSTART is written; properties the same call writes
- * itself (`written`, lower-case names) are left out, they follow the new
- * DTSTART on their own.
- */
-export function untilsFollowingDtstart(component: ICAL.Component, written: Set<string>): PendingUntil[] {
-  const anchor = anchorOf(component, 'rrule');
-  return component.getAllProperties()
-    .filter((p) => isRecurProperty(component, p.name) && !written.has(p.name))
-    .flatMap((property) => {
-      const until = (property.getFirstValue() as ICAL.Recur | null)?.until;
-      return until ? [{ property, until: until.clone(), anchor }] : [];
-    });
-}
-
-/**
- * Re-derive each captured UNTIL against the DTSTART now in the component,
- * through the same path a caller's UNTIL takes (untilTime), so updateFields
- * never leaves an UNTIL that RFC 5545 3.3.10 forbids next to the new DTSTART.
- * Where the old UNTIL names no definite instant in the new form, it throws
- * and asks for the rule in the same call.
- */
-export function realignUntils(
-  component: ICAL.Component,
-  pending: PendingUntil[],
-  floatingTime: FloatingTime = 'keep',
-): void {
-  const anchor = anchorOf(component, 'rrule');
-  for (const { property, until, anchor: oldAnchor } of pending) {
-    const upper = property.name.toUpperCase();
-    const recur = property.getFirstValue() as ICAL.Recur;
-    try {
-      recur.until = untilTime(component, upper, untilInput(component, until, oldAnchor, anchor, floatingTime), floatingTime);
-    } catch (error) {
-      throw new Error(`DTSTART changed, and the existing ${upper} UNTIL=${until.toICALString()} ` +
-        `cannot follow it (${(error as Error).message}): give ${upper}, with UNTIL, in the same call`);
-    }
-    property.setValue(recur);
-  }
 }
 
 /**

@@ -170,10 +170,16 @@ describe('UNTIL follows DTSTART (RFC 5545 3.3.10)', () => {
       .toEqual(['RRULE:FREQ=DAILY;UNTIL=20261026T170000Z']);
   });
 
-  it('a TZID DTSTART without a VTIMEZONE refuses a zoneless UNTIL and asks for a zone', () => {
+  it('a TZID DTSTART without a VTIMEZONE reads a zoneless UNTIL in the IANA zone of that name', () => {
     const berlin = vevent('DTSTART;TZID=Europe/Berlin:20260101T100000');
-    expect(() => updateFields(berlin, { RRULE: 'FREQ=DAILY;UNTIL=2026-10-26T18:00:00' }))
-      .toThrow(/RRULE UNTIL has no zone, and DTSTART's zone "Europe\/Berlin" has no VTIMEZONE .* give it a zone/);
+    expect(rrule(updateFields(berlin, { RRULE: 'FREQ=DAILY;UNTIL=2026-10-26T18:00:00' })))
+      .toEqual(['RRULE:FREQ=DAILY;UNTIL=20261026T170000Z']);
+  });
+
+  it('a TZID that is neither in the document nor an IANA zone refuses a zoneless UNTIL and asks for a zone', () => {
+    const custom = vevent('DTSTART;TZID=W. Europe Standard Time:20260101T100000');
+    expect(() => updateFields(custom, { RRULE: 'FREQ=DAILY;UNTIL=2026-10-26T18:00:00' }))
+      .toThrow(/RRULE UNTIL has no zone, and DTSTART's zone "W\. Europe Standard Time" has no VTIMEZONE in the document and is no IANA time zone .* give it a zone/);
   });
 
   it('the key order does not matter: UNTIL follows the new DTSTART', () => {
@@ -204,7 +210,10 @@ const series = (ical: string) => {
     .filter((l) => /^(DTSTART|RRULE|EXRULE)[:;]/.test(l));
 };
 
-describe('writing DTSTART carries an existing UNTIL into the new form', () => {
+describe('writing DTSTART moves an existing UNTIL with the series', () => {
+  // UNTIL moves by the distance DTSTART moved, measured on the series' wall
+  // clock (in days across an all-day/timed switch), and takes the form RFC
+  // 5545 3.3.10 ties to the new DTSTART. The number of occurrences stays.
   const timed = vevent('DTSTART:20261001T100000Z', { props: ['RRULE:FREQ=DAILY;UNTIL=20261020T100000Z'] });
 
   it('timed -> all-day: the UNTIL date in the old DTSTART\'s frame', () => {
@@ -213,24 +222,25 @@ describe('writing DTSTART carries an existing UNTIL into the new form', () => {
   });
 
   it('a TZID -> all-day UNTIL takes the date in the old zone, read with the VTIMEZONE', () => {
-    // 23:00Z on 20 Oct is 01:00 on 21 Oct in Berlin (CEST)
+    // 23:00Z on 20 Oct is 01:00 on 21 Oct in Berlin (CEST), before that
+    // day's 10:00: the last occurrence is 20 Oct, which stays the last
     const berlin = vevent('DTSTART;TZID=Europe/Berlin:20261001T100000',
       { vtimezone: true, props: ['RRULE:FREQ=DAILY;UNTIL=20261020T230000Z'] });
     expect(series(updateFields(berlin, { DTSTART: '2026-10-01' })))
-      .toEqual(['DTSTART;VALUE=DATE:20261001', 'RRULE:FREQ=DAILY;UNTIL=20261021']);
+      .toEqual(['DTSTART;VALUE=DATE:20261001', 'RRULE:FREQ=DAILY;UNTIL=20261020']);
   });
 
-  it('a TZID -> all-day UNTIL without the VTIMEZONE throws and asks for the rule', () => {
-    const berlin = vevent('DTSTART;TZID=Europe/Berlin:20261001T100000',
+  it('a TZID -> all-day UNTIL in an unknown zone throws and asks for the rule', () => {
+    const custom = vevent('DTSTART;TZID=W. Europe Standard Time:20261001T100000',
       { props: ['RRULE:FREQ=DAILY;UNTIL=20261020T230000Z'] });
-    expect(() => updateFields(berlin, { DTSTART: '2026-10-01' }))
-      .toThrow(/DTSTART changed, and the existing RRULE UNTIL=20261020T230000Z cannot follow it \(.*no VTIMEZONE.*\): give RRULE, with UNTIL, in the same call/);
+    expect(() => updateFields(custom, { DTSTART: '2026-10-01' }))
+      .toThrow(/DTSTART changed, and the existing RRULE UNTIL=20261020T230000Z cannot follow it \(.*no VTIMEZONE in the document and is no IANA time zone\): give RRULE, with UNTIL, in the same call/);
   });
 
-  it('all-day -> timed (UTC): the end of the UNTIL day, in UTC', () => {
+  it('all-day -> timed (UTC): the last day at the new time of day', () => {
     const allDay = vevent('DTSTART;VALUE=DATE:20261001', { props: ['RRULE:FREQ=DAILY;UNTIL=20261020'] });
     expect(series(updateFields(allDay, { DTSTART: '2026-10-01T10:00:00Z' })))
-      .toEqual(['DTSTART:20261001T100000Z', 'RRULE:FREQ=DAILY;UNTIL=20261020T235959Z']);
+      .toEqual(['DTSTART:20261001T100000Z', 'RRULE:FREQ=DAILY;UNTIL=20261020T100000Z']);
   });
 
   // ical.js expansion of the written series, counted up to a safe limit
@@ -242,71 +252,97 @@ describe('writing DTSTART carries an existing UNTIL into the new form', () => {
     return n;
   };
 
-  it('all-day -> UTC under "local": the day ends in the host zone, so no occurrence is lost or gained', () => {
+  it('all-day -> UTC under "local": UNTIL is the last occurrence, in every host zone', () => {
     // 1..20 Oct daily = 20 occurrences. 20:00 host time is a different UTC
-    // day than 20 Oct east or west of UTC; a UTC end of day would cut the
-    // last one (west) or add a 21st (east).
+    // day than 20 Oct east or west of UTC; UNTIL is that same instant on 20 Oct.
     const allDay = vevent('DTSTART;VALUE=DATE:20261001', { props: ['RRULE:FREQ=DAILY;UNTIL=20261020'] });
     const out = updateFields(allDay, { DTSTART: '2026-10-01T20:00:00' }, { floatingTime: 'local' });
-    const endOfDay = new Date(2026, 9, 20, 23, 59, 59).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-    expect(rrule(out)).toEqual([`RRULE:FREQ=DAILY;UNTIL=${endOfDay}`]);
+    const last = new Date(2026, 9, 20, 20, 0, 0).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+    expect(rrule(out)).toEqual([`RRULE:FREQ=DAILY;UNTIL=${last}`]);
     expect(occurrences(out)).toBe(20);
     expect(occurrences(allDay)).toBe(20);
   });
 
-  it('all-day -> UTC under "keep": with no other zone the day ends at 23:59:59 UTC', () => {
+  it('all-day -> UTC under "keep": the same', () => {
     const allDay = vevent('DTSTART;VALUE=DATE:20261001', { props: ['RRULE:FREQ=DAILY;UNTIL=20261020'] });
     const out = updateFields(allDay, { DTSTART: '2026-10-01T20:00:00Z' });
-    expect(rrule(out)).toEqual(['RRULE:FREQ=DAILY;UNTIL=20261020T235959Z']);
+    expect(rrule(out)).toEqual(['RRULE:FREQ=DAILY;UNTIL=20261020T200000Z']);
     expect(occurrences(out)).toBe(20);
   });
 
-  it('all-day -> floating: the end of the UNTIL day as floating wall clock', () => {
+  it('all-day -> floating: the last day at the new time of day, floating', () => {
     const allDay = vevent('DTSTART;VALUE=DATE:20261001', { props: ['RRULE:FREQ=DAILY;UNTIL=20261020'] });
     expect(series(updateFields(allDay, { DTSTART: '2026-10-01T10:00:00' })))
-      .toEqual(['DTSTART:20261001T100000', 'RRULE:FREQ=DAILY;UNTIL=20261020T235959']);
+      .toEqual(['DTSTART:20261001T100000', 'RRULE:FREQ=DAILY;UNTIL=20261020T100000']);
+  });
+
+  it('a later start moves UNTIL by as much, so the last occurrence is kept', () => {
+    // UNTIL is the last occurrence; left where it was, a series moved to 10:00
+    // would lose 20 Oct
+    const out = updateFields(timed, { DTSTART: '2026-10-01T11:00:00Z' });
+    expect(series(out)).toEqual(['DTSTART:20261001T110000Z', 'RRULE:FREQ=DAILY;UNTIL=20261020T110000Z']);
+    expect(occurrences(out)).toBe(occurrences(timed));
   });
 
   // A UTC DTSTART has no TZID that a new value could keep, so updateFields
   // only reaches a TZID DTSTART from one that already has the TZID. The
   // conversion into it is shown with an UNTIL another client left floating.
-  it('into a TZID DTSTART a floating UNTIL is converted to UTC with the VTIMEZONE', () => {
+  it('into a TZID DTSTART UNTIL is moved on the wall clock and converted to UTC with the VTIMEZONE', () => {
+    // UNTIL 20 Oct 18:00 Berlin is 19 days 8 hours after the start; the new
+    // start is 2 Oct 09:00, so UNTIL is 21 Oct 17:00 CEST = 15:00Z
     const berlin = vevent('DTSTART;TZID=Europe/Berlin:20261001T100000',
       { vtimezone: true, props: ['RRULE:FREQ=DAILY;UNTIL=20261020T180000'] });
     expect(series(updateFields(berlin, { DTSTART: '2026-10-02T09:00:00' })))
-      .toEqual(['DTSTART;TZID=Europe/Berlin:20261002T090000', 'RRULE:FREQ=DAILY;UNTIL=20261020T160000Z']);
+      .toEqual(['DTSTART;TZID=Europe/Berlin:20261002T090000', 'RRULE:FREQ=DAILY;UNTIL=20261021T150000Z']);
   });
 
-  it('into a TZID DTSTART without the VTIMEZONE a floating UNTIL throws and asks for the rule', () => {
-    const berlin = vevent('DTSTART;TZID=Europe/Berlin:20261001T100000',
+  it('a DST change between start and UNTIL keeps the wall clock, as the expansion does', () => {
+    // Berlin leaves CEST on 25 Oct: 10:00 is 08:00Z before, 09:00Z after
+    const berlin = vevent('DTSTART;TZID=Europe/Berlin:20261020T100000',
+      { vtimezone: true, props: ['RRULE:FREQ=DAILY;UNTIL=20261030T090000Z'] });
+    expect(series(updateFields(berlin, { DTSTART: '2026-10-20T11:00:00' })))
+      .toEqual(['DTSTART;TZID=Europe/Berlin:20261020T110000', 'RRULE:FREQ=DAILY;UNTIL=20261030T100000Z']);
+  });
+
+  it('into a TZID DTSTART of an unknown zone UNTIL throws and asks for the rule', () => {
+    const custom = vevent('DTSTART;TZID=W. Europe Standard Time:20261001T100000',
       { props: ['RRULE:FREQ=DAILY;UNTIL=20261020T180000'] });
-    expect(() => updateFields(berlin, { DTSTART: '2026-10-02T09:00:00' }))
+    expect(() => updateFields(custom, { DTSTART: '2026-10-02T09:00:00' }))
       .toThrow(/existing RRULE UNTIL=20261020T180000 cannot follow it .*: give RRULE, with UNTIL, in the same call/);
   });
 
-  it('TZID -> UTC keeps a UTC UNTIL as it is', () => {
+  it('TZID -> UTC at the same instant keeps a UTC UNTIL as it is', () => {
+    const berlin = vevent('DTSTART;TZID=Europe/Berlin:20261001T100000',
+      { vtimezone: true, props: ['RRULE:FREQ=DAILY;UNTIL=20261020T080000Z'] });
+    expect(series(updateFields(berlin, { DTSTART: '2026-10-01T08:00:00Z' })))
+      .toEqual(['DTSTART:20261001T080000Z', 'RRULE:FREQ=DAILY;UNTIL=20261020T080000Z']);
+  });
+
+  it('TZID -> UTC without the VTIMEZONE reads the IANA zone, as before', () => {
     const berlin = vevent('DTSTART;TZID=Europe/Berlin:20261001T100000',
       { props: ['RRULE:FREQ=DAILY;UNTIL=20261020T080000Z'] });
     expect(series(updateFields(berlin, { DTSTART: '2026-10-01T08:00:00Z' })))
       .toEqual(['DTSTART:20261001T080000Z', 'RRULE:FREQ=DAILY;UNTIL=20261020T080000Z']);
   });
 
-  it('floating -> UTC throws under "keep": the wall clock names no instant', () => {
-    const floating = vevent('DTSTART:20261001T100000', { props: ['RRULE:FREQ=DAILY;UNTIL=20261020T100000'] });
-    expect(() => updateFields(floating, { DTSTART: '2026-10-01T10:00:00Z' }))
-      .toThrow(/existing RRULE UNTIL=20261020T100000 cannot follow it \(RRULE UNTIL has no zone, and DTSTART is in UTC.*\): give RRULE, with UNTIL, in the same call/);
+  it('TZID -> UTC in an unknown zone throws: the distance moved is unknown', () => {
+    const custom = vevent('DTSTART;TZID=W. Europe Standard Time:20261001T100000',
+      { props: ['RRULE:FREQ=DAILY;UNTIL=20261020T080000Z'] });
+    expect(() => updateFields(custom, { DTSTART: '2026-10-01T08:00:00Z' }))
+      .toThrow(/existing RRULE UNTIL=20261020T080000Z cannot follow it \(.*no IANA time zone\): give RRULE, with UNTIL, in the same call/);
   });
 
-  it('floating -> UTC reads the UNTIL in the host zone under "local"', () => {
+  it('floating -> UTC: UNTIL keeps its distance from the start, without a host zone', () => {
     const floating = vevent('DTSTART:20261001T100000', { props: ['RRULE:FREQ=DAILY;UNTIL=20261020T100000'] });
-    const expected = new Date(2026, 9, 20, 10, 0, 0).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-    expect(series(updateFields(floating, { DTSTART: '2026-10-01T10:00:00Z' }, { floatingTime: 'local' })))
-      .toEqual(['DTSTART:20261001T100000Z', `RRULE:FREQ=DAILY;UNTIL=${expected}`]);
+    for (const floatingTime of ['keep', 'local'] as const) {
+      expect(series(updateFields(floating, { DTSTART: '2026-10-01T10:00:00Z' }, { floatingTime })))
+        .toEqual(['DTSTART:20261001T100000Z', 'RRULE:FREQ=DAILY;UNTIL=20261020T100000Z']);
+    }
   });
 
-  it('UTC -> floating throws: a UTC UNTIL has no wall clock without a zone', () => {
-    expect(() => updateFields(timed, { DTSTART: '2026-10-01T10:00:00' }))
-      .toThrow(/existing RRULE UNTIL=20261020T100000Z cannot follow it \(it is in UTC and the new DTSTART is floating.*\): give RRULE, with UNTIL, in the same call/);
+  it('UTC -> floating: the same', () => {
+    expect(series(updateFields(timed, { DTSTART: '2026-10-01T10:00:00' })))
+      .toEqual(['DTSTART:20261001T100000', 'RRULE:FREQ=DAILY;UNTIL=20261020T100000']);
   });
 
   it('an EXRULE UNTIL follows too', () => {

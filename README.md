@@ -261,34 +261,28 @@ updateFields(event, { RRULE: 'FREQ=DAILY;UNTIL=2026-10-26T14:00:00-04:00' });
     zone throws under the default and is read in the host timezone with
     `{ floatingTime: 'local' }`, as for DTEND;
   - DTSTART with a `TZID`: UTC. A value without a zone is wall clock in that
-    zone and is converted with the `VTIMEZONE` in the document. **If the
-    document has no `VTIMEZONE` for that `TZID`, it throws and asks for a UTC or
-    offset value** — the zone's offset rules are unknown, and guessing one could
-    end the series hours early or late;
+    zone and is converted with the `VTIMEZONE` in the document, or, when the
+    document has none, with the IANA zone of that name (`Europe/Berlin`) from the
+    runtime's time zone data. **For a `TZID` that is neither (`W. Europe Standard
+    Time`), it throws and asks for a UTC or offset value** — the zone's offset
+    rules are unknown, and guessing one could end the series hours early or late.
+    A `VTIMEZONE` is read from its own observances (`DTSTART`, `RDATE`, `RRULE`
+    with `UNTIL`), not with ical.js' `convertToZone`, which is off by an hour for
+    up to five hours around each DST change ([ical.js#847](https://github.com/kewisch/ical.js/issues/847)).
+    Observance rules other than `YEARLY` or `MONTHLY`, which no real zone has,
+    are refused.
+    A wall-clock time a change makes ambiguous is its first occurrence, and one
+    that does not exist lies past the gap by as much as it was into it (02:30 on
+    the spring-forward night is 03:30), as RFC 5545 3.3.5 reads them;
   - floating DTSTART: floating; a value with a zone throws;
   - a date next to a timed DTSTART throws;
   - with no DTSTART, `UNTIL` is written in the form given.
   DTSTART is written first, so `UNTIL` follows the new DTSTART whatever the key
   order.
-- Writing DTSTART also carries an existing `UNTIL` (of an RRULE/EXRULE not
-  written in the same call) into the new DTSTART's form, so the object never
-  ends up with an `UNTIL` the RFC forbids — also when DTSTART and the rule are
-  written in separate calls:
-  - to an all-day DTSTART: the `UNTIL`'s calendar date, read in the old
-    DTSTART's zone (`DTSTART:...T100000Z` + `UNTIL=20261020T100000Z`, then
-    `{ DTSTART: '2026-10-01' }` gives `UNTIL=20261020`);
-  - from a date to a timed DTSTART: the end of that day (`UNTIL` is inclusive)
-    in the zone the new DTSTART's wall clock belongs to, converted as above —
-    its `TZID`, floating, or for a UTC DTSTART under `{ floatingTime: 'local' }`
-    the host timezone. A UTC DTSTART under the default has no other zone to go
-    by, so `UNTIL=20261020` becomes `UNTIL=20261020T235959Z`;
-  - a UTC `UNTIL` stays UTC next to a UTC or `TZID` DTSTART, and becomes the
-    old zone's wall clock next to a new floating DTSTART;
-  - where the old `UNTIL` names no definite instant in the new form — a floating
-    `UNTIL` next to a new UTC DTSTART under the default, a UTC one next to a new
-    floating DTSTART with no old zone, a zone with no `VTIMEZONE` — it throws
-    and asks for the rule, with `UNTIL`, in the same call.
-  A `COUNT` rule, or an event without a rule, is left as it is.
+- Writing DTSTART also moves an existing `UNTIL` (of an RRULE/EXRULE not
+  written in the same call) with the series — see
+  [Recurring events and todos](#recurring-events-and-todos). A `COUNT` rule, or
+  an event without a rule, is left as it is.
 
 ## Recurring events and todos
 
@@ -299,15 +293,112 @@ store them in any order. `updateFields` always edits the **master**, the
 (`SUMMARY`, `EXDATE`, `RRULE`, `DTSTART`, ...) reaches the series, and date-times
 follow the master's `DTSTART` (see above).
 
-- **Overrides are not touched.** Each override is an independent instance; a new
-  `SUMMARY` on the master does not rename an instance that was renamed on its own.
-  To change an override as well, edit it with ical.js directly.
+- **A new `SUMMARY` on the master does not rename an override.** Each override
+  is an independent instance; to change one, edit it with ical.js directly.
 - **An object with only overrides** (a detached instance stored without its
   master): a single component is edited as it is; with several there is no
   telling which one is meant, so `updateFields` throws.
-- **Moving a master's `DTSTART` or changing its `RRULE`** does not move the
-  overrides' `RECURRENCE-ID`s yet, so an override can stop matching an occurrence
-  ([#16](https://github.com/PhilflowIO/tsdav-utils/issues/16)).
+- **Writing the master's `DTSTART` moves the whole series.** The rule: the
+  occurrences after the call are the occurrences before, each moved by the
+  distance DTSTART moved, and each override sits on its moved occurrence at its
+  own time moved by the same distance. So every `RECURRENCE-ID`, `EXDATE`, `RDATE`
+  and `UNTIL` the call does not write itself moves along, and so do each
+  override's own `DTSTART`/`DTEND`/`DUE` — a rescheduled instance and one that
+  only changed its title alike. Thunderbird moves a series the same way.
+  - The distance is measured on the series' wall clock, so a 09:00 Berlin series
+    moved to 10:00 keeps landing on 10:00 across a DST change; moved values are
+    written in the new DTSTART's form (its `TZID`, UTC, floating, or a date).
+  - An override's own times move on that same wall clock and keep their own
+    form: an instance rescheduled to Monday 09:00 Berlin stays at 09:00 when the
+    series moves a week across a DST change — also when it is written in UTC,
+    whose value then changes by the hour the offset changed.
+  - Across an all-day/timed switch the distance counts in days: an occurrence
+    keeps its day and becomes a date or takes the new DTSTART's time of day; an
+    override keeps its own time on its day.
+  - When the call gives no `RRULE`, the move is accepted only where the rule
+    provably moves with it, decided from the rule itself (nothing is expanded).
+    The move splits into a change of date and a change of time of day:
+
+    | The rule has | it follows |
+    |---|---|
+    | no `BY` part, `FREQ` up to `WEEKLY` | any move |
+    | no `BY` part, `MONTHLY` | a new time, or a new date in the same month between the 1st and 28th |
+    | no `BY` part, `YEARLY` | a new time, or a new date every year has (not 29 February), the same number of days away in every year (not across the end of February) |
+    | `BYHOUR`, `BYMINUTE`, `BYSECOND` | a new date, at the same time of day |
+    | `BYDAY` with `DAILY`/`WEEKLY` | a new time, or a move by whole weeks |
+    | `BYDAY` with `MONTHLY`/`YEARLY`; `BYMONTH`, `BYMONTHDAY`, `BYYEARDAY`, `BYWEEKNO`, `BYSETPOS` | a new time, on the same date |
+    | a date-picking part with `HOURLY`/`MINUTELY`/`SECONDLY` | no move |
+
+    An all-day/timed switch counts as a new time. A part that only restates
+    DTSTART, as Google and Outlook write rules — a single `BYDAY` equal to its
+    weekday in a `WEEKLY` rule, a single `BYMONTHDAY` equal to its day in a
+    `MONTHLY` rule, a single `BYMONTH` equal to its month in a `YEARLY` rule (and
+    with it a single `BYMONTHDAY` equal to its day) — follows the move: the rule
+    is judged without it, and the part is rewritten to the new start
+    (`FREQ=WEEKLY;BYDAY=MO` moved from Monday to Tuesday becomes `BYDAY=TU`).
+    Only that token changes, in the rule as the object wrote it: part names keep
+    their case, the parts their order, every other byte stays (the same for a
+    moved `UNTIL`). A rule that gives a part twice, which RFC 5545 does not
+    allow and clients read differently, is refused. Anything else throws and
+    says why. Where a single `BYDAY`, `BYMONTHDAY`, `BYMONTH`, `BYHOUR` or `BYMINUTE`
+    value pins the old start, the error suggests the rule with the new start's
+    value, e.g. `RRULE "FREQ=WEEKLY;COUNT=3;BYDAY=TU"` for a Monday series moved to
+    Tuesday; otherwise it says to give `RRULE` in the same call. Weekly by weekday
+    at a new time, daily, and monthly by a date up to the 28th are always accepted.
+  - When the call gives `RRULE` or `RDATE`, the series is expanded up to the
+    furthest override or `EXDATE` to check they still name occurrences. That work
+    is bounded (also for a large `INTERVAL`). Where the check cannot be made — a
+    rule too sparse or an override too far ahead to check within the bound, a
+    rule ical.js cannot expand, a zone that cannot be read — it fails closed:
+    it throws, says why, and asks for a rewrite of the object.
+  - **To start a series later without moving it** (drop its first weeks), give
+    `RRULE`, `UNTIL` and `EXDATE` explicitly in the same call, or replace the
+    object: a bare `DTSTART` write moves every occurrence.
+  - **A value that cannot be moved with its meaning kept is refused**, never
+    moved approximately. The error says why and what to give instead:
+    - a UTC value next to a `TZID` that is neither in a `VTIMEZONE` nor an IANA
+      zone, a UTC value in a floating series, an `RDATE` of periods;
+    - an `UNTIL` of the other value type than DTSTART (a date next to a timed
+      DTSTART), and an `UNTIL` at a DST change — in the repeated hour, just past
+      a skipped hour, or moved into one — where the wall clock and the order of
+      instants part, so it could let one occurrence too many or too few through;
+    - an `RDATE` or `EXDATE` of a whole day next to a timed series on a move that
+      changes the time of day (on a move by whole days it stays a date);
+    - a rule with parts RFC 5545 does not define (`X-…`, `BYEASTER`, RFC 7529
+      `RSCALE`/`SKIP`), which writing the rule again would lose;
+    - an `EXDATE`, `RECURRENCE-ID` or `RDATE` that shares its instant with an
+      occurrence on a wall-clock time a DST change skips (read past the gap,
+      RFC 5545 3.3.5), in whatever zone it is written — UTC, another zone, or
+      the series' own zone as the first time after the gap (`03:30` for a
+      skipped `02:30`). Clients match it to that occurrence by instant, the move
+      by wall clock, so which one it names cannot be told. Checked before and
+      after a write that changes the occurrences (a DTSTART move, a new `RRULE`
+      or `RDATE`), where the series has such an occurrence;
+    - an override's own `DTSTART`/`DTEND`/`DUE` in another zone than the series
+      that, moved, would fall in the second pass of that zone's repeated hour,
+      where its wall clock reads as the first;
+    - on a switch from timed to all-day, a `RECURRENCE-ID`, `EXDATE` or `RDATE`
+      at another time of day than the series (or a date already): as a date it
+      could name an occurrence it never named, or fall together with another.
+
+  ```typescript
+  // weekly at 09:00Z, override RECURRENCE-ID:20261012T090000Z moved to 13:00
+  updateFields(event, { DTSTART: '20261005T100000Z' });
+  // master DTSTART:20261005T100000Z, override RECURRENCE-ID:20261012T100000Z,
+  // DTSTART:20261012T140000Z — the whole series, moved instance included, an hour later
+  ```
+- **When the call gives `RRULE` or `RDATE`, the occurrences are the caller's** —
+  values the call writes are never moved — but every override and `EXDATE` that
+  named an occurrence before must still name one. If one would not, `updateFields`
+  throws, naming each: give an `RRULE` that keeps those occurrences and `EXDATE`
+  with the exclusions the new series should have, or rewrite the whole object to
+  move or remove the override. An override that was already stale before the
+  call does not block it.
+- **`RECURRENCE-ID` is not written on a master** (or a plain event): it would turn
+  the series into an override of a single instance. It throws; a lone detached
+  instance, which has one already, can still be given a new one. An override
+  edited on its own is not a master, and none of the above applies to it.
+- All of this holds for a bare `VEVENT`/`VTODO` too, without a `VCALENDAR` around it.
 - **Reading the same component yourself:** `seriesMaster(calendar, type?)` returns
   the component `updateFields` edits, for a parsed `ICAL.Component` VCALENDAR —
   use it to check what was written (e.g. DTEND against DTSTART) instead of

@@ -47,7 +47,8 @@ interface UpdateFieldsOptions {
  * 3.8.4.4) — in any order. A write without a named instance (SUMMARY, EXDATE,
  * RRULE, DTSTART ...) belongs to the master, the one without RECURRENCE-ID;
  * DTSTART-anchored date-times are anchored to the master's DTSTART for the
- * same reason. Overrides are independent instances and are left untouched.
+ * same reason. Overrides are independent instances; they move only when the
+ * master's DTSTART moves the whole series (see beginSeriesEdit).
  *
  * The type is chosen first, VEVENT before VTODO before VJOURNAL: a CalDAV
  * object holds one component type (RFC 4791 4.1). Within it, the first
