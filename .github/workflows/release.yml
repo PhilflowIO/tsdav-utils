@@ -276,7 +276,11 @@ jobs:
       # Safe to run again for a version that is already on npm: same bytes ->
       # nothing to do, different bytes -> fail and ask for a new version.
       # The registry is asked anonymously over its JSON API, so the answer
-      # does not depend on the token setup-node writes into .npmrc.
+      # does not depend on the token setup-node writes into .npmrc. The
+      # request bypasses caches (no-cache header plus a unique query string):
+      # a cached 404 would misjudge a re-run as "not published yet", and a
+      # plain request here would put a 404 for this URL into a cache right
+      # before the check below asks for the same URL.
       - name: Publish with provenance
         env:
           npm_config_allow_git: none
@@ -284,7 +288,9 @@ jobs:
         run: |
           LOCAL="sha512-$(openssl dgst -sha512 -binary "release/$ASSET" | base64 -w0)"
           URL="https://registry.npmjs.org/@philflow/tsdav-utils/$VERSION"
-          STATUS=$(curl --silent --show-error --output "$RUNNER_TEMP/existing.json" --write-out '%{http_code}' "$URL")
+          STATUS=$(curl --silent --show-error --max-time 30 --header 'Cache-Control: no-cache' \
+            --output "$RUNNER_TEMP/existing.json" --write-out '%{http_code}' \
+            "$URL?nocache=$(date +%s%N)")
           case "$STATUS" in
             404)
               echo "ℹ️  @philflow/tsdav-utils@$VERSION is not on npm yet"
