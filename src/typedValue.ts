@@ -1,6 +1,8 @@
 import ICAL from 'ical.js';
-import type { FloatingTime } from './types';
-import { fieldsOf, wallOf, zoneOf } from './zone';
+import type { AbsoluteTime, FloatingTime } from './types';
+import { fieldsOf, unknownZone, wallOf, zoneOf } from './zone';
+import { UpdateFieldsError, wrapped } from './errors';
+import type { UpdateFieldsErrorCode } from './errors';
 
 /**
  * Typed writes for date and date-time properties.
@@ -36,6 +38,10 @@ const TYPED = new Set(['date-time', 'date', 'timestamp']);
  * record that, so it is spelled out here.
  */
 const UTC_ONLY = new Set(['completed', 'created', 'dtstamp', 'last-modified']);
+
+/** A refusal of a value the caller gave: correcting it is the remedy */
+const refuse = (code: UpdateFieldsErrorCode, message: string, property?: string) =>
+  new UpdateFieldsError(code, message, { remedy: 'fix-value', property });
 
 const DATE_TIME_FORMS =
   '"2026-10-26T18:00:00Z", "2026-10-26T14:00:00-04:00", "20261026T180000Z" ' +
@@ -93,7 +99,7 @@ function assertRealDateTime(raw: string, y: number, mo: number, d: number, h = 0
     t.getUTCFullYear() !== y || t.getUTCMonth() !== mo - 1 || t.getUTCDate() !== d ||
     h > 23 || mi > 59 || s > 60
   ) {
-    throw new Error(`"${raw}" is not a valid date or time`);
+    throw refuse('INVALID_VALUE', `"${raw}" is not a valid date or time`);
   }
 }
 
@@ -111,9 +117,13 @@ function toUtcJcal(date: Date): string {
  * the only zone that needs no VTIMEZONE. A value without a zone stays a
  * wall-clock time here; setDateValue decides what it means.
  *
- * @throws {Error} naming the accepted forms when the value is none of them
+ * @throws {UpdateFieldsError} INVALID_VALUE, naming the accepted forms, when the
+ *   value is none of them; INVALID_INPUT when it is no string
  */
 export function parseDateValue(raw: string): DateValue {
+  if (typeof raw !== 'string') {
+    throw refuse('INVALID_INPUT', `Invalid input: the value must be a string, not ${raw === null ? 'null' : typeof raw}`);
+  }
   const value = raw.trim();
   let m: RegExpExecArray | null;
 
@@ -125,7 +135,7 @@ export function parseDateValue(raw: string): DateValue {
 
   m = DATE_TIME_EXTENDED.exec(value) || DATE_TIME_BASIC.exec(value);
   if (!m) {
-    throw new Error(`"${raw}" is not a date or date-time. ${ACCEPTED_FORMS}`);
+    throw refuse('INVALID_VALUE', `"${raw}" is not a date or date-time. ${ACCEPTED_FORMS}`);
   }
 
   const [y, mo, d, h, mi] = [1, 2, 3, 4, 5].map((i) => Number(m![i]));
@@ -143,7 +153,7 @@ export function parseDateValue(raw: string): DateValue {
       const hours = Number(digits.slice(0, 2));
       const minutes = Number(digits.slice(2, 4) || 0);
       if (hours > 23 || minutes > 59) {
-        throw new Error(`"${raw}" has an invalid UTC offset`);
+        throw refuse('INVALID_VALUE', `"${raw}" has an invalid UTC offset`);
       }
       ms -= sign * (hours * 60 + minutes) * 60000;
     }
@@ -249,6 +259,33 @@ export function frameOf(component: ICAL.Component): Anchor | null {
 }
 
 /**
+ * A UTC value as the wall clock of its instant in a zone, for "keep-zone".
+ * Refused when the zone's rules are unknown, or when the instant falls in the
+ * second pass of the hour a DST change shows twice: that wall clock reads as
+ * the first pass (RFC 5545 3.3.5), so the instant has none of its own there.
+ * An instant always has a wall clock outside a gap, so none lands in one.
+ */
+function wallInZone(component: ICAL.Component, upper: string, tzid: string, value: DateValue): DateValue {
+  const zone = zoneOf(component, tzid);
+  if (!zone) {
+    throw refuse('UNKNOWN_TZID', `${upper}: ${unknownZone(tzid)}, so the instant cannot be ` +
+      'written as its wall-clock time there: give a time without a zone, or leave absoluteTime "as-given"', upper);
+  }
+  const m = /^(\d{4,})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/.exec(value.jcal)!;
+  const utc = wallOf(...([1, 2, 3, 4, 5, 6].map((i) => Number(m[i])) as [number, number, number, number, number, number]));
+  const wall = zone.fromUtc(utc);
+  const f = fieldsOf(wall);
+  const jcal = `${pad(f.year, 4)}-${pad(f.month)}-${pad(f.day)}T${pad(f.hour)}:${pad(f.minute)}:${pad(f.second)}`;
+  if (zone.toUtc(wall) !== utc) {
+    throw refuse('DST_AMBIGUOUS', `${upper}: ${value.jcal.replace(/[-:]/g, '')} is ` +
+      `${jcal.replace(/[-:]/g, '')} in "${tzid}", in the second pass of the hour the DST change shows twice, ` +
+      'where that wall-clock time reads as the first pass: give the time in UTC with absoluteTime "as-given", ' +
+      'or another time', upper);
+  }
+  return { kind: 'floating', jcal, local: new Date(utc * 1000) };
+}
+
+/**
  * Write a date or date-time property from a caller-supplied string.
  *
  * Updates the first occurrence (creating it when missing), which is the same
@@ -264,7 +301,9 @@ export function frameOf(component: ICAL.Component): Anchor | null {
  * throws. With no anchor at all it stays floating, or with "local" the host's
  * wall clock is written as UTC. A value that names its zone is written as UTC
  * and drops the TZID, which RFC 5545 3.2.19 forbids on a UTC value and which
- * a DATE cannot carry. Other parameters (RANGE on RECURRENCE-ID, X-
+ * a DATE cannot carry — unless absoluteTime is "keep-zone": then, where the
+ * zone above applies (the property's TZID, else DTSTART's), the instant is
+ * written as its wall clock in that zone and the TZID stays (see wallInZone). Other parameters (RANGE on RECURRENCE-ID, X-
  * parameters) survive.
  *
  * An anchored property also takes DTSTART's value type: a date next to an
@@ -278,6 +317,7 @@ export function setDateValue(
   name: string,
   raw: string,
   floatingTime: FloatingTime = 'keep',
+  absoluteTime: AbsoluteTime = 'as-given',
 ): boolean {
   const shape = dateProperty(component, name);
   if (!shape) {
@@ -292,15 +332,15 @@ export function setDateValue(
     const parts = shape.multiValue ? raw.split(',').filter((part) => part.trim() !== '') : [raw];
     parsed = (parts.length ? parts : [raw]).map(parseDateValue);
   } catch (error) {
-    throw new Error(`${upper}: ${(error as Error).message}`);
+    throw wrapped(error, `${upper}: ${(error as Error).message}`, { property: upper });
   }
 
   if (new Set(parsed.map((p) => p.kind === 'date')).size > 1) {
-    throw new Error(`${upper} mixes dates and date-times; all values must be one or the other`);
+    throw refuse('VALUE_TYPE_MISMATCH', `${upper} mixes dates and date-times; all values must be one or the other`, upper);
   }
   const isDate = parsed[0].kind === 'date';
   if (isDate && !shape.allowedTypes.includes('date')) {
-    throw new Error(`${upper} needs a date-time, not a date. Accepted forms: ${DATE_TIME_FORMS}`);
+    throw refuse('VALUE_TYPE_MISMATCH', `${upper} needs a date-time, not a date. Accepted forms: ${DATE_TIME_FORMS}`, upper);
   }
 
   const existing = component.getFirstProperty(lower);
@@ -311,10 +351,10 @@ export function setDateValue(
     ? 'otherwise it names no occurrence of the series'
     : 'RFC 5545 requires the same value type';
   if (anchor?.form === 'date' && !isDate) {
-    throw new Error(`${upper} must be a date: DTSTART is a date (all-day), and ${why}`);
+    throw refuse('VALUE_TYPE_MISMATCH', `${upper} must be a date: DTSTART is a date (all-day), and ${why}`, upper);
   }
   if (anchor && anchor.form !== 'date' && isDate) {
-    throw new Error(`${upper} needs a time: DTSTART has one, and ${why}`);
+    throw refuse('VALUE_TYPE_MISMATCH', `${upper} needs a time: DTSTART has one, and ${why}`, upper);
   }
 
   // The zone a wall-clock value is read in: the property's own TZID, else
@@ -324,6 +364,12 @@ export function setDateValue(
     : typeof own === 'string' && own ? own
     : anchor?.form === 'tzid' ? anchor.tzid
     : null;
+
+  // Under "keep-zone" an instant is written as its wall clock in that zone, so
+  // the TZID stays: a series keeps its local time across DST changes
+  if (absoluteTime === 'keep-zone' && zone) {
+    parsed = parsed.map((p) => p.kind === 'utc' ? wallInZone(component, upper, zone, p) : p);
+  }
 
   const floating = parsed.some((p) => p.kind === 'floating');
   // Where a wall-clock value ends up: in a TZID, floating, or converted to UTC
@@ -335,14 +381,15 @@ export function setDateValue(
     : 'floating';
 
   if (floating && wallClock === null) {
-    throw new Error(UTC_ONLY.has(lower)
+    throw refuse('ZONE_MISMATCH', UTC_ONLY.has(lower)
       ? `${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"`
-      : `${upper} has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"`);
+      : `${upper} has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"`, upper);
   }
   // One line has one zone: wall-clock values that stay wall-clock (in a
   // TZID, or floating) cannot share it with UTC values
   if (floating && wallClock !== 'utc' && parsed.some((p) => p.kind === 'utc')) {
-    throw new Error(`${upper} mixes values with and without a zone; give all of them a zone, or none`);
+    throw refuse('ZONE_MISMATCH',
+      `${upper} mixes values with and without a zone; give all of them a zone, or none`, upper);
   }
 
   const tzid = wallClock === 'tzid' ? zone : null;
@@ -444,7 +491,7 @@ const RULE_PARTS: Record<string, (value: string) => string | null> = {
  * combinations the RFC rules out. Names and values are case-insensitive
  * (RFC 5545 2), so they come back upper-cased.
  *
- * @throws {Error} saying what is wrong, without the property name
+ * @throws {UpdateFieldsError} saying what is wrong, without the property name
  */
 function parseRuleParts(raw: string): Map<string, string> {
   const parts = new Map<string, string>();
@@ -456,49 +503,49 @@ function parseRuleParts(raw: string): Map<string, string> {
     const check = RULE_PARTS[name];
     if (!check) {
       if (name === 'RSCALE' || name === 'SKIP') {
-        throw new Error('RSCALE/SKIP (RFC 7529) are not supported: ical.js cannot write them without losing them');
+        throw refuse('UNKNOWN_RULE_PART', 'RSCALE/SKIP (RFC 7529) are not supported: ical.js cannot write them without losing them');
       }
       const colon = name.indexOf(':');
       if (colon >= 0) {
         // "RRULE:FREQ=DAILY": the property line, not the value
-        throw new Error(`"${part.trim()}" is not a rule part: drop the "${name.slice(0, colon + 1)}" ` +
+        throw refuse('UNKNOWN_RULE_PART', `"${part.trim()}" is not a rule part: drop the "${name.slice(0, colon + 1)}" ` +
           `prefix and give only the rule, e.g. "${part.trim().slice(colon + 1)}"`);
       }
-      throw new Error(`"${part.trim()}" is not a rule part. ` +
+      throw refuse('UNKNOWN_RULE_PART', `"${part.trim()}" is not a rule part. ` +
         `RFC 5545 defines ${Object.keys(RULE_PARTS).join(', ')} (e.g. "FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10")`);
     }
     if (parts.has(name)) {
-      throw new Error(`${name} is given twice; each rule part may occur once`);
+      throw refuse('DUPLICATE_RULE_PART', `${name} is given twice; each rule part may occur once`);
     }
     if (value === '') {
-      throw new Error(`${name} has no value`);
+      throw refuse('INVALID_RULE', `${name} has no value`);
     }
     const wrong = check(value);
     if (wrong) {
-      throw new Error(`${name}: ${wrong}`);
+      throw refuse('INVALID_RULE', `${name}: ${wrong}`);
     }
     parts.set(name, value);
   }
 
   const freq = parts.get('FREQ');
   if (!freq) {
-    throw new Error('FREQ is missing; every rule needs one (e.g. "FREQ=DAILY;COUNT=5")');
+    throw refuse('INVALID_RULE', 'FREQ is missing; every rule needs one (e.g. "FREQ=DAILY;COUNT=5")');
   }
   if (parts.has('COUNT') && parts.has('UNTIL')) {
-    throw new Error('COUNT and UNTIL cannot both be given (RFC 5545 3.3.10); use one of them');
+    throw refuse('INVALID_RULE', 'COUNT and UNTIL cannot both be given (RFC 5545 3.3.10); use one of them');
   }
   if (parts.has('BYWEEKNO') && freq !== 'YEARLY') {
-    throw new Error('BYWEEKNO is only allowed with FREQ=YEARLY (RFC 5545 3.3.10)');
+    throw refuse('INVALID_RULE', 'BYWEEKNO is only allowed with FREQ=YEARLY (RFC 5545 3.3.10)');
   }
   if (parts.has('BYYEARDAY') && ['DAILY', 'WEEKLY', 'MONTHLY'].includes(freq)) {
-    throw new Error(`BYYEARDAY is not allowed with FREQ=${freq} (RFC 5545 3.3.10)`);
+    throw refuse('INVALID_RULE', `BYYEARDAY is not allowed with FREQ=${freq} (RFC 5545 3.3.10)`);
   }
   if (parts.has('BYMONTHDAY') && freq === 'WEEKLY') {
-    throw new Error('BYMONTHDAY is not allowed with FREQ=WEEKLY (RFC 5545 3.3.10)');
+    throw refuse('INVALID_RULE', 'BYMONTHDAY is not allowed with FREQ=WEEKLY (RFC 5545 3.3.10)');
   }
   const ordinalDay = (parts.get('BYDAY') ?? '').split(',').some((d) => /\d/.test(d));
   if (ordinalDay && (!['MONTHLY', 'YEARLY'].includes(freq) || parts.has('BYWEEKNO'))) {
-    throw new Error('BYDAY with an ordinal ("1MO", "-1FR") is only allowed with FREQ=MONTHLY or ' +
+    throw refuse('INVALID_RULE', 'BYDAY with an ordinal ("1MO", "-1FR") is only allowed with FREQ=MONTHLY or ' +
       'FREQ=YEARLY, and not together with BYWEEKNO (RFC 5545 3.3.10)');
   }
   // Within a month a weekday occurs at most five times (RFC 5545 3.3.10:
@@ -506,11 +553,11 @@ function parseRuleParts(raw: string): Map<string, string> {
   const tooFar = (parts.get('BYDAY') ?? '').split(',')
     .find((d) => Math.abs(Number(/^([+-]?\d+)/.exec(d)?.[1] ?? 0)) > 5);
   if (tooFar && (freq === 'MONTHLY' || parts.has('BYMONTH'))) {
-    throw new Error(`BYDAY: "${tooFar}" counts past the fifth weekday of a month; within a month the ordinal is ` +
+    throw refuse('INVALID_RULE', `BYDAY: "${tooFar}" counts past the fifth weekday of a month; within a month the ordinal is ` +
       '1 to 5 or -5 to -1 (RFC 5545 3.3.10)');
   }
   if (parts.has('BYSETPOS') && ![...parts.keys()].some((k) => k.startsWith('BY') && k !== 'BYSETPOS')) {
-    throw new Error('BYSETPOS needs another BYxxx part to select from (RFC 5545 3.3.10)');
+    throw refuse('INVALID_RULE', 'BYSETPOS needs another BYxxx part to select from (RFC 5545 3.3.10)');
   }
   return parts;
 }
@@ -547,26 +594,27 @@ function untilTime(
   try {
     parsed = parseDateValue(raw);
   } catch (error) {
-    throw new Error(`${ruleName} UNTIL: ${(error as Error).message}`);
+    throw wrapped(error, `${ruleName} UNTIL: ${(error as Error).message}`, { property: ruleName });
   }
   const anchor = anchorOf(component, ruleName.toLowerCase());
-  const fail = (why: string) => new Error(`${ruleName} UNTIL ${why}`);
+  const fail = (code: UpdateFieldsErrorCode, why: string) =>
+    refuse(code, `${ruleName} UNTIL ${why}`, ruleName);
 
   if (anchor?.form === 'date' && parsed.kind !== 'date') {
-    throw fail('must be a date: DTSTART is a date (all-day), and RFC 5545 3.3.10 requires the same type, e.g. "2026-10-26"');
+    throw fail('VALUE_TYPE_MISMATCH', 'must be a date: DTSTART is a date (all-day), and RFC 5545 3.3.10 requires the same type, e.g. "2026-10-26"');
   }
   if (anchor && anchor.form !== 'date' && parsed.kind === 'date') {
-    throw fail('needs a time: DTSTART has one, and RFC 5545 3.3.10 requires the same type');
+    throw fail('VALUE_TYPE_MISMATCH', 'needs a time: DTSTART has one, and RFC 5545 3.3.10 requires the same type');
   }
   if (anchor?.form === 'floating' && parsed.kind === 'utc') {
-    throw fail('must be a local time without a zone, like the floating DTSTART (RFC 5545 3.3.10), e.g. "2026-10-26T18:00:00"');
+    throw fail('ZONE_MISMATCH', 'must be a local time without a zone, like the floating DTSTART (RFC 5545 3.3.10), e.g. "2026-10-26T18:00:00"');
   }
 
   if (parsed.kind === 'floating') {
     if (anchor?.form === 'tzid') {
       const zone = zoneOf(component, anchor.tzid);
       if (!zone) {
-        throw fail(`has no zone, and DTSTART's zone "${anchor.tzid}" has no VTIMEZONE in the document and is no ` +
+        throw fail('UNKNOWN_TZID', `has no zone, and DTSTART's zone "${anchor.tzid}" has no VTIMEZONE in the document and is no ` +
           'IANA time zone to convert it to UTC with (RFC 5545 3.3.10 requires UTC here): give it a zone, ' +
           'e.g. "2026-10-26T18:00:00Z" or "2026-10-26T18:00:00+01:00"');
       }
@@ -581,7 +629,7 @@ function untilTime(
       return ICAL.Time.fromDateTimeString(toUtcJcal(parsed.local));
     }
     if (anchor?.form === 'utc') {
-      throw fail('has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"');
+      throw fail('ZONE_MISMATCH', 'has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"');
     }
     return ICAL.Time.fromDateTimeString(parsed.jcal);
   }
@@ -606,7 +654,7 @@ export function isRecurProperty(component: ICAL.Component, name: string): boolea
  *
  * @returns true when the property was handled here, false when it is not
  *          RECUR-typed and the caller should write it as before
- * @throws {Error} naming the property and what is wrong with the rule
+ * @throws {UpdateFieldsError} naming the property and what is wrong with the rule
  */
 export function setRecurValue(
   component: ICAL.Component,
@@ -624,7 +672,7 @@ export function setRecurValue(
   try {
     parts = parseRuleParts(raw);
   } catch (error) {
-    throw new Error(`${upper}: ${(error as Error).message}`);
+    throw wrapped(error, `${upper}: ${(error as Error).message}`, { property: upper });
   }
 
   const until = parts.get('UNTIL');

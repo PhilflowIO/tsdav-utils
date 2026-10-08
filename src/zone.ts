@@ -1,4 +1,5 @@
 import ICAL from 'ical.js';
+import { UpdateFieldsError } from './errors';
 
 /*
  * Wall clocks and time zones.
@@ -135,12 +136,18 @@ function transitionsOf(vtimezone: ICAL.Component, horizon: number): Transition[]
       }
     }
     for (const property of observance.getAllProperties('rrule')) {
-      const recur = (property.getFirstValue() as ICAL.Recur).clone();
+      let recur: ICAL.Recur;
+      try {
+        recur = (property.getFirstValue() as ICAL.Recur).clone();
+      } catch (error) {
+        throw new UpdateFieldsError('UNSUPPORTED_VTIMEZONE', `the VTIMEZONE "${vtimezone.getFirstPropertyValue('tzid')}" ` +
+          `has an observance rule that cannot be read: ${(error as Error).message}`, { remedy: 'rewrite-object' });
+      }
       // Real zones change yearly; ical.js gives up on a YEARLY or MONTHLY rule
       // that matches nothing, but would search a finer one without end
       if (recur.freq !== 'YEARLY' && recur.freq !== 'MONTHLY') {
-        throw new Error(`the VTIMEZONE "${vtimezone.getFirstPropertyValue('tzid')}" has an observance repeating ` +
-          `${recur.freq}, which no time zone does, so it is not read`);
+        throw new UpdateFieldsError('UNSUPPORTED_VTIMEZONE', `the VTIMEZONE "${vtimezone.getFirstPropertyValue('tzid')}" has an observance repeating ` +
+          `${recur.freq}, which no time zone does, so it is not read`, { remedy: 'rewrite-object' });
       }
       if (recur.until) {
         const until = wallOfTime(recur.until) + (recur.until.zone === ICAL.Timezone.utcTimezone ? from : 0);

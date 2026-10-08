@@ -154,12 +154,18 @@ Updates arbitrary properties on a calendar/todo/contact object.
 - **options.floatingTime**: `'keep' | 'local'` (default `'keep'`)
   - How a date-time without a zone is written: floating, or host timezone converted to UTC
 
+- **options.absoluteTime**: `'as-given' | 'keep-zone'` (default `'as-given'`)
+  - How a date-time with `Z` or an offset is written where the property or its
+    DTSTART has a `TZID`: as UTC, or converted into that `TZID`, which stays (see
+    [Keeping the zone](#keeping-the-zone-absolutetime))
+
 - **options.type**: `'vevent' | 'vtodo' | 'vjournal'` (optional)
   - The component type to write into. Without it the first type present is taken
     (`VEVENT`, then `VTODO`, then `VJOURNAL`, see [Recurring events and todos](#recurring-events-and-todos))
-  - Throws if the object holds no component of that type (the message names the types
-    it does hold), if the value is not one of the three, if the object is a bare
-    component of another type, or if it is a vCard
+  - Throws if the object holds no component of that type (`COMPONENT_NOT_FOUND`; the
+    message names the types it does hold), if the value is not one of the three
+    (`INVALID_TYPE`), or if the object is a bare component of another type or a
+    vCard (`WRONG_OBJECT_KIND`)
   - Name it when you know what you are editing: on an object that holds a `VEVENT`
     and a `VTODO` (which RFC 4791 4.1 forbids, but servers do store),
     `updateFields(todo.data, { DUE: '...' }, { type: 'vtodo' })` writes into the todo
@@ -168,6 +174,11 @@ Updates arbitrary properties on a calendar/todo/contact object.
 #### Returns
 
 - `string`: Updated iCal string ready for `tsdav.updateCalendarObject()`
+
+#### Throws
+
+- `UpdateFieldsError` with a stable `code` when the call asks for something the
+  object cannot take; nothing is written. See [Errors](#errors).
 
 #### Example
 
@@ -194,7 +205,8 @@ updateFields(todo, { DUE: '2026-10-26T18:00:00' });       // DUE:20261026T180000
 updateFields(event, { EXDATE: '2026-10-26T18:00:00Z,2026-11-02T18:00:00Z' });
 ```
 
-- A value with `Z` or an offset is converted to UTC; any `TZID` on the old value is removed.
+- A value with `Z` or an offset is converted to UTC; any `TZID` on the old value is
+  removed — unless `{ absoluteTime: 'keep-zone' }` is given (see below).
 - A date (`YYYY-MM-DD` or `YYYYMMDD`) becomes `VALUE=DATE`, and back again.
 - A value without a zone is a wall-clock time. On a property that already has a
   `TZID` it is read in that zone and the `TZID` stays
@@ -217,6 +229,42 @@ updateFields(event, { EXDATE: '2026-10-26T18:00:00Z,2026-11-02T18:00:00Z' });
   reject a floating value; properties that only allow a date-time reject a date.
 - Anything else (`tomorrow`, `26.10.2026`) throws, naming the accepted forms.
 - vCard `BDAY`/`ANNIVERSARY` (DATE-AND-OR-TIME in vCard 4, which allows `--0501`) are written as given.
+
+### Keeping the zone: `absoluteTime`
+
+By default (`absoluteTime: 'as-given'`) an instant is written as the caller gave
+it, in UTC. On a series in a zone that is often not what was meant: an LLM that
+moves a weekly 09:00 Europe/Berlin series with `2026-10-06T08:00:00Z` turns the
+whole series into UTC, and after the DST change every occurrence sits an hour
+earlier in Berlin. With `{ absoluteTime: 'keep-zone' }` the instant is written as
+its wall-clock time in the zone that applies, and the `TZID` stays:
+
+```typescript
+// DTSTART;TZID=Europe/Berlin:20261005T090000 + RRULE:FREQ=WEEKLY
+updateFields(event, { DTSTART: '2026-10-06T08:00:00Z' });
+// DTSTART:20261006T080000Z — 10:00 in October, 09:00 in Berlin from 25 October on
+updateFields(event, { DTSTART: '2026-10-06T08:00:00Z' }, { absoluteTime: 'keep-zone' });
+// DTSTART;TZID=Europe/Berlin:20261006T100000 — 10:00 in Berlin, every week
+```
+
+- The zone that applies is the one a value without a zone would be read in: the
+  property's own `TZID`, else (for DTEND, DUE, EXDATE, RDATE, RECURRENCE-ID) the
+  `TZID` of DTSTART. The zone's rules come from the object's `VTIMEZONE`, else the
+  IANA zone of that name; a `TZID` that is neither throws (`UNKNOWN_TZID`)
+  instead of falling back to UTC.
+- An instant in the second pass of the hour a DST change shows twice has no wall
+  clock of its own there (that wall-clock time reads as the first pass, RFC 5545
+  3.3.5), so it throws (`DST_AMBIGUOUS`). The first pass is written as is; no
+  instant falls in a skipped hour.
+- Where no zone applies — a value with no `TZID` of its own next to a UTC or
+  floating DTSTART or no DTSTART at all (a `DUE` with its own `TZID` is
+  converted, DTSTART or not), the UTC-only `COMPLETED`/`CREATED`/`DTSTAMP`/`LAST-MODIFIED` — the instant is written
+  as UTC, as by default. All-day rules are unchanged: a date-time next to an
+  all-day DTSTART still throws.
+- Values without a zone, and dates, are not affected; `floatingTime` governs those.
+- The rest of a series follows a moved DTSTART as always (see
+  [Recurring events and todos](#recurring-events-and-todos)); kept in its zone,
+  the move is measured on that zone's wall clock.
 
 To validate input before calling `updateFields`, use the same grammar:
 `parseDateValue(value)` returns `{ kind: 'date' | 'utc' | 'floating', jcal }` or
@@ -349,8 +397,10 @@ follow the master's `DTSTART` (see above).
     furthest override or `EXDATE` to check they still name occurrences. That work
     is bounded (also for a large `INTERVAL`). Where the check cannot be made — a
     rule too sparse or an override too far ahead to check within the bound, a
-    rule ical.js cannot expand, a zone that cannot be read — it fails closed:
-    it throws, says why, and asks for a rewrite of the object.
+    zone that cannot be read, a rule ical.js cannot expand — it fails closed:
+    it throws, says why, and asks for a rewrite of the object (see
+    [Errors](#errors); ical.js failing to expand a rule is a plain `Error`,
+    a failure of the library, not of the call).
   - **To start a series later without moving it** (drop its first weeks), give
     `RRULE`, `UNTIL` and `EXDATE` explicitly in the same call, or replace the
     object: a bare `DTSTART` write moves every occurrence.
@@ -406,6 +456,90 @@ follow the master's `DTSTART` (see above).
 - The component type is chosen first (`VEVENT`, then `VTODO`, then `VJOURNAL`),
   since a CalDAV object holds one type (RFC 4791 4.1). Name it explicitly with
   `updateFields(obj, fields, { type: 'vtodo' })` or `seriesMaster(calendar, 'vtodo')`.
+
+## Errors
+
+Every refusal of `updateFields`, `seriesMaster` and `parseDateValue` throws an
+`UpdateFieldsError`, and nothing is written. It is an `Error` (so `instanceof
+Error` holds) with:
+
+- `code` — the stable reason (table below);
+- `remedy` — what the caller can do, as the message says it: `'fix-value'`
+  (correct a value or option given), `'same-call'` (give the properties the
+  message names — RRULE, UNTIL, EXDATE, RDATE — in the same `updateFields` call),
+  `'rewrite-object'` (the change cannot be made as field writes, or the object
+  itself is broken: replace the whole object), `'none'` (nothing in this call
+  helps, e.g. a vCard handed to an iCalendar write);
+- `property` — the property it is about, where there is one (upper-cased:
+  `"DTEND"`, `"RRULE"`);
+- `suggestion` — a value that would be accepted, where the library can tell: for
+  `SERIES_MOVE_REFUSED`, the rule to give with the new start;
+- `cause` — when a refusal is reported with a longer message (`DTEND: ...`,
+  `DTSTART changed, and ...`), the refusal it reports; for `INVALID_ICALENDAR`,
+  the ical.js parse error.
+
+Branch on `code` and `remedy`, not on the message: the messages explain and may
+be reworded. **Anything else thrown is a plain `Error`**: a failure of the library
+(or of ical.js) rather than of the call, never to be handed back to the caller
+as a mistake to correct.
+
+```typescript
+import { updateFields, isUpdateFieldsError } from '@philflow/tsdav-utils';
+
+function move(data: string, start: string) {
+  try {
+    return { ok: true, data: updateFields(data, { DTSTART: start }) };
+  } catch (error) {
+    if (!isUpdateFieldsError(error)) throw error;  // a library failure, not the caller's mistake
+    return { ok: false, ...error.toJSON() };       // code, remedy, message, property, suggestion
+  }
+}
+```
+
+`isUpdateFieldsError(error, code?)` checks the name and code rather than the
+class, so it also holds when both the ESM and the CommonJS build are loaded;
+given a code, it narrows `error.code` to it. It needs the error as thrown: a copy
+made by `structuredClone` or `postMessage` keeps only message and stack, so
+send `error.toJSON()` across such a boundary instead. `UPDATE_FIELDS_ERROR_CODES`
+lists every code (frozen); `UpdateFieldsErrorCode` and `UpdateFieldsRemedy` are
+the union types.
+
+A value already in the object that cannot be read (`EXDATE:garbage`,
+`RRULE:...;UNTIL=garbage`) is refused with the same code whichever check finds
+it — `INVALID_VALUE` or `INVALID_RULE`, `property` naming it — but only when the
+write needs it: a SUMMARY write next to a broken RRULE goes through. A rule the
+call does not write goes back byte for byte as the object spells it, broken or
+not; where its line cannot be found in the text, ical.js writes it, and an
+unreadable one is refused (`INVALID_RULE`) rather than rewritten.
+
+| Code | When | Remedy |
+|---|---|---|
+| `INVALID_INPUT` | an argument has the wrong type: `calendarObject` not a string or `{ data: string }`, `fields` or `options` not an object, a non-string to `parseDateValue`, several top-level components in one text | `fix-value` |
+| `INVALID_ICALENDAR` | the iCalendar or vCard text does not parse (`cause`: the ical.js error) | `rewrite-object` |
+| `INVALID_TYPE` | `options.type` (or `seriesMaster`'s type) is not `vevent`, `vtodo` or `vjournal` | `fix-value` |
+| `INVALID_FLOATING_TIME` | `options.floatingTime` is not `keep` or `local` | `fix-value` |
+| `INVALID_ABSOLUTE_TIME` | `options.absoluteTime` is not `as-given` or `keep-zone` | `fix-value` |
+| `COMPONENT_NOT_FOUND` | the VCALENDAR holds no component of the type asked for (the message names what it holds) | `fix-value` |
+| `WRONG_OBJECT_KIND` | `type` given for a vCard, or for a bare component of another type | `none` (vCard), `fix-value` (bare component) |
+| `NO_MASTER` | several instances with `RECURRENCE-ID` and no master, so which one is meant cannot be told | `rewrite-object` |
+| `INVALID_VALUE` | a date or date-time value (also a rule's `UNTIL`) does not parse, names no real date, time or offset, or is no string; or such a value already in the object | `fix-value`; `rewrite-object` or `same-call` for a value in the object, as the message says |
+| `VALUE_TYPE_MISMATCH` | a date where a date-time is needed or the other way round: next to DTSTART, on a property that takes no date, or mixed in one list | `fix-value` |
+| `ZONE_MISMATCH` | a value lacks the zone it needs (next to a UTC DTSTART, on `DTSTAMP`/`CREATED`/...), has one it must not have (`UNTIL` of a floating series), or a list mixes both | `fix-value`; for a value in the object `same-call` where a DTSTART move would carry it, else `rewrite-object` |
+| `UNKNOWN_TZID` | a TZID whose rules are needed (a time converted to or from it, `absoluteTime: 'keep-zone'`) has no `VTIMEZONE` in the object and is no IANA zone — the same code whether a move or a new rule needs it | `fix-value` for a value given; for a zone in the object `same-call` where a DTSTART move would carry the value, else `rewrite-object` |
+| `UNSUPPORTED_VTIMEZONE` | a `VTIMEZONE` in the object repeats more often than monthly, or its rule cannot be read | `rewrite-object` |
+| `UNKNOWN_RULE_PART` | a rule given has a part RFC 5545 3.3.10 does not define, `RSCALE`/`SKIP`, or an `RRULE:` prefix | `fix-value` |
+| `DUPLICATE_RULE_PART` | a rule given names a part twice | `fix-value` |
+| `INVALID_RULE` | a rule given is otherwise invalid: no `FREQ`, a value out of range, `COUNT` with `UNTIL`, another combination RFC 5545 rules out; or a rule in the object cannot be read | `fix-value`; `rewrite-object` for a rule in the object |
+| `RECURRENCE_ID_ON_MASTER` | `RECURRENCE-ID` written on the series master | `rewrite-object` |
+| `SERIES_MOVE_REFUSED` | a DTSTART move the series cannot follow exactly: the rule pins the old start (`suggestion` holds the rule to give, when there is one), or an existing `UNTIL`, `EXDATE` or `RDATE` cannot move with it; or an override cannot, or the switch to all-day would change what a value names | `same-call`; `rewrite-object` for an override or the switch to all-day |
+| `ORPHANED_EXCEPTIONS` | a new `RRULE` or `RDATE` leaves an override or `EXDATE` naming no occurrence | `same-call` |
+| `DST_AMBIGUOUS` | a value of the series sits at a DST change, where the wall clock does not name one instant; or, under `absoluteTime: 'keep-zone'`, an instant falls in the second pass of the repeated hour | `same-call` for `UNTIL`; `rewrite-object` for a value sharing its instant with a skipped occurrence, or an override; `fix-value` under `keep-zone` |
+| `CHECK_LIMIT_EXCEEDED` | the series is too sparse, or the override or `EXDATE` furthest ahead too far, to check within the work limit | `rewrite-object` on a new rule; `same-call` on a move |
+| `SERIES_UNVERIFIABLE` | whether the overrides and `EXDATE`s still name occurrences cannot be checked: the series has no DTSTART | `rewrite-object` |
+
+A refusal reported inside another keeps its code: an `UNTIL` in the repeated
+hour of a DST change is `DST_AMBIGUOUS`, a zone that cannot be resolved
+`UNKNOWN_TZID`, not `SERIES_MOVE_REFUSED`; the remedy follows the outer message.
 
 ## What This Library Does NOT Do
 

@@ -5,7 +5,8 @@
 // a series move works, a rule that does not follow it is refused, a rule
 // change keeping the override is accepted, and a sparse one is refused quickly
 // instead of running for minutes.
-import { updateFields } from 'tsdav-utils';
+import { createRequire } from 'node:module';
+import { UpdateFieldsError, isUpdateFieldsError, updateFields } from 'tsdav-utils';
 
 const calendar = (...lines) =>
   ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//ci//EN', ...lines, 'END:VCALENDAR', ''].join('\r\n');
@@ -62,3 +63,24 @@ if (!/too sparse to expand within the work limit/.test(sparse ?? '') || ms > 500
   fail(`a sparse rule was not refused within the budget (${ms} ms): ${sparse}`);
 }
 console.log(`✅ sparse rule refused in ${ms} ms`);
+
+// 5. a refusal is typed in both builds, and the guard holds across them
+const thrown = (f) => {
+  try {
+    f();
+  } catch (error) {
+    return error;
+  }
+  return null;
+};
+const cjs = createRequire(import.meta.url)('tsdav-utils');
+const esmError = thrown(() => updateFields(calendar(...event('DTSTART:20261005T090000Z')), { RRULE: 'COUNT=5' }));
+const cjsError = thrown(() => cjs.updateFields(calendar(...event('DTSTART:20261005T090000Z')), { RRULE: 'COUNT=5' }));
+if (!(esmError instanceof UpdateFieldsError) || esmError.code !== 'INVALID_RULE' || esmError.property !== 'RRULE') {
+  fail(`the ESM build threw no typed refusal: ${esmError}`);
+}
+if (!(cjsError instanceof cjs.UpdateFieldsError) || !isUpdateFieldsError(cjsError, 'INVALID_RULE') ||
+    !cjs.isUpdateFieldsError(esmError, 'INVALID_RULE')) {
+  fail(`the CommonJS build threw no typed refusal, or the guard does not hold across builds: ${cjsError}`);
+}
+console.log('✅ typed refusals in ESM and CommonJS');
