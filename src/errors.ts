@@ -10,15 +10,15 @@
  * See "Errors" in the README for when each code occurs.
  */
 const CODES = [
-  /** an argument has the wrong type: calendarObject, fields, options, or several top-level components */
+  /** an argument has the wrong type: calendarObject, fields, options (or options.zone), or several top-level components */
   'INVALID_INPUT',
   /** the iCalendar or vCard text does not parse */
   'INVALID_ICALENDAR',
   /** options.type (or seriesMaster's type) is not "vevent", "vtodo" or "vjournal" */
   'INVALID_TYPE',
-  /** options.floatingTime is not "keep" or "local" */
+  /** options.floatingTime is not "keep" or "local", or is given together with options.zone */
   'INVALID_FLOATING_TIME',
-  /** options.absoluteTime is not "as-given" or "keep-zone" */
+  /** options.absoluteTime is not "as-given" or "keep-zone", or is "as-given" together with options.zone */
   'INVALID_ABSOLUTE_TIME',
   /** the VCALENDAR holds no component of the type asked for */
   'COMPONENT_NOT_FOUND',
@@ -30,11 +30,11 @@ const CODES = [
   'INVALID_VALUE',
   /** a date where a date-time is needed, or the other way round */
   'VALUE_TYPE_MISMATCH',
-  /** a value lacks the zone it needs, has one it must not have, or mixes both */
+  /** a value lacks the zone it needs, has one it must not have, mixes both, or follows a DTSTART in another zone than options.zone */
   'ZONE_MISMATCH',
-  /** a TZID whose rules are needed has no VTIMEZONE in the object and is no IANA zone */
+  /** a TZID whose rules are needed (or options.zone) has no VTIMEZONE in the object and is no IANA zone */
   'UNKNOWN_TZID',
-  /** a VTIMEZONE in the object repeats in a way no time zone does, so it is not read */
+  /** a VTIMEZONE in the object repeats in a way no time zone does, so it is not read; or none can be generated for options.zone at the dates given (local mean time) */
   'UNSUPPORTED_VTIMEZONE',
   /** a rule given has a part RFC 5545 3.3.10 does not define (or RSCALE/SKIP, or an "RRULE:" prefix) */
   'UNKNOWN_RULE_PART',
@@ -42,6 +42,8 @@ const CODES = [
   'DUPLICATE_RULE_PART',
   /** a rule is otherwise invalid: a bad value, no FREQ, a combination RFC 5545 rules out, or unreadable in the object */
   'INVALID_RULE',
+  /** under options.zone, DTEND or DUE would lie before DTSTART */
+  'END_BEFORE_START',
   /** RECURRENCE-ID written on the series master */
   'RECURRENCE_ID_ON_MASTER',
   /** a DTSTART move the series (its rule, UNTIL, EXDATE, RDATE or overrides) cannot follow exactly */

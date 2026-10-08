@@ -159,6 +159,12 @@ Updates arbitrary properties on a calendar/todo/contact object.
     DTSTART has a `TZID`: as UTC, or converted into that `TZID`, which stays (see
     [Keeping the zone](#keeping-the-zone-absolutetime))
 
+- **options.zone**: an IANA time zone name, e.g. `'Europe/Berlin'` (optional)
+  - Writes the call's date-times as wall-clock times in that zone, with `TZID`,
+    and adds a `VTIMEZONE` for it when the `VCALENDAR` has none (see
+    [Writing in a named zone](#writing-in-a-named-zone-zone)). Replaces
+    `floatingTime` and `absoluteTime`
+
 - **options.type**: `'vevent' | 'vtodo' | 'vjournal'` (optional)
   - The component type to write into. Without it the first type present is taken
     (`VEVENT`, then `VTODO`, then `VJOURNAL`, see [Recurring events and todos](#recurring-events-and-todos))
@@ -206,7 +212,10 @@ updateFields(event, { EXDATE: '2026-10-26T18:00:00Z,2026-11-02T18:00:00Z' });
 ```
 
 - A value with `Z` or an offset is converted to UTC; any `TZID` on the old value is
-  removed — unless `{ absoluteTime: 'keep-zone' }` is given (see below).
+  removed — unless `{ absoluteTime: 'keep-zone' }` or `{ zone: '<IANA name>' }`
+  is given (see below). For anything that recurs, or that people read in local
+  time, write it in a named zone: a UTC series moves by an hour in local time
+  at every DST change.
 - A date (`YYYY-MM-DD` or `YYYYMMDD`) becomes `VALUE=DATE`, and back again.
 - A value without a zone is a wall-clock time. On a property that already has a
   `TZID` it is read in that zone and the `TZID` stays
@@ -265,6 +274,159 @@ updateFields(event, { DTSTART: '2026-10-06T08:00:00Z' }, { absoluteTime: 'keep-z
 - The rest of a series follows a moved DTSTART as always (see
   [Recurring events and todos](#recurring-events-and-todos)); kept in its zone,
   the move is measured on that zone's wall clock.
+
+### Writing in a named zone: `zone`
+
+`absoluteTime: 'keep-zone'` keeps a `TZID` that is already there; `zone` brings
+one in. With `{ zone: 'Europe/Berlin' }` every date-time the call writes is a
+wall-clock time in Berlin and is written with `TZID=Europe/Berlin`, and the
+`VCALENDAR` gets a `VTIMEZONE` for it if it has none (RFC 5545 3.6.5 requires
+one per `TZID`). A weekly meeting created this way stays at 09:00 in Berlin
+across every DST change:
+
+```typescript
+updateFields(skeleton, {
+  DTSTART: '2026-10-05T09:00:00', DTEND: '2026-10-05T10:00:00', RRULE: 'FREQ=WEEKLY',
+}, { zone: 'Europe/Berlin' });
+// BEGIN:VTIMEZONE ... TZID:Europe/Berlin ... END:VTIMEZONE
+// DTSTART;TZID=Europe/Berlin:20261005T090000
+// DTEND;TZID=Europe/Berlin:20261005T100000
+
+updateFields(skeleton, { DTSTART: '2026-10-05T07:00:00Z' }, { zone: 'Europe/Berlin' });
+// DTSTART;TZID=Europe/Berlin:20261005T090000 — the instant, as Berlin wall clock
+```
+
+**For an LLM tool caller, in one line each:** a wall-clock `DTSTART`
+(`2026-10-05T09:00:00`) with `zone` means "this meeting is at 09:00 in that
+zone's time, every time"; a `Z` or offset `DTSTART` with `zone` means "the first
+occurrence is at this moment", and the series keeps that moment's local time.
+
+- **A value without a zone** is wall clock in the zone. One the zone's DST
+  change skips (02:30 on the last Sunday of March in Berlin) is written as given
+  and reads as the time as far past the gap (03:30), one it shows twice as the
+  first pass (RFC 5545 3.3.5). ical.js 2.2 reads both the other way round: the
+  skipped 02:30 on 29 March 2026 as 00:30Z (RFC: 01:30Z), the repeated 02:30 on
+  25 October as its second pass, 01:30Z (RFC: 00:30Z). Clients built on it may
+  show such a time an hour off; away from those hours every reader agrees.
+  `resolveZone` (see [Helpers for consumers](#helpers-for-consumers)) converts
+  the RFC way.
+- **A value with `Z` or an offset** is written as the wall-clock time of that
+  instant in the zone. An instant in the second pass of the repeated hour has
+  no wall-clock time of its own there, so it throws (`DST_AMBIGUOUS`).
+- **Dates** (`VALUE=DATE`, all-day) have no zone and are written as dates.
+- **`COMPLETED`, `CREATED`, `DTSTAMP`, `LAST-MODIFIED`** must stay UTC: a value
+  without a zone is read in the zone and written as UTC. The same for a vCard,
+  which has no `TZID`.
+- **DTEND, DUE, EXDATE, RDATE, RECURRENCE-ID and `UNTIL` follow DTSTART**, as
+  always: written in the same call as DTSTART, they are written in the zone
+  too, whatever the key order. Without DTSTART in the call they can only be
+  written in the zone if DTSTART is already in it (or the component has none,
+  like a todo with only `DUE`); next to a DTSTART in UTC, floating or another
+  zone they throw `ZONE_MISMATCH` (`remedy: 'same-call'`) — give DTSTART in the
+  same call, which moves the event into the zone. A property's own `TZID` (an
+  end in another zone than its start) is replaced by the zone.
+- **An end the call does not write moves with DTSTART.** When DTSTART is written
+  in a zone, an existing timed `DTEND` (or a todo's `DUE`) is written in the zone
+  too, at the same distance from the new start: on the wall clock where start
+  and end shared a zone (a Berlin 10:00–11:00 meeting moved to 10:00 New York
+  ends at 11:00 New York), in elapsed time where they did not (a flight: 25
+  hours stay 25 hours, also across a DST change).
+  An end left behind would be read in its old zone — hours off, or before the
+  start.
+- **No end before its start:** in a call with `zone` that writes DTSTART, DTEND
+  or DUE, an end that would lie before the start throws `END_BEFORE_START`
+  (`remedy: 'fix-value'`).
+- **`zone: 'UTC'`** (also `Etc/UTC`, `GMT`, `Zulu`, ...) writes UTC as RFC 5545
+  writes it: with `Z`, without `TZID` or `VTIMEZONE`. A value without a zone is
+  read as UTC.
+- **Moving an existing series into a zone** is a DTSTART write like any other
+  (see [Recurring events and todos](#recurring-events-and-todos)): each
+  occurrence, `EXDATE`, `RDATE`, `UNTIL` and override keeps its place in the
+  series — its distance from DTSTART on the old wall clock — and lands at that
+  distance from the new DTSTART on the zone's wall clock. A weekly 09:00 New
+  York series written with `DTSTART` 15:00 and `zone: 'Europe/Berlin'` becomes a
+  weekly 15:00 Berlin series with every exclusion and override on its week; a
+  weekly `07:00Z` series written with `DTSTART: '...T07:00:00Z'` becomes 09:00
+  Berlin every week, so the occurrences after the October change are 08:00Z,
+  where they were 07:00Z — that is the change asked for. The instants of the old
+  series are not kept: a series in a zone keeps local time, and that is what
+  differs. What a move refuses (a rule that pins the old time, an `UNTIL` at a
+  DST change, ...) is refused here too.
+- **Precedence:** `zone` decides how every date-time is read and written.
+  `floatingTime` (either value) and `absoluteTime: 'as-given'` say something
+  else, so giving them with `zone` throws (`INVALID_FLOATING_TIME`,
+  `INVALID_ABSOLUTE_TIME`); `absoluteTime: 'keep-zone'` agrees and may be given.
+- **The name** is an IANA zone the runtime's time zone data knows
+  (`Europe/Berlin`, `America/New_York`, `Asia/Kolkata`), or a zone the object
+  defines in a `VTIMEZONE` of that `TZID`. A name the runtime lists is spelled
+  as listed (`europe/berlin` is written `Europe/Berlin`); an alias spelled in
+  proper case is kept (`Asia/Kolkata`, `US/Eastern`, even where the runtime
+  links it to `Asia/Calcutta` or `America/New_York`); an alias in other case
+  becomes the name it links to (`us/eastern` is written `America/New_York`), the
+  only spelling the runtime vouches for. Anything else — `Mars/Olympus`, `CEST`,
+  `+01:00` — throws `UNKNOWN_TZID`.
+
+**The generated `VTIMEZONE`.** If the object has no `VTIMEZONE` for the `TZID`,
+one is generated from the runtime's IANA data (Intl) and placed before the
+components (also available on its own as `generateVtimezone`, see
+[Helpers for consumers](#helpers-for-consumers)):
+
+- It starts on 1 January of the year before the earliest value in the zone,
+  with an observance that only states the offset then (ical.js reads every
+  time before a `VTIMEZONE`'s first observance with offset 0).
+- Every run of three or more years in which the zone changes by one yearly rule
+  is a `DAYLIGHT`/`STANDARD` pair with an `RRULE` (`BYDAY=-1SU`, `BYDAY=2SU`,
+  "the first Friday on or after the 23rd" as `BYMONTHDAY=23,...,29;BYDAY=FR`, or
+  Egypt's "Friday after the last Thursday of October", which can be 1 November,
+  as `BYYEARDAY=-67,...,-61;BYDAY=FR`), ended by `UNTIL` where the rule ended.
+  Any other change (a one-year decree) is listed by date (`RDATE`).
+- **The zone's final state comes last.** Outlook and Exchange read a zone's
+  current rule from the `STANDARD` with the latest `DTSTART` and the `DAYLIGHT`
+  with the latest `DTSTART`, each picked on its own (MS-OXCICAL
+  2.1.3.1.1.19.2 and its note 61). So both describe the final state: the
+  current rule as an open `DAYLIGHT`/`STANDARD` pair, which covers an unbounded
+  series; or — where the zone no longer changes, like `America/Sao_Paulo`
+  since 2019 or `Europe/Moscow` since 2014 — the last change as a `STANDARD`
+  and a `DAYLIGHT` with the same offsets at the same `DTSTART`, the way
+  Exchange itself writes a zone without DST (note 65). An abolished DST rule is
+  never the latest of its kind. A zone that never changes has a single
+  `STANDARD` observance.
+- `TZNAME` is the zone's abbreviation where Intl has one (`CET`/`CEST`,
+  `EST`/`EDT`, `IST`), else its offset (`-03`, `+0545`).
+- A zone whose DST follows no yearly rule is listed by date until the time zone
+  data settles into a rule or no change. Of the 418 zones Node 22 knows, four
+  pause DST for Ramadan and are listed to 2087, where the tz database's own
+  list ends: `Africa/Casablanca`, `Africa/El_Aaiun`, `Asia/Gaza`, `Asia/Hebron`
+  (162-213 lines). Every other zone's current rule is an `RRULE`; the median
+  `VTIMEZONE` for a 2026 value is 9 lines, the largest 23.
+- Before it is used, the `VTIMEZONE` is read back and compared with the zone's
+  changes; the tests compare it, read with this library's reader and with
+  ical.js, with Intl for 17 zones (every zone with `VTIMEZONE_ALL_ZONES=1`).
+- The same input gives the same text, and a second write finds the `VTIMEZONE`
+  and adds no other. The zone's changes are cached per zone for the process (a
+  few hundred numbers at most per zone; about 2 MB for every zone at once), and
+  a new range of years only scans the years not yet scanned. A value's last
+  year (an `UNTIL` in 9999, say) scans nothing more: once the zone has settled
+  into its current rule or a last fixed offset, that covers every later year.
+  The first use of a zone in a process takes some 30-60 ms (about 55 ms for
+  the very first, 180-240 ms for the four Ramadan zones), a value back in 1950
+  some 120-200 ms; after that a few ms.
+- It is only added to a `VCALENDAR`: a bare `VEVENT`/`VTODO` gets the `TZID`, and
+  the `VTIMEZONE` comes with the `VCALENDAR` you wrap it in. A `VTIMEZONE` that
+  no value uses any more (after a series moved into another zone) is left in
+  place.
+- A zone on local mean time at the dates given (before standard time, e.g.
+  `Africa/Monrovia` until 1972) had an offset in seconds, which ical.js and other
+  readers cannot hold: such a value throws `UNSUPPORTED_VTIMEZONE`.
+
+**A `VTIMEZONE` the object already has** for the `TZID` is used as it is, and the
+values are converted with it: it is what every other reader of the object goes
+by. While it covers every value in the zone nothing changes. When a write in
+the zone puts a value before its first observance (moving a 2026 meeting to
+2020, say), a `VTIMEZONE` this library generated — recognised by being exactly
+the text it generates — is generated again for the wider range; any other (a
+server's or another client's own) is not rewritten, and the write throws
+`UNSUPPORTED_VTIMEZONE` (`remedy: 'rewrite-object'`).
 
 To validate input before calling `updateFields`, use the same grammar:
 `parseDateValue(value)` returns `{ kind: 'date' | 'utc' | 'floating', jcal }` or
@@ -356,6 +518,8 @@ follow the master's `DTSTART` (see above).
   - The distance is measured on the series' wall clock, so a 09:00 Berlin series
     moved to 10:00 keeps landing on 10:00 across a DST change; moved values are
     written in the new DTSTART's form (its `TZID`, UTC, floating, or a date).
+    Moving a series into a named zone (`zone`) is such a move, onto that zone's
+    wall clock (see [Writing in a named zone](#writing-in-a-named-zone-zone)).
   - An override's own times move on that same wall clock and keep their own
     form: an instance rescheduled to Monday 09:00 Berlin stays at 09:00 when the
     series moves a week across a DST change — also when it is written in UTC,
@@ -457,6 +621,78 @@ follow the master's `DTSTART` (see above).
   since a CalDAV object holds one type (RFC 4791 4.1). Name it explicitly with
   `updateFields(obj, fields, { type: 'vtodo' })` or `seriesMaster(calendar, 'vtodo')`.
 
+## Helpers for consumers
+
+Three pieces the library uses itself, exported for code that reads or builds
+calendar data around `updateFields` (dav-mcp's tools, for one).
+
+**`generateVtimezone(tzid, { from, to? })`** — the `VTIMEZONE` `updateFields`
+adds with `zone`, as iCalendar text (CRLF, no trailing line break), for an IANA
+zone and values from year `from` to year `to` (the current rule covers every
+year after). Same form and guarantees as above. Throws `UNKNOWN_TZID`,
+`INVALID_INPUT` (no pair of integer years) or `UNSUPPORTED_VTIMEZONE`.
+
+```typescript
+const vtimezone = generateVtimezone('Europe/Berlin', { from: 2026 });
+```
+
+**`resolveZone(tzid, source?)` and `resolvePropertyZone(property)`** — UTC and
+wall-clock conversion for a `TZID`, read from the object's `VTIMEZONE` when
+`source` (the object's text, any `ICAL.Component` of it — also from another copy
+of ical.js — or a `VTIMEZONE`) has one, else from the IANA data; `null` for a
+zone that is neither (or a property without `TZID`). Unlike ical.js 2.2's
+`convertToZone`, which is up to an hour off near DST changes
+([ical.js#847](https://github.com/kewisch/ical.js/issues/847)), UTC to local
+is exact, and local to UTC follows RFC 5545 3.3.5: a time shown twice is its
+first occurrence, a skipped one is read with the offset before the change.
+
+```typescript
+const berlin = resolveZone('Europe/Berlin', event.data)!;   // ZoneConverter
+berlin.toWallTime('2026-10-25T01:30:00Z');  // '2026-10-25T02:30:00' (CET, second pass)
+berlin.toInstant('2026-10-25T02:30:00');    // Date 2026-10-25T00:30:00Z (first pass)
+berlin.ambiguity('2026-03-29T02:30:00');    // 'gap'
+berlin.offsetAt(new Date());                // seconds east of UTC
+berlin.source;                              // 'vtimezone' or 'iana'
+```
+
+Instants are a `Date` or a string with `Z`/an offset; wall-clock times are
+`YYYY-MM-DDTHH:MM:SS` without a zone. A value that is neither throws
+`INVALID_VALUE`.
+
+**`expandOccurrences(object, { budget, until, from?, limit?, type? })`** — the
+occurrences of a recurring event, todo or journal whose original start lies in
+`[from, until)`: DTSTART, `RRULE` and `RDATE`, without `EXDATE`s, overrides
+applied, on the series' wall clock (a weekly 09:00 Berlin series stays at 09:00).
+Each occurrence has `recurrenceId`, `start` and `end` (each `{ value, tzid,
+instant }`, `instant` an ISO UTC string or `null` for dates and floating times)
+and `overridden`. An override is a whole component (RFC 5545 3.8.4.4): it
+ends at its own `DTEND`/`DUE`, else after its own `DURATION`, else after the
+master's length, each from its own start. An override moved into the range
+from outside it is not found (selection is by original start; `until` is an
+exclusive end).
+
+It never loops: ical.js tests rule candidates one by one without a bound of its
+own (`FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0` from 1950 is billions of
+candidates before 2026), so every candidate is charged to `budget`, as in
+`updateFields`' own series checks. When it runs out the result says so and
+stops — fail closed: `complete: false, stoppedBy: 'budget'` (with several
+`RRULE`s an earlier occurrence of a later rule may be missing too). `limit`
+(default 1000) stops with `stoppedBy: 'limit'`. Pass the same budget to several
+calls to bound a whole request.
+
+```typescript
+const budget = createRecurrenceBudget();           // 150000 units, about 0.15 s of ical.js work
+for (const object of objects) {
+  const { occurrences, complete } = expandOccurrences(object.data,
+    { budget, from: '2026-10-01T00:00:00Z', until: '2026-11-01T00:00:00Z' });
+  if (!complete) { /* say the list is incomplete; do not present it as the whole series */ }
+}
+```
+
+For an all-day or floating series, `from` and `until` are taken as wall clock
+(their date and time fields). Throws as `updateFields` does for an object that
+does not parse or holds no such component, and `INVALID_INPUT` without a budget.
+
 ## Errors
 
 Every refusal of `updateFields`, `seriesMaster` and `parseDateValue` throws an
@@ -514,26 +750,27 @@ unreadable one is refused (`INVALID_RULE`) rather than rewritten.
 
 | Code | When | Remedy |
 |---|---|---|
-| `INVALID_INPUT` | an argument has the wrong type: `calendarObject` not a string or `{ data: string }`, `fields` or `options` not an object, a non-string to `parseDateValue`, several top-level components in one text | `fix-value` |
+| `INVALID_INPUT` | an argument has the wrong type: `calendarObject` not a string or `{ data: string }`, `fields` or `options` not an object, `options.zone` not a non-empty string, a non-string to `parseDateValue`, several top-level components in one text | `fix-value` |
 | `INVALID_ICALENDAR` | the iCalendar or vCard text does not parse (`cause`: the ical.js error) | `rewrite-object` |
 | `INVALID_TYPE` | `options.type` (or `seriesMaster`'s type) is not `vevent`, `vtodo` or `vjournal` | `fix-value` |
-| `INVALID_FLOATING_TIME` | `options.floatingTime` is not `keep` or `local` | `fix-value` |
-| `INVALID_ABSOLUTE_TIME` | `options.absoluteTime` is not `as-given` or `keep-zone` | `fix-value` |
+| `INVALID_FLOATING_TIME` | `options.floatingTime` is not `keep` or `local`, or is given together with `zone` | `fix-value` |
+| `INVALID_ABSOLUTE_TIME` | `options.absoluteTime` is not `as-given` or `keep-zone`, or is `as-given` together with `zone` | `fix-value` |
 | `COMPONENT_NOT_FOUND` | the VCALENDAR holds no component of the type asked for (the message names what it holds) | `fix-value` |
 | `WRONG_OBJECT_KIND` | `type` given for a vCard, or for a bare component of another type | `none` (vCard), `fix-value` (bare component) |
 | `NO_MASTER` | several instances with `RECURRENCE-ID` and no master, so which one is meant cannot be told | `rewrite-object` |
 | `INVALID_VALUE` | a date or date-time value (also a rule's `UNTIL`) does not parse, names no real date, time or offset, or is no string; or such a value already in the object | `fix-value`; `rewrite-object` or `same-call` for a value in the object, as the message says |
 | `VALUE_TYPE_MISMATCH` | a date where a date-time is needed or the other way round: next to DTSTART, on a property that takes no date, or mixed in one list | `fix-value` |
-| `ZONE_MISMATCH` | a value lacks the zone it needs (next to a UTC DTSTART, on `DTSTAMP`/`CREATED`/...), has one it must not have (`UNTIL` of a floating series), or a list mixes both | `fix-value`; for a value in the object `same-call` where a DTSTART move would carry it, else `rewrite-object` |
-| `UNKNOWN_TZID` | a TZID whose rules are needed (a time converted to or from it, `absoluteTime: 'keep-zone'`) has no `VTIMEZONE` in the object and is no IANA zone — the same code whether a move or a new rule needs it | `fix-value` for a value given; for a zone in the object `same-call` where a DTSTART move would carry the value, else `rewrite-object` |
-| `UNSUPPORTED_VTIMEZONE` | a `VTIMEZONE` in the object repeats more often than monthly, or its rule cannot be read | `rewrite-object` |
+| `ZONE_MISMATCH` | a value lacks the zone it needs (next to a UTC DTSTART, on `DTSTAMP`/`CREATED`/...), has one it must not have (`UNTIL` of a floating series), or a list mixes both; or, under `zone`, a value that follows DTSTART (DTEND, DUE, EXDATE, RDATE, `UNTIL`) while DTSTART is in UTC, floating or another zone and not in the call | `fix-value`; `same-call` under `zone` (give DTSTART too); for a value in the object `same-call` where a DTSTART move would carry it, else `rewrite-object` |
+| `UNKNOWN_TZID` | a TZID whose rules are needed (a time converted to or from it, `absoluteTime: 'keep-zone'`) has no `VTIMEZONE` in the object and is no IANA zone — the same code whether a move or a new rule needs it; or `options.zone` is neither | `fix-value` for a value or `zone` given; for a zone in the object `same-call` where a DTSTART move would carry the value, else `rewrite-object` |
+| `UNSUPPORTED_VTIMEZONE` | a `VTIMEZONE` in the object repeats more often than monthly, or its rule cannot be read; under `zone`, a value before the first observance of a `VTIMEZONE` the library did not generate; or a value in the zone's local mean time, whose offset in seconds no `VTIMEZONE` can hold | `rewrite-object`; `fix-value` for local mean time |
 | `UNKNOWN_RULE_PART` | a rule given has a part RFC 5545 3.3.10 does not define, `RSCALE`/`SKIP`, or an `RRULE:` prefix | `fix-value` |
 | `DUPLICATE_RULE_PART` | a rule given names a part twice | `fix-value` |
 | `INVALID_RULE` | a rule given is otherwise invalid: no `FREQ`, a value out of range, `COUNT` with `UNTIL`, another combination RFC 5545 rules out; or a rule in the object cannot be read | `fix-value`; `rewrite-object` for a rule in the object |
+| `END_BEFORE_START` | under `zone`, DTEND or DUE would lie before DTSTART | `fix-value` |
 | `RECURRENCE_ID_ON_MASTER` | `RECURRENCE-ID` written on the series master | `rewrite-object` |
 | `SERIES_MOVE_REFUSED` | a DTSTART move the series cannot follow exactly: the rule pins the old start (`suggestion` holds the rule to give, when there is one), or an existing `UNTIL`, `EXDATE` or `RDATE` cannot move with it; or an override cannot, or the switch to all-day would change what a value names | `same-call`; `rewrite-object` for an override or the switch to all-day |
 | `ORPHANED_EXCEPTIONS` | a new `RRULE` or `RDATE` leaves an override or `EXDATE` naming no occurrence | `same-call` |
-| `DST_AMBIGUOUS` | a value of the series sits at a DST change, where the wall clock does not name one instant; or, under `absoluteTime: 'keep-zone'`, an instant falls in the second pass of the repeated hour | `same-call` for `UNTIL`; `rewrite-object` for a value sharing its instant with a skipped occurrence, or an override; `fix-value` under `keep-zone` |
+| `DST_AMBIGUOUS` | a value of the series sits at a DST change, where the wall clock does not name one instant; or, under `absoluteTime: 'keep-zone'` or `zone`, an instant falls in the second pass of the repeated hour | `same-call` for `UNTIL`; `rewrite-object` for a value sharing its instant with a skipped occurrence, or an override; `fix-value` under `keep-zone` and `zone` |
 | `CHECK_LIMIT_EXCEEDED` | the series is too sparse, or the override or `EXDATE` furthest ahead too far, to check within the work limit | `rewrite-object` on a new rule; `same-call` on a move |
 | `SERIES_UNVERIFIABLE` | whether the overrides and `EXDATE`s still name occurrences cannot be checked: the series has no DTSTART | `rewrite-object` |
 
@@ -580,9 +817,16 @@ These limitations are intentional and documented in GitHub issues:
    - `VCARD.ADR` has 7 components
    - Current: May not handle component structure correctly
 
-3. **Timezone handling** ([#4](https://github.com/PhilflowIO/tsdav-utils/issues))
-   - Zoned values are written as UTC; named zones (`TZID` + `VTIMEZONE`) are not produced
-   - Workaround: build a TZID-based property with ical.js directly
+3. **Time zones** ([#4](https://github.com/PhilflowIO/tsdav-utils/issues/4))
+   - Date-times are written in a named zone with `TZID` and a generated
+     `VTIMEZONE` (`zone`, see [Writing in a named zone](#writing-in-a-named-zone-zone));
+     by default a value with a zone is still written as UTC, so pass `zone` for
+     anything recurring or read in local time
+   - The time zone data is the runtime's (Intl): a generated `VTIMEZONE` follows
+     the tz database version Node ships, and an older runtime writes an older rule
+   - A `VTIMEZONE` already in the object is used as it is, even where it disagrees
+     with the IANA data; one this library did not generate is never rewritten, so
+     a value before its start is refused (see the generated `VTIMEZONE` above)
 
 4. **Recurrence expansion**
    - An `RRULE` is validated and written (see [Recurrence rules](#recurrence-rules)),
@@ -602,7 +846,8 @@ These limitations are intentional and documented in GitHub issues:
 ### ⚠️ Consider Alternatives If...
 
 - You need high-level scheduling logic → Use a full calendar library
-- You need complex timezone handling → Use a datetime library + ical.js
+- You need to convert between zones for display, or to compute with time zones
+  outside an iCalendar object → Use a datetime library
 - You need recurrence expansion → Use ical.js directly
 - You need validation → Add validation in your application layer
 

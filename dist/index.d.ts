@@ -46,6 +46,15 @@ interface UpdateFieldsOptions {
      */
     absoluteTime?: AbsoluteTime;
     /**
+     * An IANA time zone ("Europe/Berlin") to write the call's date-times in:
+     * a value with Z or an offset becomes its wall-clock time there, one without
+     * a zone is read as wall clock there, and both are written with that TZID;
+     * the VCALENDAR gets a VTIMEZONE for it if it has none. Replaces
+     * floatingTime and absoluteTime ("keep-zone" may be given, it agrees). See
+     * "Writing in a named zone" in the README.
+     */
+    zone?: string;
+    /**
      * The component type to write into. Without it the first type present is
      * taken, VEVENT before VTODO before VJOURNAL (see seriesMaster).
      */
@@ -95,6 +104,9 @@ declare function seriesMaster(calendar: ICAL.Component, type?: ComponentType): I
  * @param options.absoluteTime - how a date-time with a zone is written where
  *   the property or its DTSTART has a TZID: as UTC ("as-given", the default) or
  *   converted into that TZID, which stays ("keep-zone")
+ * @param options.zone - an IANA zone ("Europe/Berlin") to write the call's
+ *   date-times in, with that TZID, adding a VTIMEZONE when the VCALENDAR has
+ *   none; replaces floatingTime and absoluteTime (see the README)
  * @param options.type - the component type to write into ("vevent", "vtodo",
  *   "vjournal"); by default the first type present, in that order. Throws if
  *   the object holds no component of that type, or is a vCard
@@ -153,7 +165,7 @@ declare function parseDateValue(raw: string): DateValue;
  *
  * See "Errors" in the README for when each code occurs.
  */
-declare const CODES: readonly ["INVALID_INPUT", "INVALID_ICALENDAR", "INVALID_TYPE", "INVALID_FLOATING_TIME", "INVALID_ABSOLUTE_TIME", "COMPONENT_NOT_FOUND", "WRONG_OBJECT_KIND", "NO_MASTER", "INVALID_VALUE", "VALUE_TYPE_MISMATCH", "ZONE_MISMATCH", "UNKNOWN_TZID", "UNSUPPORTED_VTIMEZONE", "UNKNOWN_RULE_PART", "DUPLICATE_RULE_PART", "INVALID_RULE", "RECURRENCE_ID_ON_MASTER", "SERIES_MOVE_REFUSED", "ORPHANED_EXCEPTIONS", "DST_AMBIGUOUS", "CHECK_LIMIT_EXCEEDED", "SERIES_UNVERIFIABLE"];
+declare const CODES: readonly ["INVALID_INPUT", "INVALID_ICALENDAR", "INVALID_TYPE", "INVALID_FLOATING_TIME", "INVALID_ABSOLUTE_TIME", "COMPONENT_NOT_FOUND", "WRONG_OBJECT_KIND", "NO_MASTER", "INVALID_VALUE", "VALUE_TYPE_MISMATCH", "ZONE_MISMATCH", "UNKNOWN_TZID", "UNSUPPORTED_VTIMEZONE", "UNKNOWN_RULE_PART", "DUPLICATE_RULE_PART", "INVALID_RULE", "END_BEFORE_START", "RECURRENCE_ID_ON_MASTER", "SERIES_MOVE_REFUSED", "ORPHANED_EXCEPTIONS", "DST_AMBIGUOUS", "CHECK_LIMIT_EXCEEDED", "SERIES_UNVERIFIABLE"];
 /** Every code, frozen */
 declare const UPDATE_FIELDS_ERROR_CODES: typeof CODES;
 /** A stable reason for a refusal; see UPDATE_FIELDS_ERROR_CODES */
@@ -217,4 +229,147 @@ declare function isUpdateFieldsError<C extends UpdateFieldsErrorCode = UpdateFie
     code: C;
 };
 
-export { type AbsoluteTime, type CalendarObjectInput, type ComponentType, type DateValue, type FieldUpdates, type FloatingTime, UPDATE_FIELDS_ERROR_CODES, UpdateFieldsError, type UpdateFieldsErrorCode, type UpdateFieldsErrorDetails, type UpdateFieldsOptions, type UpdateFieldsRemedy, isUpdateFieldsError, parseDateValue, seriesMaster, updateFields };
+/** The range of years a generated VTIMEZONE is asked to cover */
+interface VtimezoneRange {
+    /** the earliest year a value lies in; the VTIMEZONE starts on 1 January of the year before */
+    from: number;
+    /** the latest year a value lies in (default `from`); the zone's current rule covers every year after */
+    to?: number;
+}
+/**
+ * A VTIMEZONE for an IANA zone, as iCalendar text (CRLF, no trailing line
+ * break), covering the years given and every year after: the same text
+ * updateFields adds with `zone`. Deterministic for a given runtime (the time
+ * zone data is Intl's).
+ *
+ * @throws {UpdateFieldsError} UNKNOWN_TZID for a name that is no IANA zone,
+ *   INVALID_INPUT for a range that is no pair of integer years,
+ *   UNSUPPORTED_VTIMEZONE for years on local mean time
+ */
+declare function generateVtimezone(tzid: string, range: VtimezoneRange): string;
+
+/** A wall-clock time without zone, as "YYYY-MM-DDTHH:MM:SS" */
+type WallTime = string;
+/** Conversions between UTC and the wall clock of one zone */
+interface ZoneConverter {
+    /** the TZID */
+    readonly tzid: string;
+    /** where the rules come from: the object's VTIMEZONE, or the runtime's IANA data */
+    readonly source: 'vtimezone' | 'iana';
+    /** the zone's UTC offset at an instant, in seconds east of UTC */
+    offsetAt(instant: Date | string): number;
+    /** the wall-clock time of an instant in the zone */
+    toWallTime(instant: Date | string): WallTime;
+    /**
+     * The instant of a wall-clock time, as RFC 5545 3.3.5 reads it: a time a DST
+     * change shows twice is its first occurrence, one it skips is read with the
+     * offset before the change (02:30 in a 02:00-03:00 gap is 03:30)
+     */
+    toInstant(wallTime: WallTime): Date;
+    /** whether a DST change skips the wall-clock time ("gap") or shows it twice ("overlap") */
+    ambiguity(wallTime: WallTime): 'gap' | 'overlap' | null;
+}
+/** Anything that holds the object: its text, or any ICAL.Component of it */
+type ZoneSource = string | ICAL.Component;
+/**
+ * The conversions of a TZID: by the object's VTIMEZONE of that TZID when
+ * `source` (the object's text, or any component of it, or a VTIMEZONE) has
+ * one, else by the IANA zone of that name, whose `tzid` is then spelled as
+ * updateFields writes it ("europe/berlin" is "Europe/Berlin"). Null when it
+ * is neither.
+ *
+ * @throws {UpdateFieldsError} INVALID_ICALENDAR for a text that does not parse;
+ *   UNSUPPORTED_VTIMEZONE (on a conversion) for a VTIMEZONE whose rules
+ *   cannot be read; INVALID_VALUE for an instant or wall-clock time that does
+ *   not parse
+ */
+declare function resolveZone(tzid: string, source?: ZoneSource): ZoneConverter | null;
+/**
+ * The conversions of the zone a date-time property is written in (its TZID),
+ * read against the object the property belongs to; null when it has no TZID
+ * (UTC, floating, a date) or the TZID is unknown.
+ */
+declare function resolvePropertyZone(property: ICAL.Property): ZoneConverter | null;
+
+/**
+ * Work left for rule expansion, in the units of WORK_BUDGET. Spent as ical.js
+ * tests candidates; one object can be shared by several expansions, so a
+ * caller bounds all of them together.
+ */
+interface RecurrenceBudget {
+    remaining: number;
+}
+
+/**
+ * A budget for expandOccurrences, in work units (about a microsecond of
+ * ical.js work each; the default is what one updateFields series check may
+ * spend). Pass the same object to several calls to bound them together.
+ */
+declare function createRecurrenceBudget(units?: number): RecurrenceBudget;
+/** One start or end of an occurrence */
+interface OccurrenceTime {
+    /**
+     * The value as written in the object's form: a date "2026-10-05", a UTC
+     * date-time "2026-10-05T07:00:00Z", or a wall-clock time "2026-10-05T09:00:00"
+     * (in `tzid`, or floating when there is none)
+     */
+    value: string;
+    /** the TZID the wall-clock time is in, or null */
+    tzid: string | null;
+    /** the instant as ISO 8601 UTC, or null for a date or a floating time (no zone to place it) */
+    instant: string | null;
+}
+interface Occurrence {
+    /** the occurrence's original start, as a RECURRENCE-ID names it */
+    recurrenceId: OccurrenceTime;
+    /** where it starts: the override's DTSTART for an overridden occurrence */
+    start: OccurrenceTime;
+    /** where it ends (DTEND, DUE, or DTSTART plus DURATION), or null when the component gives no end */
+    end: OccurrenceTime | null;
+    /** whether an override component (same UID, this RECURRENCE-ID) replaces it */
+    overridden: boolean;
+}
+interface ExpansionResult {
+    /** the occurrences found, by original start */
+    occurrences: Occurrence[];
+    /** whether every occurrence in the range is in the list */
+    complete: boolean;
+    /**
+     * Why the list stops early: "budget" — the budget ran out (with several
+     * RRULEs an earlier occurrence of a later rule may be missing too); "limit"
+     * — `limit` occurrences were found. Null when complete.
+     */
+    stoppedBy: 'budget' | 'limit' | null;
+}
+interface ExpandOptions {
+    /** the work budget to spend (see createRecurrenceBudget); shared across calls if the same object is passed */
+    budget: RecurrenceBudget;
+    /** the end of the range, exclusive: occurrences whose original start lies at or after this are not returned */
+    until: Date | string;
+    /** occurrences whose original start lies before this are skipped (default: all from DTSTART) */
+    from?: Date | string;
+    /** at most this many occurrences (default 1000) */
+    limit?: number;
+    /** the component type, as for updateFields */
+    type?: ComponentType;
+}
+/**
+ * The occurrences of a recurring event, todo or journal in a range, bounded
+ * by a work budget: DTSTART, RRULE and RDATE, without EXDATEs, with overrides
+ * (same UID, RECURRENCE-ID) applied. Occurrences are selected by their
+ * original start; an override moved into the range from outside it is not
+ * found. Times are read with the object's VTIMEZONEs (IANA data as fallback),
+ * on the series' wall clock, so a weekly 09:00 Berlin series stays at 09:00.
+ *
+ * Never loops: every candidate ical.js tests is charged to `budget`, and when
+ * it runs out the result says so (complete false, stoppedBy "budget") — fail
+ * closed: an incomplete list must not be taken for the whole series.
+ *
+ * @throws {UpdateFieldsError} for an object that does not parse or holds no
+ *   such component (as updateFields), a range bound that does not parse, a
+ *   zone that cannot be read, or a value or rule in the object that cannot be
+ *   read; a plain Error for a failure of the library
+ */
+declare function expandOccurrences(calendarObject: CalendarObjectInput | ICAL.Component, options: ExpandOptions): ExpansionResult;
+
+export { type AbsoluteTime, type CalendarObjectInput, type ComponentType, type DateValue, type ExpandOptions, type ExpansionResult, type FieldUpdates, type FloatingTime, type Occurrence, type OccurrenceTime, type RecurrenceBudget, UPDATE_FIELDS_ERROR_CODES, UpdateFieldsError, type UpdateFieldsErrorCode, type UpdateFieldsErrorDetails, type UpdateFieldsOptions, type UpdateFieldsRemedy, type VtimezoneRange, type WallTime, type ZoneConverter, type ZoneSource, createRecurrenceBudget, expandOccurrences, generateVtimezone, isUpdateFieldsError, parseDateValue, resolvePropertyZone, resolveZone, seriesMaster, updateFields };
