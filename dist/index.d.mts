@@ -138,7 +138,7 @@ type DateValue = {
  * wall-clock time here; setDateValue decides what it means.
  *
  * @throws {UpdateFieldsError} INVALID_VALUE, naming the accepted forms, when the
- *   value is none of them
+ *   value is none of them; INVALID_INPUT when it is no string
  */
 declare function parseDateValue(raw: string): DateValue;
 
@@ -153,10 +153,24 @@ declare function parseDateValue(raw: string): DateValue;
  *
  * See "Errors" in the README for when each code occurs.
  */
-declare const UPDATE_FIELDS_ERROR_CODES: readonly ["INVALID_INPUT", "INVALID_ICALENDAR", "INVALID_TYPE", "INVALID_FLOATING_TIME", "INVALID_ABSOLUTE_TIME", "COMPONENT_NOT_FOUND", "NO_MASTER", "INVALID_VALUE", "VALUE_TYPE_MISMATCH", "ZONE_MISMATCH", "UNKNOWN_TZID", "UNSUPPORTED_VTIMEZONE", "UNKNOWN_RULE_PART", "DUPLICATE_RULE_PART", "INVALID_RULE", "RECURRENCE_ID_ON_MASTER", "SERIES_MOVE_REFUSED", "ORPHANS_OVERRIDES", "DST_AMBIGUOUS", "CHECK_LIMIT_EXCEEDED", "SERIES_UNVERIFIABLE"];
+declare const CODES: readonly ["INVALID_INPUT", "INVALID_ICALENDAR", "INVALID_TYPE", "INVALID_FLOATING_TIME", "INVALID_ABSOLUTE_TIME", "COMPONENT_NOT_FOUND", "WRONG_OBJECT_KIND", "NO_MASTER", "INVALID_VALUE", "VALUE_TYPE_MISMATCH", "ZONE_MISMATCH", "UNKNOWN_TZID", "UNSUPPORTED_VTIMEZONE", "UNKNOWN_RULE_PART", "DUPLICATE_RULE_PART", "INVALID_RULE", "RECURRENCE_ID_ON_MASTER", "SERIES_MOVE_REFUSED", "ORPHANED_EXCEPTIONS", "DST_AMBIGUOUS", "CHECK_LIMIT_EXCEEDED", "SERIES_UNVERIFIABLE"];
+/** Every code, frozen */
+declare const UPDATE_FIELDS_ERROR_CODES: typeof CODES;
 /** A stable reason for a refusal; see UPDATE_FIELDS_ERROR_CODES */
-type UpdateFieldsErrorCode = typeof UPDATE_FIELDS_ERROR_CODES[number];
+type UpdateFieldsErrorCode = typeof CODES[number];
+/**
+ * What the caller can do about a refusal, as the message says it:
+ * - "fix-value": a value or option given is malformed or does not fit; correct it
+ * - "same-call": give the named properties (RRULE, UNTIL, EXDATE, RDATE, ...)
+ *   in the same updateFields call
+ * - "rewrite-object": the change cannot be made as field writes (or the object
+ *   itself is broken); replace the whole iCalendar object
+ * - "none": nothing in this call helps (a vCard handed to an iCalendar write)
+ */
+type UpdateFieldsRemedy = 'fix-value' | 'same-call' | 'rewrite-object' | 'none';
 interface UpdateFieldsErrorDetails {
+    /** what the caller can do; see UpdateFieldsRemedy */
+    remedy: UpdateFieldsRemedy;
     /** the property the refusal is about, upper-cased ("DTEND", "RRULE") */
     property?: string;
     /**
@@ -164,6 +178,8 @@ interface UpdateFieldsErrorDetails {
      * SERIES_MOVE_REFUSED the rule to give with the new start ("FREQ=WEEKLY;BYDAY=TU")
      */
     suggestion?: string;
+    /** the refusal this one reports with a longer message */
+    cause?: unknown;
 }
 /**
  * A refusal of updateFields, seriesMaster or parseDateValue: the call asked
@@ -172,15 +188,33 @@ interface UpdateFieldsErrorDetails {
  */
 declare class UpdateFieldsError extends Error {
     readonly code: UpdateFieldsErrorCode;
+    readonly remedy: UpdateFieldsRemedy;
     readonly property?: string;
     readonly suggestion?: string;
-    constructor(code: UpdateFieldsErrorCode, message: string, details?: UpdateFieldsErrorDetails);
+    readonly cause?: unknown;
+    constructor(code: UpdateFieldsErrorCode, message: string, details: UpdateFieldsErrorDetails);
+    /**
+     * The refusal as plain data, for a log or a response body (JSON.stringify
+     * of an Error otherwise drops the message).
+     */
+    toJSON(): {
+        name: string;
+        code: UpdateFieldsErrorCode;
+        message: string;
+        remedy: UpdateFieldsRemedy;
+        property?: string;
+        suggestion?: string;
+    };
 }
 /**
- * Whether an error is an UpdateFieldsError, optionally with one code. Checked
- * by name and code rather than instanceof, so it also holds when the ESM and
- * the CommonJS build of this package are both loaded.
+ * Whether an error is an UpdateFieldsError, optionally with one code (and then
+ * typed with that code). Checked by name and code rather than instanceof, so it
+ * also holds when the ESM and the CommonJS build of this package are both
+ * loaded. It needs the error as thrown: a copy made by structuredClone or
+ * postMessage keeps only message and stack, not name and code.
  */
-declare function isUpdateFieldsError(error: unknown, code?: UpdateFieldsErrorCode): error is UpdateFieldsError;
+declare function isUpdateFieldsError<C extends UpdateFieldsErrorCode = UpdateFieldsErrorCode>(error: unknown, code?: C): error is UpdateFieldsError & {
+    code: C;
+};
 
-export { type AbsoluteTime, type CalendarObjectInput, type ComponentType, type DateValue, type FieldUpdates, type FloatingTime, UPDATE_FIELDS_ERROR_CODES, UpdateFieldsError, type UpdateFieldsErrorCode, type UpdateFieldsErrorDetails, type UpdateFieldsOptions, isUpdateFieldsError, parseDateValue, seriesMaster, updateFields };
+export { type AbsoluteTime, type CalendarObjectInput, type ComponentType, type DateValue, type FieldUpdates, type FloatingTime, UPDATE_FIELDS_ERROR_CODES, UpdateFieldsError, type UpdateFieldsErrorCode, type UpdateFieldsErrorDetails, type UpdateFieldsOptions, type UpdateFieldsRemedy, isUpdateFieldsError, parseDateValue, seriesMaster, updateFields };

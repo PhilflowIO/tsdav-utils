@@ -39,6 +39,10 @@ const TYPED = new Set(['date-time', 'date', 'timestamp']);
  */
 const UTC_ONLY = new Set(['completed', 'created', 'dtstamp', 'last-modified']);
 
+/** A refusal of a value the caller gave: correcting it is the remedy */
+const refuse = (code: UpdateFieldsErrorCode, message: string, property?: string) =>
+  new UpdateFieldsError(code, message, { remedy: 'fix-value', property });
+
 const DATE_TIME_FORMS =
   '"2026-10-26T18:00:00Z", "2026-10-26T14:00:00-04:00", "20261026T180000Z" ' +
   'or "2026-10-26T18:00:00" (no zone; seconds optional)';
@@ -95,7 +99,7 @@ function assertRealDateTime(raw: string, y: number, mo: number, d: number, h = 0
     t.getUTCFullYear() !== y || t.getUTCMonth() !== mo - 1 || t.getUTCDate() !== d ||
     h > 23 || mi > 59 || s > 60
   ) {
-    throw new UpdateFieldsError('INVALID_VALUE', `"${raw}" is not a valid date or time`);
+    throw refuse('INVALID_VALUE', `"${raw}" is not a valid date or time`);
   }
 }
 
@@ -114,9 +118,12 @@ function toUtcJcal(date: Date): string {
  * wall-clock time here; setDateValue decides what it means.
  *
  * @throws {UpdateFieldsError} INVALID_VALUE, naming the accepted forms, when the
- *   value is none of them
+ *   value is none of them; INVALID_INPUT when it is no string
  */
 export function parseDateValue(raw: string): DateValue {
+  if (typeof raw !== 'string') {
+    throw refuse('INVALID_INPUT', `Invalid input: the value must be a string, not ${raw === null ? 'null' : typeof raw}`);
+  }
   const value = raw.trim();
   let m: RegExpExecArray | null;
 
@@ -128,7 +135,7 @@ export function parseDateValue(raw: string): DateValue {
 
   m = DATE_TIME_EXTENDED.exec(value) || DATE_TIME_BASIC.exec(value);
   if (!m) {
-    throw new UpdateFieldsError('INVALID_VALUE', `"${raw}" is not a date or date-time. ${ACCEPTED_FORMS}`);
+    throw refuse('INVALID_VALUE', `"${raw}" is not a date or date-time. ${ACCEPTED_FORMS}`);
   }
 
   const [y, mo, d, h, mi] = [1, 2, 3, 4, 5].map((i) => Number(m![i]));
@@ -146,7 +153,7 @@ export function parseDateValue(raw: string): DateValue {
       const hours = Number(digits.slice(0, 2));
       const minutes = Number(digits.slice(2, 4) || 0);
       if (hours > 23 || minutes > 59) {
-        throw new UpdateFieldsError('INVALID_VALUE', `"${raw}" has an invalid UTC offset`);
+        throw refuse('INVALID_VALUE', `"${raw}" has an invalid UTC offset`);
       }
       ms -= sign * (hours * 60 + minutes) * 60000;
     }
@@ -261,9 +268,8 @@ export function frameOf(component: ICAL.Component): Anchor | null {
 function wallInZone(component: ICAL.Component, upper: string, tzid: string, value: DateValue): DateValue {
   const zone = zoneOf(component, tzid);
   if (!zone) {
-    throw new UpdateFieldsError('UNKNOWN_TZID', `${upper}: ${unknownZone(tzid)}, so the instant cannot be ` +
-      'written as its wall-clock time there: give a time without a zone, or leave absoluteTime "as-given"',
-    { property: upper });
+    throw refuse('UNKNOWN_TZID', `${upper}: ${unknownZone(tzid)}, so the instant cannot be ` +
+      'written as its wall-clock time there: give a time without a zone, or leave absoluteTime "as-given"', upper);
   }
   const m = /^(\d{4,})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/.exec(value.jcal)!;
   const utc = wallOf(...([1, 2, 3, 4, 5, 6].map((i) => Number(m[i])) as [number, number, number, number, number, number]));
@@ -271,10 +277,10 @@ function wallInZone(component: ICAL.Component, upper: string, tzid: string, valu
   const f = fieldsOf(wall);
   const jcal = `${pad(f.year, 4)}-${pad(f.month)}-${pad(f.day)}T${pad(f.hour)}:${pad(f.minute)}:${pad(f.second)}`;
   if (zone.toUtc(wall) !== utc) {
-    throw new UpdateFieldsError('DST_AMBIGUOUS', `${upper}: ${value.jcal.replace(/[-:]/g, '')} is ` +
+    throw refuse('DST_AMBIGUOUS', `${upper}: ${value.jcal.replace(/[-:]/g, '')} is ` +
       `${jcal.replace(/[-:]/g, '')} in "${tzid}", in the second pass of the hour the DST change shows twice, ` +
       'where that wall-clock time reads as the first pass: give the time in UTC with absoluteTime "as-given", ' +
-      'or another time', { property: upper });
+      'or another time', upper);
   }
   return { kind: 'floating', jcal, local: new Date(utc * 1000) };
 }
@@ -326,17 +332,15 @@ export function setDateValue(
     const parts = shape.multiValue ? raw.split(',').filter((part) => part.trim() !== '') : [raw];
     parsed = (parts.length ? parts : [raw]).map(parseDateValue);
   } catch (error) {
-    throw wrapped(error, 'INVALID_VALUE', `${upper}: ${(error as Error).message}`, { property: upper });
+    throw wrapped(error, `${upper}: ${(error as Error).message}`, { property: upper });
   }
 
   if (new Set(parsed.map((p) => p.kind === 'date')).size > 1) {
-    throw new UpdateFieldsError('VALUE_TYPE_MISMATCH', `${upper} mixes dates and date-times; all values must be one or the other`,
-      { property: upper });
+    throw refuse('VALUE_TYPE_MISMATCH', `${upper} mixes dates and date-times; all values must be one or the other`, upper);
   }
   const isDate = parsed[0].kind === 'date';
   if (isDate && !shape.allowedTypes.includes('date')) {
-    throw new UpdateFieldsError('VALUE_TYPE_MISMATCH', `${upper} needs a date-time, not a date. Accepted forms: ${DATE_TIME_FORMS}`,
-      { property: upper });
+    throw refuse('VALUE_TYPE_MISMATCH', `${upper} needs a date-time, not a date. Accepted forms: ${DATE_TIME_FORMS}`, upper);
   }
 
   const existing = component.getFirstProperty(lower);
@@ -347,12 +351,10 @@ export function setDateValue(
     ? 'otherwise it names no occurrence of the series'
     : 'RFC 5545 requires the same value type';
   if (anchor?.form === 'date' && !isDate) {
-    throw new UpdateFieldsError('VALUE_TYPE_MISMATCH', `${upper} must be a date: DTSTART is a date (all-day), and ${why}`,
-      { property: upper });
+    throw refuse('VALUE_TYPE_MISMATCH', `${upper} must be a date: DTSTART is a date (all-day), and ${why}`, upper);
   }
   if (anchor && anchor.form !== 'date' && isDate) {
-    throw new UpdateFieldsError('VALUE_TYPE_MISMATCH', `${upper} needs a time: DTSTART has one, and ${why}`,
-      { property: upper });
+    throw refuse('VALUE_TYPE_MISMATCH', `${upper} needs a time: DTSTART has one, and ${why}`, upper);
   }
 
   // The zone a wall-clock value is read in: the property's own TZID, else
@@ -379,16 +381,15 @@ export function setDateValue(
     : 'floating';
 
   if (floating && wallClock === null) {
-    throw new UpdateFieldsError('ZONE_MISMATCH', UTC_ONLY.has(lower)
+    throw refuse('ZONE_MISMATCH', UTC_ONLY.has(lower)
       ? `${upper} must be in UTC (RFC 5545): give a zone, e.g. "2026-10-26T18:00:00Z"`
-      : `${upper} has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"`,
-      { property: upper });
+      : `${upper} has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"`, upper);
   }
   // One line has one zone: wall-clock values that stay wall-clock (in a
   // TZID, or floating) cannot share it with UTC values
   if (floating && wallClock !== 'utc' && parsed.some((p) => p.kind === 'utc')) {
-    throw new UpdateFieldsError('ZONE_MISMATCH',
-      `${upper} mixes values with and without a zone; give all of them a zone, or none`, { property: upper });
+    throw refuse('ZONE_MISMATCH',
+      `${upper} mixes values with and without a zone; give all of them a zone, or none`, upper);
   }
 
   const tzid = wallClock === 'tzid' ? zone : null;
@@ -502,49 +503,49 @@ function parseRuleParts(raw: string): Map<string, string> {
     const check = RULE_PARTS[name];
     if (!check) {
       if (name === 'RSCALE' || name === 'SKIP') {
-        throw new UpdateFieldsError('UNKNOWN_RULE_PART', 'RSCALE/SKIP (RFC 7529) are not supported: ical.js cannot write them without losing them');
+        throw refuse('UNKNOWN_RULE_PART', 'RSCALE/SKIP (RFC 7529) are not supported: ical.js cannot write them without losing them');
       }
       const colon = name.indexOf(':');
       if (colon >= 0) {
         // "RRULE:FREQ=DAILY": the property line, not the value
-        throw new UpdateFieldsError('UNKNOWN_RULE_PART', `"${part.trim()}" is not a rule part: drop the "${name.slice(0, colon + 1)}" ` +
+        throw refuse('UNKNOWN_RULE_PART', `"${part.trim()}" is not a rule part: drop the "${name.slice(0, colon + 1)}" ` +
           `prefix and give only the rule, e.g. "${part.trim().slice(colon + 1)}"`);
       }
-      throw new UpdateFieldsError('UNKNOWN_RULE_PART', `"${part.trim()}" is not a rule part. ` +
+      throw refuse('UNKNOWN_RULE_PART', `"${part.trim()}" is not a rule part. ` +
         `RFC 5545 defines ${Object.keys(RULE_PARTS).join(', ')} (e.g. "FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10")`);
     }
     if (parts.has(name)) {
-      throw new UpdateFieldsError('DUPLICATE_RULE_PART', `${name} is given twice; each rule part may occur once`);
+      throw refuse('DUPLICATE_RULE_PART', `${name} is given twice; each rule part may occur once`);
     }
     if (value === '') {
-      throw new UpdateFieldsError('INVALID_RULE', `${name} has no value`);
+      throw refuse('INVALID_RULE', `${name} has no value`);
     }
     const wrong = check(value);
     if (wrong) {
-      throw new UpdateFieldsError('INVALID_RULE', `${name}: ${wrong}`);
+      throw refuse('INVALID_RULE', `${name}: ${wrong}`);
     }
     parts.set(name, value);
   }
 
   const freq = parts.get('FREQ');
   if (!freq) {
-    throw new UpdateFieldsError('INVALID_RULE', 'FREQ is missing; every rule needs one (e.g. "FREQ=DAILY;COUNT=5")');
+    throw refuse('INVALID_RULE', 'FREQ is missing; every rule needs one (e.g. "FREQ=DAILY;COUNT=5")');
   }
   if (parts.has('COUNT') && parts.has('UNTIL')) {
-    throw new UpdateFieldsError('INVALID_RULE', 'COUNT and UNTIL cannot both be given (RFC 5545 3.3.10); use one of them');
+    throw refuse('INVALID_RULE', 'COUNT and UNTIL cannot both be given (RFC 5545 3.3.10); use one of them');
   }
   if (parts.has('BYWEEKNO') && freq !== 'YEARLY') {
-    throw new UpdateFieldsError('INVALID_RULE', 'BYWEEKNO is only allowed with FREQ=YEARLY (RFC 5545 3.3.10)');
+    throw refuse('INVALID_RULE', 'BYWEEKNO is only allowed with FREQ=YEARLY (RFC 5545 3.3.10)');
   }
   if (parts.has('BYYEARDAY') && ['DAILY', 'WEEKLY', 'MONTHLY'].includes(freq)) {
-    throw new UpdateFieldsError('INVALID_RULE', `BYYEARDAY is not allowed with FREQ=${freq} (RFC 5545 3.3.10)`);
+    throw refuse('INVALID_RULE', `BYYEARDAY is not allowed with FREQ=${freq} (RFC 5545 3.3.10)`);
   }
   if (parts.has('BYMONTHDAY') && freq === 'WEEKLY') {
-    throw new UpdateFieldsError('INVALID_RULE', 'BYMONTHDAY is not allowed with FREQ=WEEKLY (RFC 5545 3.3.10)');
+    throw refuse('INVALID_RULE', 'BYMONTHDAY is not allowed with FREQ=WEEKLY (RFC 5545 3.3.10)');
   }
   const ordinalDay = (parts.get('BYDAY') ?? '').split(',').some((d) => /\d/.test(d));
   if (ordinalDay && (!['MONTHLY', 'YEARLY'].includes(freq) || parts.has('BYWEEKNO'))) {
-    throw new UpdateFieldsError('INVALID_RULE', 'BYDAY with an ordinal ("1MO", "-1FR") is only allowed with FREQ=MONTHLY or ' +
+    throw refuse('INVALID_RULE', 'BYDAY with an ordinal ("1MO", "-1FR") is only allowed with FREQ=MONTHLY or ' +
       'FREQ=YEARLY, and not together with BYWEEKNO (RFC 5545 3.3.10)');
   }
   // Within a month a weekday occurs at most five times (RFC 5545 3.3.10:
@@ -552,11 +553,11 @@ function parseRuleParts(raw: string): Map<string, string> {
   const tooFar = (parts.get('BYDAY') ?? '').split(',')
     .find((d) => Math.abs(Number(/^([+-]?\d+)/.exec(d)?.[1] ?? 0)) > 5);
   if (tooFar && (freq === 'MONTHLY' || parts.has('BYMONTH'))) {
-    throw new UpdateFieldsError('INVALID_RULE', `BYDAY: "${tooFar}" counts past the fifth weekday of a month; within a month the ordinal is ` +
+    throw refuse('INVALID_RULE', `BYDAY: "${tooFar}" counts past the fifth weekday of a month; within a month the ordinal is ` +
       '1 to 5 or -5 to -1 (RFC 5545 3.3.10)');
   }
   if (parts.has('BYSETPOS') && ![...parts.keys()].some((k) => k.startsWith('BY') && k !== 'BYSETPOS')) {
-    throw new UpdateFieldsError('INVALID_RULE', 'BYSETPOS needs another BYxxx part to select from (RFC 5545 3.3.10)');
+    throw refuse('INVALID_RULE', 'BYSETPOS needs another BYxxx part to select from (RFC 5545 3.3.10)');
   }
   return parts;
 }
@@ -593,11 +594,11 @@ function untilTime(
   try {
     parsed = parseDateValue(raw);
   } catch (error) {
-    throw wrapped(error, 'INVALID_VALUE', `${ruleName} UNTIL: ${(error as Error).message}`, { property: ruleName });
+    throw wrapped(error, `${ruleName} UNTIL: ${(error as Error).message}`, { property: ruleName });
   }
   const anchor = anchorOf(component, ruleName.toLowerCase());
   const fail = (code: UpdateFieldsErrorCode, why: string) =>
-    new UpdateFieldsError(code, `${ruleName} UNTIL ${why}`, { property: ruleName });
+    refuse(code, `${ruleName} UNTIL ${why}`, ruleName);
 
   if (anchor?.form === 'date' && parsed.kind !== 'date') {
     throw fail('VALUE_TYPE_MISMATCH', 'must be a date: DTSTART is a date (all-day), and RFC 5545 3.3.10 requires the same type, e.g. "2026-10-26"');
@@ -671,7 +672,7 @@ export function setRecurValue(
   try {
     parts = parseRuleParts(raw);
   } catch (error) {
-    throw wrapped(error, 'INVALID_RULE', `${upper}: ${(error as Error).message}`, { property: upper });
+    throw wrapped(error, `${upper}: ${(error as Error).message}`, { property: upper });
   }
 
   const until = parts.get('UNTIL');
