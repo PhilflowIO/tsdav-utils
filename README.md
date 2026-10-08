@@ -470,8 +470,8 @@ as one:
   ```
 
   - The values are added on a line of their own, typed and zoned as a new line
-    would be (DTSTART's zone and value type); the lines already there are kept
-    as written.
+    would be (DTSTART's zone and value type, or under `zone` that zone's
+    `TZID`); the lines already there are kept as written.
   - A value the list already holds is dropped, as is a repeat within the call:
     the same instant, whatever zone each is written in (in an all-day series, the
     same date). Where an instant cannot be told (no DTSTART, a zone without
