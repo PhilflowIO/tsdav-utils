@@ -191,7 +191,9 @@ describe('generated VTIMEZONE against Intl', () => {
     expect(names('America/New_York')).toEqual(['EST', 'EDT', 'EST']);
     expect(names('Asia/Kolkata')).toEqual(['IST']);
     expect(names('America/Sao_Paulo')).toEqual(['-03']);
-    expect(names('Asia/Kathmandu')).toEqual(['+0545']);
+    // which zones have an abbreviation depends on the ICU version (Node 18 knows NPT, later ones do not)
+    expect(names('Asia/Kathmandu')[0]).toMatch(/^(NPT|\+0545)$/);
+    expect(names('Etc/GMT-14')).toEqual(['+14']);
   });
 
   it('the current rule is an open RRULE, so an unbounded series is covered', () => {
