@@ -110,6 +110,9 @@ function transitionsOf(vtimezone, horizon) {
     }
     for (const property of observance.getAllProperties("rrule")) {
       const recur = property.getFirstValue().clone();
+      if (recur.freq !== "YEARLY" && recur.freq !== "MONTHLY") {
+        throw new Error(`the VTIMEZONE "${vtimezone.getFirstPropertyValue("tzid")}" has an observance repeating ${recur.freq}, which no time zone does, so it is not read`);
+      }
       if (recur.until) {
         const until = wallOfTime(recur.until) + (recur.until.zone === import_ical.default.Timezone.utcTimezone ? from : 0);
         recur.until = import_ical.default.Time.fromData({ ...fieldsOf(until), isDate: recur.until.isDate });

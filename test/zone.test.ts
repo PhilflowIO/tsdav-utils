@@ -136,3 +136,28 @@ describe('an IANA zone without VTIMEZONE follows the same rules', () => {
     expect(iso(zone.toUtc(at('2026-10-25T02:30:00')))).toBe('2026-10-25T00:30:00');
   });
 });
+
+describe('a VTIMEZONE with an observance no time zone has is refused, quickly', () => {
+  it.each(['DAILY', 'HOURLY', 'MINUTELY', 'SECONDLY'])('FREQ=%s', (freq) => {
+    const zone = zoneFrom(['BEGIN:VTIMEZONE', 'TZID:Hostile/Zone',
+      'BEGIN:DAYLIGHT', 'TZOFFSETFROM:+0100', 'TZOFFSETTO:+0200', 'DTSTART:19700101T000000',
+      `RRULE:FREQ=${freq};BYMONTH=2;BYMONTHDAY=30`, 'END:DAYLIGHT',
+      'BEGIN:STANDARD', 'TZOFFSETFROM:+0200', 'TZOFFSETTO:+0100', 'DTSTART:19700101T000000',
+      `RRULE:FREQ=${freq}`, 'END:STANDARD', 'END:VTIMEZONE'], 'Hostile/Zone');
+    const t0 = performance.now();
+    expect(() => zone.fromUtc(Date.UTC(2026, 5, 1) / 1000))
+      .toThrow(`the VTIMEZONE "Hostile/Zone" has an observance repeating ${freq}, which no time zone does, so it is not read`);
+    expect(performance.now() - t0).toBeLessThan(100);
+  });
+
+  it('a YEARLY or MONTHLY rule that matches nothing ends by itself', () => {
+    const zone = zoneFrom(['BEGIN:VTIMEZONE', 'TZID:Odd/Zone',
+      'BEGIN:DAYLIGHT', 'TZOFFSETFROM:+0100', 'TZOFFSETTO:+0200', 'DTSTART:19700329T020000',
+      'RRULE:FREQ=MONTHLY;BYMONTH=2;BYMONTHDAY=30', 'END:DAYLIGHT',
+      'BEGIN:STANDARD', 'TZOFFSETFROM:+0200', 'TZOFFSETTO:+0100', 'DTSTART:19701025T030000',
+      'RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30', 'END:STANDARD', 'END:VTIMEZONE'], 'Odd/Zone');
+    const t0 = performance.now();
+    zone.fromUtc(Date.UTC(2026, 5, 1) / 1000);
+    expect(performance.now() - t0).toBeLessThan(1000);
+  });
+});

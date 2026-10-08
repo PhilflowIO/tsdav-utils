@@ -92,7 +92,8 @@ const ONSET_LIMIT = 10000;
  * The transitions of a VTIMEZONE up to a UTC instant, ascending. Each STANDARD
  * or DAYLIGHT observance starts at its DTSTART and at each RDATE and RRULE
  * instance — local times on the clock that runs before it, so the instant is
- * the onset minus TZOFFSETFROM. RRULE's UNTIL is UTC (RFC 5545 3.6.5).
+ * the onset minus TZOFFSETFROM. RRULE's UNTIL is UTC (RFC 5545 3.6.5). Only
+ * YEARLY and MONTHLY observance rules are read; any other throws.
  */
 function transitionsOf(vtimezone: ICAL.Component, horizon: number): Transition[] {
   const list: Transition[] = [];
@@ -115,6 +116,12 @@ function transitionsOf(vtimezone: ICAL.Component, horizon: number): Transition[]
     }
     for (const property of observance.getAllProperties('rrule')) {
       const recur = (property.getFirstValue() as ICAL.Recur).clone();
+      // Real zones change yearly; ical.js gives up on a YEARLY or MONTHLY rule
+      // that matches nothing, but would search a finer one without end
+      if (recur.freq !== 'YEARLY' && recur.freq !== 'MONTHLY') {
+        throw new Error(`the VTIMEZONE "${vtimezone.getFirstPropertyValue('tzid')}" has an observance repeating ` +
+          `${recur.freq}, which no time zone does, so it is not read`);
+      }
       if (recur.until) {
         const until = wallOfTime(recur.until) + (recur.until.zone === ICAL.Timezone.utcTimezone ? from : 0);
         recur.until = ICAL.Time.fromData({ ...fieldsOf(until), isDate: recur.until.isDate });
