@@ -171,6 +171,8 @@ function wrapped(error, message, details = {}) {
 
 // src/recur.ts
 var import_ical = __toESM(require("ical.js"));
+var BoundUnavailable = class extends Error {
+};
 var STEPPED_PARTS = [
   ["BYSECOND", "SECONDLY"],
   ["BYMINUTE", "MINUTELY"],
@@ -207,7 +209,11 @@ function recurIterator(recur, dtstart) {
       byIndices[part] = values.filter((v) => v <= field[part]).length - 1;
     }
   }
-  return new import_ical.default.RecurIterator({ rule, dtstart, by_indices: byIndices });
+  const iterator = new import_ical.default.RecurIterator({ rule, dtstart, by_indices: byIndices });
+  if (iterator.by_indices !== byIndices) {
+    throw new BoundUnavailable("ical.js no longer takes the start positions of a rule iteration");
+  }
+  return iterator;
 }
 
 // src/zone.ts
@@ -1486,8 +1492,6 @@ function stepCost(recur) {
 }
 var expansionWork = { steps: 0 };
 var SeriesTooSparse = class extends Error {
-};
-var BoundUnavailable = class extends Error {
 };
 var HorizonReached = class extends Error {
 };
