@@ -690,6 +690,20 @@ follow the master's `DTSTART` (see above).
     form: an instance rescheduled to Monday 09:00 Berlin stays at 09:00 when the
     series moves a week across a DST change — also when it is written in UTC,
     whose value then changes by the hour the offset changed.
+  - An `EXDATE` that names no instant — floating next to a DTSTART with a zone,
+    with `Z` or a `TZID` next to a floating one (see
+    [Lists of dates](#lists-of-dates-exdate-and-rdate)) — excludes no occurrence,
+    so it has none to follow: it stays exactly as written, neither moved nor
+    converted, and still excludes nothing. Moved into the series' zone it would
+    start excluding the occurrence on its wall clock. Where it cannot stay that
+    way the move is refused (`SERIES_MOVE_REFUSED`, remedy `same-call`: give
+    `EXDATE` in the same call): on one line with values that do name
+    occurrences, and when the move changes the series' form so that, as
+    written, it would name one — a floating value once the series is all-day
+    or floating; a value with `Z` or a `TZID` once a floating series is
+    all-day or has a zone. Such a value also shares no instant with an
+    occurrence a DST change skips, so it never makes a move or a new rule
+    ambiguous (`DST_AMBIGUOUS`).
   - Across an all-day/timed switch the distance counts in days: an occurrence
     keeps its day and becomes a date or takes the new DTSTART's time of day; an
     override keeps its own time on its day.
@@ -737,7 +751,8 @@ follow the master's `DTSTART` (see above).
   - **A value that cannot be moved with its meaning kept is refused**, never
     moved approximately. The error says why and what to give instead:
     - a UTC value next to a `TZID` that is neither in a `VTIMEZONE` nor an IANA
-      zone, a UTC value in a floating series, an `RDATE` of periods;
+      zone, a UTC `RDATE` or `RECURRENCE-ID` in a floating series, an `RDATE` of
+      periods;
     - an `UNTIL` of the other value type than DTSTART (a date next to a timed
       DTSTART), and an `UNTIL` at a DST change — in the repeated hour, just past
       a skipped hour, or moved into one — where the wall clock and the order of
@@ -935,7 +950,7 @@ unreadable one is refused (`INVALID_RULE`) rather than rewritten.
 | `INVALID_RULE` | a rule given is otherwise invalid: no `FREQ`, a value out of range, `COUNT` with `UNTIL`, another combination RFC 5545 rules out; or a rule in the object cannot be read | `fix-value`; `rewrite-object` for a rule in the object |
 | `END_BEFORE_START` | under `zone`, DTEND or DUE would lie before DTSTART | `fix-value` |
 | `RECURRENCE_ID_ON_MASTER` | `RECURRENCE-ID` written on the series master | `rewrite-object` |
-| `SERIES_MOVE_REFUSED` | a DTSTART move the series cannot follow exactly: the rule pins the old start (`suggestion` holds the rule to give, when there is one), or an existing `UNTIL`, `EXDATE` or `RDATE` cannot move with it; or an override cannot, or the switch to all-day would change what a value names | `same-call`; `rewrite-object` for an override or the switch to all-day |
+| `SERIES_MOVE_REFUSED` | a DTSTART move the series cannot follow exactly: the rule pins the old start (`suggestion` holds the rule to give, when there is one), or an existing `UNTIL`, `EXDATE` or `RDATE` cannot move with it (also an `EXDATE` that names no instant where, left as written, it would name one: a value with `Z` in a floating series moved into a zone or to all-day, `ZONE_MISMATCH` up to 0.7.0); or an override cannot, or the switch to all-day would change what a value names | `same-call`; `rewrite-object` for an override, or for a value at another time of day than the series on the switch to all-day |
 | `ORPHANED_EXCEPTIONS` | a new `RRULE` or `RDATE` (or `RDATE`s removed) leaves an override or `EXDATE` naming no occurrence; or an `EXDATE` would exclude an overridden occurrence | `same-call`; `fix-value` for the `EXDATE` (or use `cancelOccurrences`) |
 | `UNMATCHED_EXDATE` | an `EXDATE` added (list mode `add`) names no occurrence of the series, so it would exclude nothing | `fix-value` |
 | `NOT_IN_LIST` | a value to remove (list mode `remove`, `restoreOccurrences`) is not in the list | `fix-value` |

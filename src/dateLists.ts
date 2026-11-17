@@ -1,7 +1,7 @@
 import ICAL from 'ical.js';
 import { UpdateFieldsError } from './errors';
 import { frameOf } from './typedValue';
-import { dayOf, icalForm, instantOf, propertyStamps, valuesOf, wallIn } from './series';
+import { dayOf, icalForm, instantOf, namesNoInstant, propertyStamps, valuesOf, wallIn } from './series';
 import type { Stamp } from './series';
 import type { ListMode } from './types';
 
@@ -49,8 +49,11 @@ export function instantKey(master: ICAL.Component, stamp: Stamp): string {
     if (stamp.kind === 'date') {
       return `day ${stamp.wall}`;
     }
+    if (namesNoInstant(stamp, frame)) {
+      return written;
+    }
     if (frame.form === 'floating') {
-      return stamp.kind === 'floating' ? `wall ${stamp.wall}` : written;
+      return `wall ${stamp.wall}`;
     }
     const instant = instantOf(master, stamp, frame);
     return instant === null ? written : `instant ${instant}`;
@@ -71,7 +74,7 @@ export function dayKeyOf(master: ICAL.Component, stamp: Stamp): string | null {
     return null;
   }
   // a floating value in a zoned series, or an instant in a floating one, names nothing
-  if ((stamp.kind === 'floating') !== (frame.form === 'floating')) {
+  if (namesNoInstant(stamp, frame)) {
     return null;
   }
   try {

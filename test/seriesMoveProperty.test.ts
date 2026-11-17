@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import ICAL from 'ical.js';
 import { updateFields } from '../src/updateFields';
 import { expansionWork } from '../src/series';
+import { createRecurrenceBudget, expandOccurrences } from '../src/expand';
 
 // Size and seed of the property tests. CI runs a small sample by default;
 // for a deep run set SERIES_PROPERTY_RUNS (e.g. 5000) and, to explore other
@@ -171,6 +172,86 @@ describe('a value naming an occurrence in the DST gap by its instant is refused,
         expect(out, `case ${i}\n${ical}`).toContain(named.length ? `EXDATE${target}` : `RECURRENCE-ID${target}`);
       }
     }
+  });
+});
+
+describe('an EXDATE that names no instant excludes nothing before a move and after it (#30)', () => {
+  // Series with a zone (Berlin or UTC) carry floating EXDATEs, floating series
+  // EXDATEs in UTC or in a zone: values that name no instant, so no
+  // occurrence. They sit on occurrences' wall clocks, where a move that
+  // shifted them into the series' form would make them exclude one. Next to
+  // them, EXDATEs in the series' own form that do exclude. After any move the
+  // series must keep exactly its occurrences, each moved, and the values that
+  // name nothing must stay as written.
+  let seed = seedFor(30);
+  const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const int = (a: number, b: number) => a + Math.floor(rnd() * (b - a + 1));
+  const H = 3600;
+  const D = 24 * H;
+  const iso = (wall: number) => new Date(wall * 1000).toISOString().slice(0, 19);
+  /** the original starts on the series' wall clock, as seconds */
+  const starts = (ical: string) => expandOccurrences(ical, { budget: createRecurrenceBudget(), until: '2030-01-01T00:00:00Z' })
+    .occurrences.map((o) => Date.parse(`${o.recurrenceId.value.replace(/Z$/, '')}Z`) / 1000);
+
+  it('holds for seeded zoned and floating series with values that name nothing, also inside DST changes', () => {
+    let nameless = 0;
+    let inChanges = 0;
+    for (let i = 0; i < RUNS; i++) {
+      const frame = (['berlin', 'utc', 'floating'] as const)[int(0, 2)];
+      const freq = rnd() < 0.5 ? 'DAILY' : 'WEEKLY';
+      const step = freq === 'DAILY' ? D : 7 * D;
+      const count = int(4, 10);
+      // Half the cases run through a 2026 Berlin DST change (the spring gap or
+      // the repeated autumn hour, both 02:00-03:00 on a Sunday): the series
+      // has an occurrence that day at 03:00-05:45, just past the change, and
+      // some values that name nothing sit inside it, at 02:00-02:45, the wall
+      // clock a Berlin value would share its instant with the 03:xx
+      // occurrence. The other half anywhere in 2026, clear of the changes.
+      const change = rnd() < 0.5 ? null : rnd() < 0.5 ? Date.UTC(2026, 2, 29) / 1000 : Date.UTC(2026, 9, 25) / 1000;
+      const start = change === null
+        ? Date.UTC(2026, 0, 5) / 1000 + int(0, 330) * D + int(6, 18) * H + 15 * 60 * int(0, 3)
+        : change - int(0, count - 1) * step + int(3, 5) * H + 15 * 60 * int(0, 3);
+      const inChange = () => (inChanges++, change! + 2 * H + 15 * 60 * int(0, 3));
+      const own = (wall: number) => frame === 'berlin' ? `;TZID=Europe/Berlin:${basic(wall)}`
+        : frame === 'utc' ? `:${basic(wall)}Z` : `:${basic(wall)}`;
+      const dead = (wall: number) => frame !== 'floating' ? `:${basic(wall)}`
+        : rnd() < 0.5 ? `:${basic(wall)}Z` : `;TZID=Europe/Berlin:${basic(wall)}`;
+      const live = [...new Set(Array.from({ length: int(0, 2) }, () => int(1, count - 1)))];
+      // through a change the series keeps clear of 02:00-03:00, also once moved
+      const distance = change === null ? int(-10, 10) * D + int(-3, 3) * H : int(-3, 3) * D + int(0, 3) * H;
+      // on an occurrence, where one lands once moved, or in the DST change;
+      // alone or several on a line
+      const deadLines = Array.from({ length: int(1, 3) }, () => {
+        const at = () => change !== null && rnd() < 0.5 ? inChange()
+          : start + int(0, count - 1) * step + (rnd() < 0.3 ? distance : 0);
+        if (rnd() < 0.3) {
+          const first = dead(at());
+          return `EXDATE${first},${basic(at())}${first.endsWith('Z') ? 'Z' : ''}`;
+        }
+        return `EXDATE${dead(at())}`;
+      });
+      nameless += deadLines.length;
+      const dtstart = frame === 'berlin' ? `DTSTART;TZID=Europe/Berlin:${basic(start)}`
+        : `DTSTART:${basic(start)}${frame === 'utc' ? 'Z' : ''}`;
+      const ical = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//EN', ...(rnd() < 0.5 ? BERLIN : []),
+        'BEGIN:VEVENT', `UID:n${i}`, 'DTSTAMP:20260101T000000Z', 'SUMMARY:M', dtstart, `RRULE:FREQ=${freq};COUNT=${count}`,
+        ...live.map((k) => `EXDATE${own(start + k * step)}`), ...deadLines, 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+      if (distance === 0) {
+        continue;
+      }
+      const to = iso(start + distance) + (frame === 'utc' ? 'Z' : '');
+      const before = starts(ical);
+      // the values that name nothing exclude nothing: only the live ones do
+      expect(before, `case ${i}:\n${ical}`).toHaveLength(count - live.length);
+      const out = updateFields(ical, { DTSTART: to });
+      expect(starts(out), `case ${i}: to ${to}\n${ical}\n${out}`).toEqual(before.map((w) => w + distance));
+      const kept = out.split('\r\n');
+      for (const line of deadLines) {
+        expect(kept, `case ${i}: ${line} kept as written`).toContain(line);
+      }
+    }
+    expect(nameless).toBeGreaterThan(RUNS);
+    expect(inChanges).toBeGreaterThan(RUNS / 10);
   });
 });
 

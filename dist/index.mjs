@@ -755,8 +755,11 @@ function instantKey(master, stamp) {
     if (stamp.kind === "date") {
       return `day ${stamp.wall}`;
     }
+    if (namesNoInstant(stamp, frame)) {
+      return written;
+    }
     if (frame.form === "floating") {
-      return stamp.kind === "floating" ? `wall ${stamp.wall}` : written;
+      return `wall ${stamp.wall}`;
     }
     const instant = instantOf(master, stamp, frame);
     return instant === null ? written : `instant ${instant}`;
@@ -769,7 +772,7 @@ function dayKeyOf(master, stamp) {
   if (!frame || frame.form === "date" || stamp.kind === "date") {
     return null;
   }
-  if (stamp.kind === "floating" !== (frame.form === "floating")) {
+  if (namesNoInstant(stamp, frame)) {
     return null;
   }
   try {
@@ -1048,6 +1051,9 @@ function findGapTwin(master, properties) {
     return null;
   }
   const twins = properties.filter((property) => property.type !== "period").flatMap((property) => propertyStamps(property).flatMap((stamp) => {
+    if (property.name === "exdate" && namesNoInstant(stamp, frame)) {
+      return [];
+    }
     const twin = gapTwin(master, stamp, frame);
     return twin ? [{ property, twin }] : [];
   }));
@@ -1090,6 +1096,10 @@ function moveInstants(property, move) {
     );
   }
   const stamps = propertyStamps(property);
+  if (property.name === "exdate" && stamps.some((stamp) => namesNoInstant(stamp, move.from))) {
+    keepNameless(property, stamps, move);
+    return;
+  }
   if (property.type === "date" && move.from.form !== "date" && move.to.form !== "date") {
     const shift = dayOf(move.toWall) - dayOf(move.fromWall);
     if (move.toWall - move.fromWall !== shift) {
@@ -1103,6 +1113,14 @@ function moveInstants(property, move) {
     return;
   }
   writeInstants(property, stamps.map((stamp) => moved(stamp, move)), move.to);
+}
+function keepNameless(property, stamps, move) {
+  if (!stamps.every((stamp) => namesNoInstant(stamp, move.from))) {
+    throw new UpdateFieldsError("SERIES_MOVE_REFUSED", "it holds values that name no occurrence of the series, which stay as written, on one line with values that name occurrences, which move", { remedy: "same-call" });
+  }
+  if (!stamps.every((stamp) => namesNoInstant(stamp, move.to))) {
+    throw new UpdateFieldsError("SERIES_MOVE_REFUSED", `it names no occurrence of the series, and left as written it would name one of the series moved to a ${move.to.form === "date" ? "date" : move.to.form === "floating" ? "floating time" : "time with a zone"}`, { remedy: "same-call" });
+  }
 }
 function wallOut(component, wall, frame, own) {
   if (own.kind === "floating" || own.kind === "date" || frame.form === "floating" || frame.form === "date") {
@@ -1492,10 +1510,10 @@ function occurrences(master, stamps, labels) {
   const walls = expand(master, Math.max(0, ...targets.filter((t) => t !== null)));
   return namesOccurrence(master, frame, stamps, walls);
 }
-var namesNothing = (stamp, frame) => frame.form !== "date" && stamp.kind !== "date" && stamp.kind === "floating" !== (frame.form === "floating");
+var namesNoInstant = (stamp, frame) => frame.form !== "date" && stamp.kind !== "date" && stamp.kind === "floating" !== (frame.form === "floating");
 function targetWalls(master, frame, stamps, labels) {
   return stamps.map((stamp, i) => {
-    if (namesNothing(stamp, frame)) {
+    if (namesNoInstant(stamp, frame)) {
       return null;
     }
     try {
@@ -1517,7 +1535,7 @@ function namesOccurrence(master, frame, stamps, walls) {
     if (stamp.kind === "date") {
       return days.has(dayOf(stamp.wall));
     }
-    if (namesNothing(stamp, frame)) {
+    if (namesNoInstant(stamp, frame)) {
       return false;
     }
     if (!instants) {
@@ -2038,6 +2056,9 @@ function checkDatesOnly(master, move, properties) {
   const timeOfDay = move.fromWall - dayOf(move.fromWall);
   for (const property of properties) {
     for (const stamp of propertyStamps(property)) {
+      if (property.name === "exdate" && namesNoInstant(stamp, move.from)) {
+        continue;
+      }
       const wall = stamp.kind === "date" ? null : wallIn(master, stamp, move.from);
       if (wall === null || wall - dayOf(wall) !== timeOfDay) {
         const line = property.toICALString();
@@ -3055,12 +3076,10 @@ function expandOccurrences(calendarObject, options) {
         excludedDays.add(dayOf(wallIn(master, stamp, frame)));
       } else if (stamp.kind === "date") {
         excludedDays.add(dayOf(stamp.wall));
+      } else if (namesNoInstant(stamp, frame)) {
       } else if (zoned) {
-        const instant = instantOf(master, stamp, frame);
-        if (instant !== null) {
-          excludedInstants.add(instant);
-        }
-      } else if (stamp.kind === "floating") {
+        excludedInstants.add(instantOf(master, stamp, frame));
+      } else {
         excludedWalls.add(stamp.wall);
       }
     }
