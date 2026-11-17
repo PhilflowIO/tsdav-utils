@@ -1,17 +1,17 @@
 // src/updateFields.ts
-import ICAL5 from "ical.js";
+import ICAL6 from "ical.js";
 
 // src/types.ts
 var COMPONENT_TYPES = ["vevent", "vtodo", "vjournal"];
 
 // src/series.ts
-import ICAL3 from "ical.js";
+import ICAL4 from "ical.js";
 
 // src/typedValue.ts
-import ICAL2 from "ical.js";
+import ICAL3 from "ical.js";
 
 // src/zone.ts
-import ICAL from "ical.js";
+import ICAL2 from "ical.js";
 
 // src/errors.ts
 var CODES = [
@@ -121,6 +121,47 @@ function wrapped(error, message, details = {}) {
   return plain;
 }
 
+// src/recur.ts
+import ICAL from "ical.js";
+var STEPPED_PARTS = [
+  ["BYSECOND", "SECONDLY"],
+  ["BYMINUTE", "MINUTELY"],
+  ["BYHOUR", "HOURLY"],
+  ["BYMONTH", "MONTHLY"]
+];
+var FREQ_ORDER = ["SECONDLY", "MINUTELY", "HOURLY", "DAILY", "WEEKLY", "MONTHLY", "YEARLY"];
+function chronologicalRecur(recur) {
+  const copy = recur.clone();
+  for (const [part] of STEPPED_PARTS) {
+    const values = copy.getComponent(part);
+    if (values.length > 1) {
+      const sorted = [...new Map(values.map((v) => [Number(v), v])).entries()].sort(([a], [b]) => a - b).map(([, v]) => v);
+      copy.setComponent(part, sorted);
+    }
+  }
+  return copy;
+}
+function recurIterator(recur, dtstart) {
+  const rule = chronologicalRecur(recur);
+  const field = { BYSECOND: dtstart.second, BYMINUTE: dtstart.minute, BYHOUR: dtstart.hour, BYMONTH: dtstart.month };
+  const byIndices = {
+    BYSECOND: 0,
+    BYMINUTE: 0,
+    BYHOUR: 0,
+    BYDAY: 0,
+    BYMONTH: 0,
+    BYWEEKNO: 0,
+    BYMONTHDAY: 0
+  };
+  for (const [part, unit] of STEPPED_PARTS) {
+    const values = rule.getComponent(part).map(Number);
+    if (values.length > 0 && FREQ_ORDER.indexOf(rule.freq) <= FREQ_ORDER.indexOf(unit)) {
+      byIndices[part] = values.filter((v) => v <= field[part]).length - 1;
+    }
+  }
+  return new ICAL.RecurIterator({ rule, dtstart, by_indices: byIndices });
+}
+
 // src/zone.ts
 var DAY = 86400;
 function wallOf(y, mo, d, h = 0, mi = 0, s = 0) {
@@ -184,7 +225,7 @@ function transitionsOf(vtimezone, horizon) {
     const onsets = /* @__PURE__ */ new Set([wallOfTime(start)]);
     for (const rdate of observance.getAllProperties("rdate")) {
       for (const value of rdate.getValues()) {
-        const t = value instanceof ICAL.Period ? value.start : value;
+        const t = value instanceof ICAL2.Period ? value.start : value;
         onsets.add(wallOfTime(t));
       }
     }
@@ -199,10 +240,10 @@ function transitionsOf(vtimezone, horizon) {
         throw new UpdateFieldsError("UNSUPPORTED_VTIMEZONE", `the VTIMEZONE "${vtimezone.getFirstPropertyValue("tzid")}" has an observance repeating ${recur.freq}, which no time zone does, so it is not read`, { remedy: "rewrite-object" });
       }
       if (recur.until) {
-        const until = wallOfTime(recur.until) + (recur.until.zone === ICAL.Timezone.utcTimezone ? from : 0);
-        recur.until = ICAL.Time.fromData({ ...fieldsOf(until), isDate: recur.until.isDate });
+        const until = wallOfTime(recur.until) + (recur.until.zone === ICAL2.Timezone.utcTimezone ? from : 0);
+        recur.until = ICAL2.Time.fromData({ ...fieldsOf(until), isDate: recur.until.isDate });
       }
-      const iterator = recur.iterator(ICAL.Time.fromData(fieldsOf(wallOfTime(start))));
+      const iterator = recurIterator(recur, ICAL2.Time.fromData(fieldsOf(wallOfTime(start))));
       for (let i = 0; i < ONSET_LIMIT; i++) {
         const next = iterator.next();
         if (!next || wallOfTime(next) - from > horizon) {
@@ -403,13 +444,13 @@ function parseDateValue(raw) {
 function designSetFor(component) {
   if (component.name === "vcard") {
     const version = String(component.getFirstPropertyValue("version") ?? "").trim();
-    return version === "3.0" ? ICAL2.design.vcard3 : ICAL2.design.vcard;
+    return version === "3.0" ? ICAL3.design.vcard3 : ICAL3.design.vcard;
   }
-  return ICAL2.design.icalendar;
+  return ICAL3.design.icalendar;
 }
 function dateProperty(component, name) {
   const lower = name.toLowerCase();
-  if (component.name === "vcard" && ICAL2.design.vcard.property[lower]?.defaultType === "date-and-or-time") {
+  if (component.name === "vcard" && ICAL3.design.vcard.property[lower]?.defaultType === "date-and-or-time") {
     return null;
   }
   const design = designSetFor(component).property[lower];
@@ -548,7 +589,7 @@ function setDateValue(component, name, raw, floatingTime = "keep", absoluteTime 
   }
   let property = existing;
   if (!property) {
-    property = new ICAL2.Property(lower, component);
+    property = new ICAL3.Property(lower, component);
     component.addProperty(property);
   }
   if (tzid) {
@@ -684,7 +725,7 @@ function untilTime(component, ruleName, raw, floatingTime, named) {
       throw new UpdateFieldsError("ZONE_MISMATCH", `${ruleName} UNTIL follows DTSTART, which is ${anchorText(anchor)}, so it cannot be read in "${named.tzid}": give DTSTART in the same call to move the series into "${named.tzid}", give UNTIL with a zone, or leave out zone`, { remedy: "same-call", property: ruleName });
     }
     if (!anchor || named.utc) {
-      return ICAL2.Time.fromDateTimeString(named.utc ? asUtc(parsed).jcal : utcOfWall(component, ruleName, named.tzid, parsed).jcal);
+      return ICAL3.Time.fromDateTimeString(named.utc ? asUtc(parsed).jcal : utcOfWall(component, ruleName, named.tzid, parsed).jcal);
     }
   }
   if (parsed.kind === "floating") {
@@ -693,22 +734,22 @@ function untilTime(component, ruleName, raw, floatingTime, named) {
       if (!zone2) {
         throw fail("UNKNOWN_TZID", `has no zone, and DTSTART's zone "${anchor.tzid}" has no VTIMEZONE in the document and is no IANA time zone to convert it to UTC with (RFC 5545 3.3.10 requires UTC here): give it a zone, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T18:00:00+01:00"`);
       }
-      const wall = ICAL2.Time.fromDateTimeString(parsed.jcal);
+      const wall = ICAL3.Time.fromDateTimeString(parsed.jcal);
       const utc = fieldsOf(zone2.toUtc(wallOf(wall.year, wall.month, wall.day, wall.hour, wall.minute, wall.second)));
-      return ICAL2.Time.fromData(utc, ICAL2.Timezone.utcTimezone);
+      return ICAL3.Time.fromData(utc, ICAL3.Timezone.utcTimezone);
     }
     if (anchor?.form === "floating") {
-      return ICAL2.Time.fromDateTimeString(parsed.jcal);
+      return ICAL3.Time.fromDateTimeString(parsed.jcal);
     }
     if (floatingTime === "local") {
-      return ICAL2.Time.fromDateTimeString(toUtcJcal(parsed.local));
+      return ICAL3.Time.fromDateTimeString(toUtcJcal(parsed.local));
     }
     if (anchor?.form === "utc") {
       throw fail("ZONE_MISMATCH", 'has no zone, and DTSTART is in UTC: give it one, e.g. "2026-10-26T18:00:00Z" or "2026-10-26T14:00:00-04:00"');
     }
-    return ICAL2.Time.fromDateTimeString(parsed.jcal);
+    return ICAL3.Time.fromDateTimeString(parsed.jcal);
   }
-  return parsed.kind === "date" ? ICAL2.Time.fromDateString(parsed.jcal) : ICAL2.Time.fromDateTimeString(parsed.jcal);
+  return parsed.kind === "date" ? ICAL3.Time.fromDateString(parsed.jcal) : ICAL3.Time.fromDateTimeString(parsed.jcal);
 }
 function isRecurProperty(component, name) {
   return designSetFor(component).property[name.toLowerCase()]?.defaultType === "recur";
@@ -727,13 +768,13 @@ function setRecurValue(component, name, raw, floatingTime = "keep", named = null
   }
   const until = parts.get("UNTIL");
   parts.delete("UNTIL");
-  const recur = ICAL2.Recur.fromString([...parts].map(([k, v]) => `${k}=${v}`).join(";"));
+  const recur = ICAL3.Recur.fromString([...parts].map(([k, v]) => `${k}=${v}`).join(";"));
   if (until !== void 0) {
     recur.until = untilTime(component, upper, until, floatingTime, named);
   }
   let property = component.getFirstProperty(lower);
   if (!property) {
-    property = new ICAL2.Property(lower, component);
+    property = new ICAL3.Property(lower, component);
     component.addProperty(property);
   }
   property.resetType("recur");
@@ -962,7 +1003,7 @@ function recurOf(property) {
       { remedy: "rewrite-object", property: name }
     );
   }
-  if (!(recur instanceof ICAL3.Recur)) {
+  if (!(recur instanceof ICAL4.Recur)) {
     throw new UpdateFieldsError(
       "INVALID_RULE",
       `the object's ${name} cannot be read as a rule`,
@@ -1296,7 +1337,7 @@ var RuleTexts = class {
       const tag = /;X-TSDAV-UTILS-RULE=(\d+)/i.exec(logical.slice(0, colonOf(logical)));
       if (tag) {
         const line = lines[Number(tag[1])];
-        out.push(ICAL3.helpers.foldline(`${line.head}:${line.parts.join(";")}`));
+        out.push(ICAL4.helpers.foldline(`${line.head}:${line.parts.join(";")}`));
       } else {
         out.push(...physical.slice(i, j));
       }
@@ -1318,7 +1359,7 @@ function colonOf(line) {
 }
 function rewriteRule(component, property, changes) {
   const [name, params, type, value] = property.toJSON();
-  const next = new ICAL3.Property([name, params, type, { ...value, ...changes }], component);
+  const next = new ICAL4.Property([name, params, type, { ...value, ...changes }], component);
   const all = [...component.getAllProperties()];
   component.removeAllProperties();
   for (const each of all) {
@@ -1436,7 +1477,7 @@ function expandWalls(master, until, budget, skipUnplaced = false) {
   const { frame } = start;
   const day = frame.form === "date";
   const norm = (wall) => day ? dayOf(wall) : wall;
-  const timeOf = (wall) => day ? ICAL3.Time.fromDateString(jcalOf(wall, frame)) : ICAL3.Time.fromDateTimeString(jcalOf(wall, "floating"));
+  const timeOf = (wall) => day ? ICAL4.Time.fromDateString(jcalOf(wall, frame)) : ICAL4.Time.fromDateTimeString(jcalOf(wall, "floating"));
   const walls = /* @__PURE__ */ new Set();
   if (norm(start.wall) <= until) {
     walls.add(norm(start.wall));
@@ -1467,7 +1508,7 @@ function expandWalls(master, until, budget, skipUnplaced = false) {
           frame
         )));
       }
-      const iterator = bounded(recur.iterator(timeOf(start.wall)), budget, recur, day ? until + DAY2 - 1 : until);
+      const iterator = bounded(recurIterator(recur, timeOf(start.wall)), budget, recur, day ? until + DAY2 - 1 : until);
       try {
         for (let next = iterator.next(); next; next = iterator.next()) {
           const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
@@ -1655,7 +1696,7 @@ function settleGapTwins(master, outcome) {
     } else {
       master.removeProperty(line);
     }
-    const own = new ICAL3.Property("exdate", master);
+    const own = new ICAL4.Property("exdate", master);
     writeInstants(own, twins.filter((_, i) => clash[i]).map((t) => t.other), frame);
     master.addProperty(own);
   }
@@ -1682,7 +1723,7 @@ function inSeriesForm(master, line) {
   }
   const values = valuesOf(line);
   const rest = values.filter((_, i) => walls[i] === null);
-  const own = new ICAL3.Property("exdate", master);
+  const own = new ICAL4.Property("exdate", master);
   writeInstants(own, walls.filter((wall) => wall !== null), frame);
   if (rest.length) {
     line.setValues(rest);
@@ -1705,7 +1746,7 @@ function keepDayExclusions(master, outcome) {
     return restored !== void 0 && !restored.has(instantKey(master, stamp)) && !holds(master, list, stamp);
   });
   if (keep.length) {
-    const property = new ICAL3.Property("exdate", master);
+    const property = new ICAL4.Property("exdate", master);
     writeInstants(property, keep, frame);
     master.addProperty(property);
   }
@@ -2069,7 +2110,7 @@ function checkDatesOnly(master, move, properties) {
 }
 
 // src/vtimezone.ts
-import ICAL4 from "ical.js";
+import ICAL5 from "ical.js";
 var DAY3 = 86400;
 var LAST_SCANNED_YEAR = 2045;
 var MIN_RUN = 3;
@@ -2426,7 +2467,7 @@ function vtimezoneFor(tzid, firstYear, lastYear) {
   }
   for (const rules of [true, false]) {
     const text = ["BEGIN:VCALENDAR", ...render(tzid, observancesOf(found, rules, endYear)), "END:VCALENDAR"].join("\r\n");
-    const vtimezone = new ICAL4.Component(ICAL4.parse(text)).getFirstSubcomponent("vtimezone");
+    const vtimezone = new ICAL5.Component(ICAL5.parse(text)).getFirstSubcomponent("vtimezone");
     if (matches(vtimezone, found)) {
       return vtimezone;
     }
@@ -2720,7 +2761,7 @@ function editFields(calendarObject, fields, options, purpose) {
   let jcalData;
   let component;
   try {
-    jcalData = ICAL5.parse(icalString);
+    jcalData = ICAL6.parse(icalString);
   } catch (error) {
     throw new UpdateFieldsError(
       "INVALID_ICALENDAR",
@@ -2732,7 +2773,7 @@ function editFields(calendarObject, fields, options, purpose) {
     throw new UpdateFieldsError("INVALID_INPUT", `Invalid input: the text holds ${jcalData.length} top-level components; give one VCALENDAR or VCARD per call`, { remedy: "fix-value" });
   }
   try {
-    component = new ICAL5.Component(jcalData);
+    component = new ICAL6.Component(jcalData);
   } catch (error) {
     throw new UpdateFieldsError(
       "INVALID_ICALENDAR",
@@ -2840,7 +2881,7 @@ function restoreOccurrences(calendarObject, ids, options = {}) {
 }
 
 // src/timezone.ts
-import ICAL6 from "ical.js";
+import ICAL7 from "ical.js";
 var invalid = (message) => new UpdateFieldsError("INVALID_VALUE", message, { remedy: "fix-value" });
 function instantOf2(instant) {
   if (instant instanceof Date) {
@@ -2872,7 +2913,7 @@ var wallText2 = (wall) => {
 function rootOf(source) {
   if (typeof source === "string") {
     try {
-      return new ICAL6.Component(ICAL6.parse(source));
+      return new ICAL7.Component(ICAL7.parse(source));
     } catch (error) {
       throw new UpdateFieldsError(
         "INVALID_ICALENDAR",
@@ -2885,7 +2926,7 @@ function rootOf(source) {
   while (root.parent) {
     root = root.parent;
   }
-  return new ICAL6.Component(root.toJSON());
+  return new ICAL7.Component(root.toJSON());
 }
 function converter(tzid, zone2, source) {
   return {
@@ -2921,7 +2962,7 @@ function resolvePropertyZone(property) {
 }
 
 // src/expand.ts
-import ICAL7 from "ical.js";
+import ICAL8 from "ical.js";
 function createRecurrenceBudget(units = WORK_BUDGET) {
   if (!Number.isFinite(units) || units < 0) {
     throw new UpdateFieldsError(
@@ -3038,14 +3079,14 @@ function expandOccurrences(calendarObject, options) {
   }
   let root;
   if (calendarObject && typeof calendarObject.toJSON === "function" && typeof calendarObject.getAllSubcomponents === "function") {
-    root = new ICAL7.Component(calendarObject.toJSON());
+    root = new ICAL8.Component(calendarObject.toJSON());
   } else {
     const text = typeof calendarObject === "string" ? calendarObject : calendarObject?.data;
     if (typeof text !== "string") {
       throw new UpdateFieldsError("INVALID_INPUT", 'expandOccurrences takes iCalendar text, an object with "data", or an ICAL.Component', { remedy: "fix-value" });
     }
     try {
-      root = new ICAL7.Component(ICAL7.parse(text));
+      root = new ICAL8.Component(ICAL8.parse(text));
     } catch (error) {
       throw new UpdateFieldsError(
         "INVALID_ICALENDAR",
