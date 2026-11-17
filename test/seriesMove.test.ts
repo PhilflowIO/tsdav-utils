@@ -442,13 +442,51 @@ describe('an EXDATE that names no instant stays as written on a move (#30)', () 
   it.each([
     ['a zoned series moved to all-day', 'DTSTART:20261005T090000Z', 'EXDATE:20261012T090000', '2026-10-05'],
     ['a floating series moved into UTC', 'DTSTART:20261005T090000', 'EXDATE:20261012T090000Z', '2026-10-05T10:00:00Z'],
-  ])('%s, where as written it would name an occurrence, is refused', (_, dtstart, exdate, to) => {
-    const series = calendar(master(dtstart, 'RRULE:FREQ=WEEKLY;COUNT=4', exdate));
+    ['a floating series moved to all-day', 'DTSTART:20261005T090000', 'EXDATE:20261012T090000Z', '2026-10-05'],
+    ['a floating series with a zoned EXDATE moved into UTC', 'DTSTART:20261005T090000',
+      'EXDATE;TZID=Europe/Berlin:20261012T090000', '2026-10-05T10:00:00Z'],
+  ])('%s, where as written it would name an occurrence, is refused; EXDATE given in the same call is taken', (_, dtstart, exdate, to) => {
+    // was ZONE_MISMATCH for a Z value in a floating series before #30; it is
+    // an existing value that cannot follow the move, as every such refusal
+    const series = calendar(BERLIN, master(dtstart, 'RRULE:FREQ=WEEKLY;COUNT=4', exdate));
     expect(() => updateFields(series, { DTSTART: to })).toThrow(expect.objectContaining({
-      code: 'SERIES_MOVE_REFUSED', property: 'EXDATE',
-      message: expect.stringMatching(new RegExp(`${exdate} cannot follow it \\(it names no occurrence of the series, ` +
-        'and left as written it would name one')),
+      code: 'SERIES_MOVE_REFUSED', remedy: 'same-call', property: 'EXDATE',
+      message: expect.stringMatching(new RegExp(`${exdate.replace(/[;/]/g, '\\$&')} cannot follow it \\(it names no occurrence ` +
+        'of the series, and left as written it would name one.*: give EXDATE in the same call$')),
     }));
+    // the remedy it names works: the lines given replace the old ones, which do not move
+    const given = to.length === 10 ? '2026-10-12' : '2026-10-12T10:00:00Z';
+    expect(prop(masterOf(updateFields(series, { DTSTART: to, EXDATE: given })), 'EXDATE')).toHaveLength(1);
+  });
+});
+
+describe('an EXDATE that names no instant shares none with an occurrence in a DST gap (#30)', () => {
+  // 29 Mar 2026 Berlin skips 02:00-03:00. A Berlin 02:30 there is read as 03:30
+  // CEST, the instant of the 03:30 occurrence, which made a Berlin EXDATE at
+  // 02:30 ambiguous (DST_AMBIGUOUS). A floating 02:30 names no instant at all,
+  // so it is no such twin: neither a move nor a new rule is refused over it.
+  // Before #30 both writes threw DST_AMBIGUOUS.
+  const gap = calendar(BERLIN, master('DTSTART;TZID=Europe/Berlin:20260327T033000', 'RRULE:FREQ=DAILY;COUNT=5',
+    'EXDATE:20260329T023000'));
+  const starts = (ical: string) => expandOccurrences(ical, { budget: createRecurrenceBudget(), until: '2027-01-01T00:00:00Z' })
+    .occurrences.map((o) => o.recurrenceId.value);
+
+  it('a DTSTART move keeps it as written and excludes nothing', () => {
+    const out = updateFields(gap, { DTSTART: '2026-03-27T04:30:00' });
+    expect(prop(masterOf(out), 'EXDATE')).toEqual(['EXDATE:20260329T023000']);
+    expect(starts(out)).toEqual(['2026-03-27T04:30:00', '2026-03-28T04:30:00', '2026-03-29T04:30:00',
+      '2026-03-30T04:30:00', '2026-03-31T04:30:00']);
+  });
+
+  it('an RRULE write (no move) is not refused over it either', () => {
+    const out = updateFields(gap, { RRULE: 'FREQ=DAILY;COUNT=6' });
+    expect(prop(masterOf(out), 'EXDATE')).toEqual(['EXDATE:20260329T023000']);
+    expect(starts(out)).toHaveLength(6);
+  });
+
+  it('the same 02:30 written in the series\' zone still is a twin, and refused', () => {
+    const zoned = gap.replace('EXDATE:20260329T023000', 'EXDATE;TZID=Europe/Berlin:20260329T023000');
+    expect(() => updateFields(zoned, { RRULE: 'FREQ=DAILY;COUNT=6' })).toThrow(expect.objectContaining({ code: 'DST_AMBIGUOUS' }));
   });
 });
 

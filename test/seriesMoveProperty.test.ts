@@ -193,24 +193,37 @@ describe('an EXDATE that names no instant excludes nothing before a move and aft
   const starts = (ical: string) => expandOccurrences(ical, { budget: createRecurrenceBudget(), until: '2030-01-01T00:00:00Z' })
     .occurrences.map((o) => Date.parse(`${o.recurrenceId.value.replace(/Z$/, '')}Z`) / 1000);
 
-  it('holds for seeded zoned and floating series with values that name nothing', () => {
+  it('holds for seeded zoned and floating series with values that name nothing, also inside DST changes', () => {
     let nameless = 0;
+    let inChanges = 0;
     for (let i = 0; i < RUNS; i++) {
       const frame = (['berlin', 'utc', 'floating'] as const)[int(0, 2)];
-      // all of 2026, at a time of day no DST gap can reach, also once moved
-      const start = Date.UTC(2026, 0, 5) / 1000 + int(0, 330) * D + int(6, 18) * H + 15 * 60 * int(0, 3);
       const freq = rnd() < 0.5 ? 'DAILY' : 'WEEKLY';
       const step = freq === 'DAILY' ? D : 7 * D;
       const count = int(4, 10);
+      // Half the cases run through a 2026 Berlin DST change (the spring gap or
+      // the repeated autumn hour, both 02:00-03:00 on a Sunday): the series
+      // has an occurrence that day at 03:00-05:45, just past the change, and
+      // some values that name nothing sit inside it, at 02:00-02:45, the wall
+      // clock a Berlin value would share its instant with the 03:xx
+      // occurrence. The other half anywhere in 2026, clear of the changes.
+      const change = rnd() < 0.5 ? null : rnd() < 0.5 ? Date.UTC(2026, 2, 29) / 1000 : Date.UTC(2026, 9, 25) / 1000;
+      const start = change === null
+        ? Date.UTC(2026, 0, 5) / 1000 + int(0, 330) * D + int(6, 18) * H + 15 * 60 * int(0, 3)
+        : change - int(0, count - 1) * step + int(3, 5) * H + 15 * 60 * int(0, 3);
+      const inChange = () => (inChanges++, change! + 2 * H + 15 * 60 * int(0, 3));
       const own = (wall: number) => frame === 'berlin' ? `;TZID=Europe/Berlin:${basic(wall)}`
         : frame === 'utc' ? `:${basic(wall)}Z` : `:${basic(wall)}`;
       const dead = (wall: number) => frame !== 'floating' ? `:${basic(wall)}`
         : rnd() < 0.5 ? `:${basic(wall)}Z` : `;TZID=Europe/Berlin:${basic(wall)}`;
       const live = [...new Set(Array.from({ length: int(0, 2) }, () => int(1, count - 1)))];
-      const distance = int(-10, 10) * D + int(-3, 3) * H;
-      // on an occurrence, or where one lands once moved, alone or several on a line
+      // through a change the series keeps clear of 02:00-03:00, also once moved
+      const distance = change === null ? int(-10, 10) * D + int(-3, 3) * H : int(-3, 3) * D + int(0, 3) * H;
+      // on an occurrence, where one lands once moved, or in the DST change;
+      // alone or several on a line
       const deadLines = Array.from({ length: int(1, 3) }, () => {
-        const at = () => start + int(0, count - 1) * step + (rnd() < 0.3 ? distance : 0);
+        const at = () => change !== null && rnd() < 0.5 ? inChange()
+          : start + int(0, count - 1) * step + (rnd() < 0.3 ? distance : 0);
         if (rnd() < 0.3) {
           const first = dead(at());
           return `EXDATE${first},${basic(at())}${first.endsWith('Z') ? 'Z' : ''}`;
@@ -238,6 +251,7 @@ describe('an EXDATE that names no instant excludes nothing before a move and aft
       }
     }
     expect(nameless).toBeGreaterThan(RUNS);
+    expect(inChanges).toBeGreaterThan(RUNS / 10);
   });
 });
 
