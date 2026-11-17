@@ -5,7 +5,7 @@ import type { DateListEdit, ListOutcome } from './dateLists';
 import type { Anchor } from './typedValue';
 import { fieldsOf, unknownZone, wallOf, zoneOf } from './zone';
 import { UpdateFieldsError, wrapped } from './errors';
-import { recurIterator } from './recur';
+import { BoundUnavailable, recurIterator } from './recur';
 
 /*
  * A DTSTART write on a series master moves the whole series.
@@ -688,12 +688,6 @@ export const expansionWork = { steps: 0 };
 /** An expansion that ran out of WORK_BUDGET: the check cannot be made, so it fails closed */
 class SeriesTooSparse extends Error {}
 
-/**
- * The installed ical.js lacks the step the work limit hooks into: a failure of
- * the library, not of the call, so it stays a plain Error and is never turned
- * into a refusal (CI's install smoke test catches it against a fresh ical.js).
- */
-class BoundUnavailable extends Error {}
 
 /** The iterator has passed the furthest wall clock the expansion needs */
 class HorizonReached extends Error {}

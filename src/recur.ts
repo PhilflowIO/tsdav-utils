@@ -29,6 +29,15 @@ import ICAL from 'ical.js';
  * lists, so which days it selects is unchanged.
  */
 
+/**
+ * The installed ical.js lacks a step the expansion relies on (the hook the
+ * work limit is charged at, or the start positions of an iteration): a
+ * failure of the library, not of the call, so it stays a plain Error and is
+ * never turned into a refusal (CI's install smoke test catches it against a
+ * fresh ical.js).
+ */
+export class BoundUnavailable extends Error {}
+
 /** The BY parts ical.js steps through by position, with the FREQ that is their own unit; all hold non-negative values, so numeric order is time order */
 const STEPPED_PARTS = [
   ['BYSECOND', 'SECONDLY'], ['BYMINUTE', 'MINUTELY'], ['BYHOUR', 'HOURLY'], ['BYMONTH', 'MONTHLY'],
@@ -74,5 +83,14 @@ export function recurIterator(recur: ICAL.Recur, dtstart: ICAL.Time): ICAL.Recur
       byIndices[part] = values.filter((v) => v <= field[part]).length - 1;
     }
   }
-  return new ICAL.RecurIterator({ rule, dtstart, by_indices: byIndices } as ConstructorParameters<typeof ICAL.RecurIterator>[0]);
+  const iterator = new ICAL.RecurIterator({ rule, dtstart, by_indices: byIndices } as
+    ConstructorParameters<typeof ICAL.RecurIterator>[0]);
+  // every ical.js 2.x keeps the object it is given (fromData); one that
+  // ignored it would start at position 0 again and lose instances in
+  // silence (MONTHLY;BYMONTH=6,1,3 from January drops that June): fail
+  // closed instead
+  if ((iterator as unknown as { by_indices?: unknown }).by_indices !== byIndices) {
+    throw new BoundUnavailable('ical.js no longer takes the start positions of a rule iteration');
+  }
+  return iterator;
 }
