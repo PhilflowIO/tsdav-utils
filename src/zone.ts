@@ -1,5 +1,6 @@
 import ICAL from 'ical.js';
 import { UpdateFieldsError } from './errors';
+import { recurIterator } from './recur';
 
 /*
  * Wall clocks and time zones.
@@ -153,7 +154,7 @@ function transitionsOf(vtimezone: ICAL.Component, horizon: number): Transition[]
         const until = wallOfTime(recur.until) + (recur.until.zone === ICAL.Timezone.utcTimezone ? from : 0);
         recur.until = ICAL.Time.fromData({ ...fieldsOf(until), isDate: recur.until.isDate });
       }
-      const iterator = recur.iterator(ICAL.Time.fromData(fieldsOf(wallOfTime(start))));
+      const iterator = recurIterator(recur, ICAL.Time.fromData(fieldsOf(wallOfTime(start))));
       for (let i = 0; i < ONSET_LIMIT; i++) {
         const next = iterator.next();
         if (!next || wallOfTime(next) - from > horizon) {

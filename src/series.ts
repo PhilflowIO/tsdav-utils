@@ -5,6 +5,7 @@ import type { DateListEdit, ListOutcome } from './dateLists';
 import type { Anchor } from './typedValue';
 import { fieldsOf, unknownZone, wallOf, zoneOf } from './zone';
 import { UpdateFieldsError, wrapped } from './errors';
+import { BoundUnavailable, recurIterator } from './recur';
 
 /*
  * A DTSTART write on a series master moves the whole series.
@@ -687,12 +688,6 @@ export const expansionWork = { steps: 0 };
 /** An expansion that ran out of WORK_BUDGET: the check cannot be made, so it fails closed */
 class SeriesTooSparse extends Error {}
 
-/**
- * The installed ical.js lacks the step the work limit hooks into: a failure of
- * the library, not of the call, so it stays a plain Error and is never turned
- * into a refusal (CI's install smoke test catches it against a fresh ical.js).
- */
-class BoundUnavailable extends Error {}
 
 /** The iterator has passed the furthest wall clock the expansion needs */
 class HorizonReached extends Error {}
@@ -790,8 +785,11 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
         recur.until = timeOf(norm(wallIn(master, stampOf(recur.until.toString(), undefined, property.name.toUpperCase()),
           frame)));
       }
-      // a date series compares days; its last candidate day starts at `until`
-      const iterator = bounded(recur.iterator(timeOf(start.wall)), budget, recur, day ? until + DAY - 1 : until);
+      // a date series compares days; its last candidate day starts at `until`.
+      // recurIterator yields in time order, so the first instance past `until`
+      // (and the first candidate past the horizon) ends the rule: nothing
+      // after it can lie in the range
+      const iterator = bounded(recurIterator(recur, timeOf(start.wall)), budget, recur, day ? until + DAY - 1 : until);
       try {
         for (let next = iterator.next(); next; next = iterator.next()) {
           const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
