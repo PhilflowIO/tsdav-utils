@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import ICAL from 'ical.js';
 import { updateFields } from '../src/updateFields';
+import { createRecurrenceBudget, expandOccurrences } from '../src/expand';
 
 // A series moves as a whole (issue #16): when the master's DTSTART moves, the
 // overrides (RECURRENCE-ID and their own times), EXDATE, RDATE and UNTIL move
@@ -382,6 +383,72 @@ describe('moving DTSTART moves EXDATE and RDATE with the series', () => {
     expect(expand(out)).toEqual([
       '2026-10-05T10:00:00Z Weekly', '2026-10-12T10:00:00Z Weekly', '2026-10-19T14:00:00Z Moved instance',
     ]);
+  });
+});
+
+describe('an EXDATE that names no instant stays as written on a move (#30)', () => {
+  // A floating EXDATE next to a zoned DTSTART, or one with a zone or Z next to
+  // a floating DTSTART, names no occurrence: expandOccurrences excludes
+  // nothing by it. A move has no occurrence to carry it along with, so it
+  // stays as it is; moved and written in the series' zone it would start
+  // excluding the occurrence on its wall clock.
+  /** the original starts expandOccurrences gives, as written */
+  const starts = (ical: string) => expandOccurrences(ical, { budget: createRecurrenceBudget(), until: '2027-01-01T00:00:00Z' })
+    .occurrences.map((o) => o.recurrenceId.value);
+  const shifted = (values: string[], hours: number) => values.map((v) =>
+    new Date(Date.parse(`${v}Z`) + hours * 3600_000).toISOString().slice(0, 19));
+
+  it('a floating EXDATE in a Berlin series excludes nothing before the move, and nothing after', () => {
+    // 19 Oct 10:00 floating names nothing; moved by an hour as a Berlin value it
+    // would land on the 10:00 occurrence of 19 Oct and exclude it
+    const series = calendar(BERLIN, master('DTSTART;TZID=Europe/Berlin:20261005T090000', 'RRULE:FREQ=WEEKLY;COUNT=5',
+      'EXDATE;TZID=Europe/Berlin:20261012T090000', 'EXDATE:20261019T090000'));
+    const before = starts(series);
+    expect(before).toEqual(['2026-10-05T09:00:00', '2026-10-19T09:00:00', '2026-10-26T09:00:00', '2026-11-02T09:00:00']);
+    const out = updateFields(series, { DTSTART: '2026-10-05T10:00:00' });
+    expect(prop(masterOf(out), 'EXDATE')).toEqual(['EXDATE;TZID=Europe/Berlin:20261012T100000', 'EXDATE:20261019T090000']);
+    expect(starts(out)).toEqual(shifted(before, 1));
+  });
+
+  it('the issue\'s case: the floating EXDATE sits where the moved series has an occurrence', () => {
+    const series = calendar(BERLIN, master('DTSTART;TZID=Europe/Berlin:20261005T090000', 'RRULE:FREQ=WEEKLY;COUNT=4',
+      'EXDATE:20261012T100000'));
+    expect(starts(series)).toHaveLength(4);
+    const moved = updateFields(series, { DTSTART: '2026-10-05T10:00:00' });
+    expect(prop(masterOf(moved), 'EXDATE')).toEqual(['EXDATE:20261012T100000']);
+    expect(starts(moved)).toEqual(shifted(starts(series), 1));
+  });
+
+  it.each([
+    ['in UTC', 'EXDATE:20261012T090000Z'],
+    ['in a zone', 'EXDATE;TZID=Europe/Berlin:20261012T090000'],
+  ])('an EXDATE %s in a floating series stays as written, and still excludes nothing', (_, exdate) => {
+    const series = calendar(BERLIN, master('DTSTART:20261005T090000', 'RRULE:FREQ=WEEKLY;COUNT=4', exdate));
+    const out = updateFields(series, { DTSTART: '2026-10-05T10:00:00' });
+    expect(prop(masterOf(out), 'EXDATE')).toEqual([exdate]);
+    expect(starts(out)).toEqual(shifted(starts(series), 1));
+    expect(starts(out)).toHaveLength(4);
+  });
+
+  it('on one line with a value that names an occurrence it is refused: one cannot stay while the other moves', () => {
+    const series = calendar(master('DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY;COUNT=4',
+      'EXDATE:20261012T090000Z,20261019T100000'));
+    expect(() => updateFields(series, { DTSTART: '2026-10-05T10:00:00Z' })).toThrow(expect.objectContaining({
+      code: 'SERIES_MOVE_REFUSED', property: 'EXDATE',
+      message: expect.stringMatching(/existing EXDATE:20261012T090000Z,20261019T100000 cannot follow it \(it holds values that name no occurrence/),
+    }));
+  });
+
+  it.each([
+    ['a zoned series moved to all-day', 'DTSTART:20261005T090000Z', 'EXDATE:20261012T090000', '2026-10-05'],
+    ['a floating series moved into UTC', 'DTSTART:20261005T090000', 'EXDATE:20261012T090000Z', '2026-10-05T10:00:00Z'],
+  ])('%s, where as written it would name an occurrence, is refused', (_, dtstart, exdate, to) => {
+    const series = calendar(master(dtstart, 'RRULE:FREQ=WEEKLY;COUNT=4', exdate));
+    expect(() => updateFields(series, { DTSTART: to })).toThrow(expect.objectContaining({
+      code: 'SERIES_MOVE_REFUSED', property: 'EXDATE',
+      message: expect.stringMatching(new RegExp(`${exdate} cannot follow it \\(it names no occurrence of the series, ` +
+        'and left as written it would name one')),
+    }));
   });
 });
 

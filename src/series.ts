@@ -217,6 +217,10 @@ function findGapTwin(master: ICAL.Component, properties: ICAL.Property[]): strin
   }
   const twins = properties.filter((property) => property.type !== 'period').flatMap((property) =>
     propertyStamps(property).flatMap((stamp) => {
+      // an EXDATE that names no instant shares none with an occurrence
+      if (property.name === 'exdate' && namesNoInstant(stamp, frame)) {
+        return [];
+      }
       const twin = gapTwin(master, stamp, frame);
       return twin ? [{ property, twin }] : [];
     }));
@@ -280,6 +284,10 @@ function moveInstants(property: ICAL.Property, move: Move) {
       { remedy: 'same-call' });
   }
   const stamps = propertyStamps(property);
+  if (property.name === 'exdate' && stamps.some((stamp) => namesNoInstant(stamp, move.from))) {
+    keepNameless(property, stamps, move);
+    return;
+  }
   if (property.type === 'date' && move.from.form !== 'date' && move.to.form !== 'date') {
     // A date next to a timed series (an RDATE or EXDATE of a whole day) stays
     // a date, moved by the days the series moved; a whole day cannot move by
@@ -293,6 +301,28 @@ function moveInstants(property: ICAL.Property, move: Move) {
     return;
   }
   writeInstants(property, stamps.map((stamp) => moved(stamp, move)), move.to);
+}
+
+/**
+ * An EXDATE line that names no instant of the series (namesNoInstant) excludes
+ * nothing, so it has no occurrence to follow: it stays as written, not moved
+ * and not converted into the series' zone, where it would start excluding the
+ * occurrence on its wall clock. Refused where it cannot stay that way: on a
+ * line together with values that do name occurrences, which have to move, or
+ * when the series changes its form so that, as written, it would name one (a
+ * floating value once the series is floating or all-day, an instant once it
+ * has a zone).
+ */
+function keepNameless(property: ICAL.Property, stamps: Stamp[], move: Move) {
+  if (!stamps.every((stamp) => namesNoInstant(stamp, move.from))) {
+    throw new UpdateFieldsError('SERIES_MOVE_REFUSED', 'it holds values that name no occurrence of the series, which ' +
+      'stay as written, on one line with values that name occurrences, which move', { remedy: 'same-call' });
+  }
+  if (!stamps.every((stamp) => namesNoInstant(stamp, move.to))) {
+    throw new UpdateFieldsError('SERIES_MOVE_REFUSED', 'it names no occurrence of the series, and left as written ' +
+      `it would name one of the series moved to a ${move.to.form === 'date' ? 'date' : move.to.form === 'floating'
+        ? 'floating time' : 'time with a zone'}`, { remedy: 'same-call' });
+  }
 }
 
 /**
@@ -823,11 +853,14 @@ function occurrences(master: ICAL.Component, stamps: Stamp[], labels: string[]):
 }
 
 /**
- * Whether a value names no occurrence of any series of its frame: a floating
- * value in a series with a zone, or an instant in a floating one (RFC 5545
- * 3.3.5 gives them no relation)
+ * Whether a value names no instant of any series of its frame, so no
+ * occurrence: a floating value in a series with a zone, or an instant (UTC or
+ * a TZID) in a floating one (RFC 5545 3.3.5 gives them no relation). The one
+ * rule for EXDATE: expandOccurrences excludes nothing by it, the list edits
+ * match it only as written, the checks take it as naming nothing, and a move
+ * leaves it as written (moveInstants).
  */
-const namesNothing = (stamp: Stamp, frame: Anchor) => frame.form !== 'date' && stamp.kind !== 'date' &&
+export const namesNoInstant = (stamp: Stamp, frame: Anchor) => frame.form !== 'date' && stamp.kind !== 'date' &&
   (stamp.kind === 'floating') !== (frame.form === 'floating');
 
 /**
@@ -837,7 +870,7 @@ const namesNothing = (stamp: Stamp, frame: Anchor) => frame.form !== 'date' && s
  */
 function targetWalls(master: ICAL.Component, frame: Anchor, stamps: Stamp[], labels: string[]): (number | null)[] {
   return stamps.map((stamp, i) => {
-    if (namesNothing(stamp, frame)) {
+    if (namesNoInstant(stamp, frame)) {
       return null;
     }
     try {
@@ -871,7 +904,7 @@ export function namesOccurrence(master: ICAL.Component, frame: Anchor, stamps: S
     if (stamp.kind === 'date') {
       return days.has(dayOf(stamp.wall));
     }
-    if (namesNothing(stamp, frame)) {
+    if (namesNoInstant(stamp, frame)) {
       return false;
     }
     if (!instants) {
@@ -1585,6 +1618,9 @@ function checkDatesOnly(master: ICAL.Component, move: Move, properties: ICAL.Pro
   const timeOfDay = move.fromWall - dayOf(move.fromWall);
   for (const property of properties) {
     for (const stamp of propertyStamps(property)) {
+      if (property.name === 'exdate' && namesNoInstant(stamp, move.from)) {
+        continue; // it names no occurrence: moveInstants keeps or refuses it
+      }
       const wall = stamp.kind === 'date' ? null : wallIn(master, stamp, move.from);
       if (wall === null || wall - dayOf(wall) !== timeOfDay) {
         const line = property.toICALString();

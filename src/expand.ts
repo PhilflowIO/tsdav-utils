@@ -2,8 +2,8 @@ import ICAL from 'ical.js';
 import { UpdateFieldsError, wrapped } from './errors';
 import { frameOf, parseDateValue } from './typedValue';
 import type { Anchor } from './typedValue';
-import { dayOf, expandWalls, instantOf, jcalOf, occurrenceInstant, propertyStamps, SeriesUnverifiable, wallIn,
-  WORK_BUDGET } from './series';
+import { dayOf, expandWalls, instantOf, jcalOf, namesNoInstant, occurrenceInstant, propertyStamps, SeriesUnverifiable,
+  wallIn, WORK_BUDGET } from './series';
 import type { RecurrenceBudget, Stamp } from './series';
 import { seriesMaster } from './updateFields';
 import type { CalendarObjectInput, ComponentType } from './types';
@@ -279,12 +279,11 @@ export function expandOccurrences(calendarObject: CalendarObjectInput | ICAL.Com
         excludedDays.add(dayOf(wallIn(master, stamp, frame)));
       } else if (stamp.kind === 'date') {
         excludedDays.add(dayOf(stamp.wall));
+      } else if (namesNoInstant(stamp, frame)) {
+        // names no occurrence: excludes nothing
       } else if (zoned) {
-        const instant = instantOf(master, stamp, frame);
-        if (instant !== null) {
-          excludedInstants.add(instant);
-        }
-      } else if (stamp.kind === 'floating') {
+        excludedInstants.add(instantOf(master, stamp, frame)!);
+      } else {
         excludedWalls.add(stamp.wall);
       }
     }

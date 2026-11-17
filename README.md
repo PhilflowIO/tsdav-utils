@@ -690,6 +690,16 @@ follow the master's `DTSTART` (see above).
     form: an instance rescheduled to Monday 09:00 Berlin stays at 09:00 when the
     series moves a week across a DST change — also when it is written in UTC,
     whose value then changes by the hour the offset changed.
+  - An `EXDATE` that names no instant — floating next to a DTSTART with a zone,
+    with `Z` or a `TZID` next to a floating one (see
+    [Lists of dates](#lists-of-dates-exdate-and-rdate)) — excludes no occurrence,
+    so it has none to follow: it stays exactly as written, neither moved nor
+    converted, and still excludes nothing. Moved into the series' zone it would
+    start excluding the occurrence on its wall clock. Where it cannot stay that
+    way the move is refused (`SERIES_MOVE_REFUSED`): on one line with values that
+    do name occurrences, and when the move changes the series' form so that, as
+    written, it would name one (a floating value once the series is all-day, a
+    `Z` value once a floating series has a zone).
   - Across an all-day/timed switch the distance counts in days: an occurrence
     keeps its day and becomes a date or takes the new DTSTART's time of day; an
     override keeps its own time on its day.
@@ -737,7 +747,8 @@ follow the master's `DTSTART` (see above).
   - **A value that cannot be moved with its meaning kept is refused**, never
     moved approximately. The error says why and what to give instead:
     - a UTC value next to a `TZID` that is neither in a `VTIMEZONE` nor an IANA
-      zone, a UTC value in a floating series, an `RDATE` of periods;
+      zone, a UTC `RDATE` or `RECURRENCE-ID` in a floating series, an `RDATE` of
+      periods;
     - an `UNTIL` of the other value type than DTSTART (a date next to a timed
       DTSTART), and an `UNTIL` at a DST change — in the repeated hour, just past
       a skipped hour, or moved into one — where the wall clock and the order of
