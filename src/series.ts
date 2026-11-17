@@ -310,8 +310,9 @@ function moveInstants(property: ICAL.Property, move: Move) {
  * occurrence on its wall clock. Refused where it cannot stay that way: on a
  * line together with values that do name occurrences, which have to move, or
  * when the series changes its form so that, as written, it would name one (a
- * floating value once the series is floating or all-day, an instant once it
- * has a zone).
+ * floating value once the series is floating or all-day; one in UTC or a TZID
+ * once it is all-day or has a zone). Either way giving EXDATE in the same call
+ * replaces the line, which then does not move (same-call).
  */
 function keepNameless(property: ICAL.Property, stamps: Stamp[], move: Move) {
   if (!stamps.every((stamp) => namesNoInstant(stamp, move.from))) {
