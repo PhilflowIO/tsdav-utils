@@ -209,12 +209,28 @@ describe('a MONTHLY rule yields RFC 5545\'s instances where ical.js yields more'
       .toEqual(['2010-01-05', ...rfcDates(second, '2010-01-05', '2010-06-01').filter((v) => v < '2010-06-01')]);
   });
 
-  it('a fifth weekday no month on the grid has is refused, not searched for without end', () => {
-    // every second February from 2019 is one of an odd year: never five Mondays.
-    // ical.js' setup searched on forever, outside any budget
-    const ics = series('DTSTART;VALUE=DATE:20190214', 'FREQ=MONTHLY;INTERVAL=24;BYDAY=-1TH,5MO');
-    expect(() => expand(ics, '2030-01-01')).toThrow(/fifth or fifth-last weekday/);
-    expect(() => expand(ics, '2030-01-01', '2026-01-01')).toThrow(/fifth or fifth-last weekday/);
+  it('a BYDAY setup ical.js would search without end: empty where nothing comes, refused where instances do', () => {
+    // every second February from 2019 is one of an odd year: never five
+    // Mondays, so the rule has no instance; ical.js' setup searched forever
+    const never = series('DTSTART;VALUE=DATE:20190204', 'FREQ=MONTHLY;INTERVAL=24;BYDAY=5MO');
+    expect(expand(never, '2030-01-01')).toMatchObject({ complete: true, stoppedBy: null });
+    expect(values(expand(never, '2030-01-01'))).toEqual(['2019-02-04']);
+    expect(values(expand(never, '2030-01-01', '2026-01-01'))).toEqual([]);
+    // the last Thursday does come, but WKST=MO puts 5MO first and ical.js
+    // searches for it without end: refused (fail closed), with `from` too
+    const hangs = series('DTSTART;VALUE=DATE:20190214', 'FREQ=MONTHLY;INTERVAL=24;BYDAY=-1TH,5MO');
+    expect(() => expand(hangs, '2030-01-01')).toThrow(/without end/);
+    expect(() => expand(hangs, '2030-01-01', '2026-01-01')).toThrow(/without end/);
+    const saturday = series('DTSTART;VALUE=DATE:20250223', 'FREQ=MONTHLY;INTERVAL=24;BYDAY=1SA,5TU');
+    expect(() => expand(saturday, '2030-01-01')).toThrow(/without end/);
+    // an earlier entry finds a day in DTSTART's month, so ical.js skips the
+    // search: expanded, as RFC 5545 gives it
+    for (const [start, rule] of [['2019-02-04', 'FREQ=MONTHLY;INTERVAL=24;BYDAY=1MO,5TU'],
+      ['2015-02-09', 'FREQ=MONTHLY;INTERVAL=48;BYDAY=5SA,1MO']]) {
+      const result = expand(series(`DTSTART;VALUE=DATE:${start.replace(/-/g, '')}`, rule), '2030-01-01');
+      expect(result, rule).toMatchObject({ complete: true, stoppedBy: null });
+      expect(values(result), rule).toEqual([start, ...rfcDates(rule, start, '2030-01-01').filter((v) => v !== start)]);
+    }
     // a grid that reaches such a month is set up as before
     const leap = series('DTSTART;VALUE=DATE:20190214', 'FREQ=MONTHLY;INTERVAL=12;BYDAY=5MO');
     expect(values(expand(leap, '2045-01-01'))).toEqual(['2019-02-14', '2044-02-29']);

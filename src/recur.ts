@@ -68,12 +68,6 @@ export function recurIterator(recur: ICAL.Recur, start: ICAL.Time): ICAL.RecurIt
   const rule = chronologicalRecur(recur);
   // where ical.js' own setup would go wrong, it is set up in the first month
   // that holds an instance (monthDaySetupStart)
-  if (fifthWeekdaySearchEndless(rule, start)) {
-    // fail closed, as for any rule ical.js refuses: the alternative is a
-    // process that never returns
-    throw new Error('Invalid BYDAY rule: no month the rule reaches has its fifth or fifth-last weekday, ' +
-      'and ical.js would search for one without end');
-  }
   const setup = monthDaySetupStart(rule, start);
   const dtstart = setup ?? start;
   const field = { BYSECOND: dtstart.second, BYMINUTE: dtstart.minute, BYHOUR: dtstart.hour, BYMONTH: dtstart.month };
@@ -92,6 +86,18 @@ export function recurIterator(recur: ICAL.Recur, start: ICAL.Time): ICAL.RecurIt
     if (values.length > 0 && FREQ_ORDER.indexOf(rule.freq) <= FREQ_ORDER.indexOf(unit)) {
       byIndices[part] = values.filter((v) => v <= field[part]).length - 1;
     }
+  }
+  if (byDaySetupEndless(rule, dtstart, byIndices.BYMONTH)) {
+    // ical.js' setup would search without end (byDaySetupEndless). A rule
+    // with no instance at all is that, ended, without the setup; one with
+    // instances cannot be set up by ical.js and is refused (fail closed)
+    if (holdsInstance(rule, wallOfTime(start), wallOfTime(start), null, LAST_WALL, start.isDate) !== false) {
+      throw new Error('Invalid BYDAY rule: ical.js would search for its fifth or fifth-last weekday without end');
+    }
+    const ended = new ICAL.RecurIterator({ rule, dtstart, by_indices: byIndices, initialized: true,
+      last: dtstart.clone() } as ConstructorParameters<typeof ICAL.RecurIterator>[0]);
+    (ended as unknown as { completed: boolean }).completed = true;
+    return ended;
   }
   const iterator = new ICAL.RecurIterator({ rule, dtstart, by_indices: byIndices } as
     ConstructorParameters<typeof ICAL.RecurIterator>[0]);
@@ -204,55 +210,95 @@ function firstDayByPosition(iterator: ICAL.RecurIterator, rule: ICAL.Recur): voi
 }
 
 /**
- * Whether ical.js' (2.2) setup of a MONTHLY rule would never return. For each
- * fifth or fifth-last weekday in BYDAY (5MO, -5FR) that DTSTART's month
- * lacks, init steps on with increment_month (INTERVAL months, or through the
- * BYMONTH list) until a month has it, with no bound:
+ * Whether ical.js' (2.2) setup of a MONTHLY rule with BYDAY would never
+ * return, read step by step from RecurIterator.init (its MONTHLY BYDAY
+ * branch), which this follows exactly:
+ * - BYDAY is put in order by sort_byday_rules (weekday counted from WKST);
+ * - for each entry, from DTSTART's month, the day is nthWeekDay(weekday,
+ *   ordinal) (weekdays counted from Sunday there), tested against
+ *   `daysInMonth`, a variable set from DTSTART's month once and only updated
+ *   by the searches;
+ * - where it does not fit, the entry is skipped if an earlier entry already
+ *   found a day in DTSTART's month (`tempLast.month == initLast.month`), and
+ *   otherwise searched for month by month with increment_month (INTERVAL
+ *   months on, or the next BYMONTH entry, whose position carries over from
+ *   one entry to the next), without a bound.
+ * A search that has not ended after CYCLE_MONTHS steps never ends: what it
+ * tests depends only on the month (its length and weekdays repeat every
+ * 4,800 months) and on BYMONTH's position, which follows the month.
  * FREQ=MONTHLY;INTERVAL=24;BYDAY=5MO from February 2019 visits only the
- * Februaries of odd years, none of which has five Mondays, and the call
- * never returns, outside any budget. Month lengths and weekdays repeat every
- * CYCLE_MONTHS, so a search that finds no such month in that many steps
- * never finds one. (ical.js skips an entry whose search an earlier entry
- * made unneeded in the start month; such a rule is refused here as well,
- * which fails closed.)
+ * Februaries of odd years; BYDAY=1MO,5TU from 4 February 2019 never searches
+ * (the first Monday is found first, in that month), BYDAY=1SA,5TU from 23
+ * February 2025 does (WKST=MO puts TU first).
  */
-function fifthWeekdaySearchEndless(rule: ICAL.Recur, dtstart: ICAL.Time): boolean {
-  if (rule.freq !== 'MONTHLY') {
+function byDaySetupEndless(rule: ICAL.Recur, dtstart: ICAL.Time, byMonthIndex: number): boolean {
+  const byDay = (rule.getComponent('BYDAY') as (string | number)[]).map(String);
+  if (rule.freq !== 'MONTHLY' || byDay.length === 0) {
     return false;
   }
-  const weekdays = (rule.getComponent('BYDAY') as string[]).map((d) => /^[+-]?5(SU|MO|TU|WE|TH|FR|SA)$/.exec(String(d)))
-    .filter((m): m is RegExpExecArray => m !== null)
-    .map((m) => ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'].indexOf(m[1]));
-  if (weekdays.length === 0) {
-    return false;
+  const dayOfWeek = (value: string, wkst?: number) => {
+    const m = value.match(/([+-]?[0-9])?(MO|TU|WE|TH|FR|SA|SU)/);
+    return m ? [parseInt(m[1] || '0', 10), ICAL.Recur.icalDayToNumericDay(m[2], wkst as Parameters<typeof ICAL.Recur.icalDayToNumericDay>[1])]
+      : [0, 0];
+  };
+  // sort_byday_rules, as written
+  const rules = [...byDay];
+  for (let i = 0; i < rules.length; i++) {
+    for (let j = 0; j < i; j++) {
+      if (dayOfWeek(rules[j], rule.wkst)[1] > dayOfWeek(rules[i], rule.wkst)[1]) {
+        [rules[i], rules[j]] = [rules[j], rules[i]];
+      }
+    }
   }
   const months = (rule.getComponent('BYMONTH') as (number | string)[]).map(Number);
   const interval = Math.max(1, rule.interval || 1);
-  /** Whether month m of year y has five of weekday w */
-  const hasFive = (y: number, m: number, w: number) => {
+  const ordinal = (y: number, m: number, d: number) => {
     const t = new Date(0);
-    t.setUTCFullYear(y, m - 1, 1);
-    return (w - t.getUTCDay() + 7) % 7 + 29 <= daysInMonth(y, m);
+    t.setUTCFullYear(y, m - 1, d);
+    return t.getTime();
   };
-  return weekdays.some((w) => {
-    let { year, month } = dtstart;
-    for (let steps = 0; steps <= CYCLE_MONTHS; steps++) {
-      if (hasFive(year, month, w)) {
-        return false;
+  let index = byMonthIndex;
+  let length = daysInMonth(dtstart.year, dtstart.month);
+  let found: { year: number; month: number; day: number } | null = null;
+  for (const value of rules) {
+    const [pos, dow] = dayOfWeek(value);
+    if (pos >= 6 || pos <= -6) {
+      // ical.js refuses the rule
+      return false;
+    }
+    const at = ICAL.Time.fromData({ year: dtstart.year, month: dtstart.month, day: 1, isDate: true });
+    let day = at.nthWeekDay(dow, pos);
+    if (day > length || day <= 0) {
+      if (found && found.month === dtstart.month) {
+        continue;
       }
-      // increment_month: the next listed month (a year on past the last), or INTERVAL months on
-      if (months.length > 0) {
-        const next = months.find((m) => m > month);
-        year += next === undefined ? 1 : 0;
-        month = next ?? months[0];
-      } else {
-        month += interval;
-        year += Math.floor((month - 1) / 12);
-        month = ((month - 1) % 12) + 1;
+      for (let steps = 0; day > length || day <= 0; steps++) {
+        if (steps >= CYCLE_MONTHS) {
+          return true;
+        }
+        // increment_month
+        if (months.length > 0) {
+          index++;
+          if (index === months.length) {
+            index = 0;
+            at.year += 1;
+          }
+          at.month = months[index];
+        } else {
+          let month = at.month + interval - 1;
+          at.year += Math.trunc(month / 12);
+          month %= 12;
+          at.month = month + 1;
+        }
+        length = daysInMonth(at.year, at.month);
+        day = at.nthWeekDay(dow, pos);
       }
     }
-    return true;
-  });
+    if (!found || ordinal(at.year, at.month, day) < ordinal(found.year, found.month, found.day)) {
+      found = { year: at.year, month: at.month, day };
+    }
+  }
+  return false;
 }
 
 /** The days of a month, January = 1, for any year of the proleptic Gregorian calendar */
@@ -263,6 +309,9 @@ function daysInMonth(year: number, month: number): number {
 
 /** Months in a cycle of the Gregorian calendar: month lengths, and weekdays, repeat every 400 years */
 const CYCLE_MONTHS = 400 * 12;
+
+/** The last wall clock Date can hold (year 275760) */
+const LAST_WALL = 8.64e12;
 
 /**
  * Where ical.js (2.2) must set up a MONTHLY;BYMONTHDAY rule without BYDAY so
@@ -807,12 +856,26 @@ export function holdsInstance(recur: ICAL.Recur, dtstart: number, begin: number,
     const at = model.origin + k * model.step;
     // a month's days take about a microsecond to count (a unit of WORK_BUDGET; measured: 4,800 months 1.3-4.6 ms)
     charge(model.monthly ? 1 : 12);
-    const size = model.days(Math.floor(at / 12), (at % 12) + 1).length * model.times.length;
+    // the same year of the 400-year cycle near 2000: Date covers it, whatever the INTERVAL
+    const year = 2000 + (((Math.floor(at / 12) - 2000) % 400) + 400) % 400;
+    const size = model.days(year, (at % 12) + 1).length * model.times.length;
     if (model.bySetPos.length > 0 ? model.bySetPos.some((v) => Math.abs(v) <= size) : size > 0) {
       return true;
     }
   }
   return false;
+}
+
+/** A wall clock in seconds, for any year (Date.UTC reads 0 to 99 as 1900 to 1999) */
+function wallAt(year: number, month: number, day: number, seconds = 0): number {
+  const t = new Date(0);
+  t.setUTCFullYear(year, month - 1, day);
+  return t.getTime() / 1000 + seconds;
+}
+
+/** The wall clock of an ical.js time; a date at 00:00 */
+function wallOfTime(time: ICAL.Time): number {
+  return wallAt(time.year, time.month, time.day, time.isDate ? 0 : time.hour * 3600 + time.minute * 60 + time.second);
 }
 
 /**
