@@ -859,7 +859,9 @@ iterated from the first month of its own grid that holds one. ical.js' own
 setup searched from there with the list not yet read against the month, so
 `-31` in June became day 0, and every later month came a month early; and it
 gave up after three months, leaving `BYMONTHDAY=31;INTERVAL=5` from a June
-without any occurrence.
+without any occurrence. A month without a listed day no longer yields its 1st
+at the next listed hour either (`BYMONTHDAY=31;BYHOUR=0,23` gave 1 February
+at 23:00).
 
 It never loops: ical.js tests rule candidates one by one without a bound of its
 own (`FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0` from 1950 is billions of
@@ -872,9 +874,12 @@ stops — fail closed: `complete: false, stoppedBy: 'budget'` (with several
 336 months, and a fifth Sunday of February can be 40 years away), the result
 is `complete: false, stoppedBy: 'library'`: later occurrences may be missing.
 A rule that has nothing left to give up to the end of the range is complete
-instead: each period from the last occurrence on is counted against RFC 5545
-(month lengths and weekdays repeat every 400 years), so
-`FREQ=MONTHLY;BYDAY=5MO;BYSETPOS=5`, which never recurs, is `complete: true`.
+instead: each period from the last occurrence on is counted against RFC 5545,
+for at most one cycle of the rule's own periods, after which every period
+shape has come round (month lengths and weekdays repeat every 4,800 months,
+so 4,800 / gcd(months per period, 4,800) periods: 400 for `YEARLY;INTERVAL=7`,
+2,800 years). So `FREQ=MONTHLY;BYDAY=5MO;BYSETPOS=5`, which never recurs, is
+`complete: true`. The count is charged to `budget`, one unit a month.
 `BYWEEKNO`, and an ordinal weekday with `BYMONTHDAY` or `BYYEARDAY`, are not
 counted: those stay `'library'`. Pass the same budget to several
 calls to bound a whole request.

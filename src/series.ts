@@ -901,7 +901,12 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
             }
           }
           if (!next && !emptyAtSetup && !endedByRule(iterator) &&
-              holdsInstance(recur, start.wall, first, yielded, Math.min(until, ruleEnd)) !== false) {
+              holdsInstance(recur, start.wall, first, yielded, Math.min(until, ruleEnd), day, (units) => {
+                // counting the periods is work like any walk: charged to the same budget
+                if ((budget.remaining -= units) < 0) {
+                  throw new SeriesTooSparse('the rule is too sparse to expand within the work limit');
+                }
+              }) !== false) {
             // ical.js gave up its search inside the range, and the rule may
             // have an instance after the last it gave, up to the range's end:
             // a rule with none left (holdsInstance) has simply ended

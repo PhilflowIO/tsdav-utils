@@ -198,6 +198,32 @@ describe('a rule with nothing left to give is complete, one ical.js gives up on 
     expect(expand(ics, '2133-08-01T00:00:00', '2117-01-01T00:00:00')).toMatchObject({ complete: false, stoppedBy: 'library' });
   });
 
+  it('looks at a whole cycle of the rule\'s own periods, not of 4,800 months', () => {
+    // every 7 years from 2001, a 29 February on a Monday: 2596, then 3408 —
+    // 116 periods, 812 years apart; ical.js gives up after 28 empty years
+    const rule = 'FREQ=YEARLY;INTERVAL=7;BYMONTH=2;BYMONTHDAY=29;BYDAY=MO';
+    const ics = series('DTSTART;VALUE=DATE:20010201', rule);
+    const result = expand(ics, '4000-01-01');
+    expect(result).toMatchObject({ complete: false, stoppedBy: 'library' });
+    expect(rfcDates(rule, '2001-02-01', '3500-01-01').filter((v) => v > '2596-03-01')[0]).toBe('3408-02-29');
+    const wall = (d: string) => Date.parse(`${d}T00:00:00Z`) / 1000;
+    expect(holdsInstance(ICAL.Recur.fromString(rule), wall('2001-02-01'), wall('2001-02-01'), wall('2596-02-29'),
+      wall('3999-12-31'), true)).toBe(true);
+    expect(holdsInstance(ICAL.Recur.fromString(rule), wall('2001-02-01'), wall('2001-02-01'), wall('2596-02-29'),
+      wall('3400-12-31'), true)).toBe(false);
+  });
+
+  it('charges counting the periods to the budget', () => {
+    // INTERVAL=2: 2,400 periods of one month to prove the fifth Monday never comes
+    const ics = series('DTSTART;VALUE=DATE:20010101', 'FREQ=MONTHLY;INTERVAL=2;BYDAY=5MO;BYSETPOS=5');
+    const budget = createRecurrenceBudget(1e8);
+    expect(expandOccurrences(ics, { budget, until: '2100-01-01' }).complete).toBe(true);
+    expect(1e8 - budget.remaining).toBeGreaterThanOrEqual(2400);
+    // a budget too small for the count says so
+    const small = expandOccurrences(ics, { budget: createRecurrenceBudget(1e8 - budget.remaining - 100), until: '2100-01-01' });
+    expect(small).toMatchObject({ complete: false, stoppedBy: 'budget' });
+  });
+
   it('says a period holds an instance exactly when RFC 5545 gives one, for random rules', () => {
     const { rnd, int, pick, some } = random(4242);
     const WD = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
@@ -221,7 +247,7 @@ describe('a rule with nothing left to give is complete, one ical.js gives up on 
       const begin = startWall + int(0, 60) * 31 * 86400;
       const end = begin + int(0, 120) * 31 * 86400;
       const recur = ICAL.Recur.fromString(rule);
-      const verdict = holdsInstance(recur, startWall, begin, null, end);
+      const verdict = holdsInstance(recur, startWall, begin, null, end, true);
       if (verdict === null) continue;
       // the oracle's instances in the periods from begin's through end's
       const day = (wall: number) => new Date(wall * 1000).toISOString().slice(0, 10);
