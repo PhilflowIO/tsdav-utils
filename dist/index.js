@@ -664,6 +664,9 @@ function keepInstances(iterator, rule, start) {
   if (typeof own !== "function") {
     throw new BoundUnavailable("ical.js no longer iterates by next");
   }
+  const count = it.rule.count || 0;
+  it.rule.count = null;
+  let counted = 0;
   const periodOf = (year, month) => year * 12 + (model.monthly ? month - 1 : 0);
   let cachedAt = Number.NaN;
   let cached = /* @__PURE__ */ new Set();
@@ -717,7 +720,8 @@ function keepInstances(iterator, rule, start) {
     const at = periodOf(d.getUTCFullYear(), d.getUTCMonth() + 1);
     passTo(Math.min(at, pointer + cyclePeriods(model.step) * model.step));
     const open = pointer === at ? instancesOf(at).filter((wall) => wall >= startWall && !yielded.has(wall)) : [];
-    return [...missed, ...open].some((wall) => wall >= lower && wall <= end);
+    const inRange = [...missed, ...open].filter((wall) => wall >= lower && wall <= end);
+    return inRange.length > 0 ? Math.min(...inRange) : null;
   };
   const span = cyclePeriods(model.step) * model.step;
   let kept = model.origin;
@@ -725,6 +729,11 @@ function keepInstances(iterator, rule, start) {
   it.next = function next(again) {
     if (again) {
       return own.call(this, again);
+    }
+    if (count && counted >= count) {
+      this.completed = true;
+      this.countReached = true;
+      return null;
     }
     for (; ; ) {
       const time = own.call(this);
@@ -743,10 +752,8 @@ function keepInstances(iterator, rule, start) {
       if (cached.has(wall)) {
         yielded.add(wall);
         kept = at;
+        counted++;
         return time;
-      }
-      if (this.rule.count) {
-        this.rule.count++;
       }
       if (at - kept > span) {
         this.completed = true;
@@ -2082,7 +2089,7 @@ function yieldsFromStart(recur, dtstart, budget, horizon) {
 }
 function endedByRule(iterator) {
   const it = iterator;
-  return Boolean(it.rule.count && it.occurrence_number >= it.rule.count) || Boolean(it.rule.until && it.last.compare(it.rule.until) > 0);
+  return Boolean(it.countReached) || Boolean(it.rule.count && it.occurrence_number >= it.rule.count) || Boolean(it.rule.until && it.last.compare(it.rule.until) > 0);
 }
 function expandWalls(master, until, budget, skipUnplaced = false, from = -Infinity) {
   const start = startOf(master);
@@ -2152,17 +2159,19 @@ function expandWalls(master, until, budget, skipUnplaced = false, from = -Infini
           const emptyAtSetup = Boolean(iterator.completed);
           let next = iterator.next();
           let yielded = null;
+          added.length = 0;
           for (; next; next = iterator.next()) {
             const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
             if (wall > until) {
               break;
             }
             yielded = wall;
-            if (wall >= from) {
+            if (wall >= from && !walls.has(wall)) {
               walls.add(wall);
+              added.push(wall);
             }
           }
-          if (!next && endedByRule(iterator) && iterator.rule.count) {
+          if (!next && endedByRule(iterator) && recur.count) {
             checkedTo = yielded ?? -Infinity;
           }
           if (!next && !emptyAtSetup && !endedByRule(iterator)) {
@@ -2181,15 +2190,22 @@ function expandWalls(master, until, budget, skipUnplaced = false, from = -Infini
           }
         }
         const missed = iterator?.missed;
-        if (missed && missed(from, checkedTo)) {
+        const firstMissed = missed ? missed(recur.count ? -Infinity : from, checkedTo) : null;
+        if (firstMissed !== null) {
           cut = true;
+          if (recur.count) {
+            for (const wall of added) {
+              if (wall > firstMissed) walls.delete(wall);
+            }
+          }
         }
       };
+      const added = [];
       let first = iterationStart(recur, start.wall, ruleFrom, day);
       if (first !== start.wall) {
         const fromStart = yieldsFromStart(recur, timeOf(start.wall), budget, day ? until + DAY2 - 1 : until);
         if (fromStart === "none") {
-          continue;
+          first = start.wall;
         }
         if (fromStart === "cut") {
           first = start.wall;
