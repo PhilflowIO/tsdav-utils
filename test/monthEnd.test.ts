@@ -141,9 +141,11 @@ describe('a MONTHLY;BYMONTHDAY rule whose start month holds none of its days (#4
         whole = expand(ics, until);
       } catch (error) {
         // ical.js refuses some YEARLY BYMONTHDAY lists (two listed days on one
-        // date: "Same occurrence found twice"), as 0.8.0 did: with `from` alike
+        // date: "Same occurrence found twice"), as 0.8.0 did: with `from` alike.
+        // Only ical.js's own messages pass here, so a refusal this package adds
+        // ("Invalid ...") cannot hide behind them.
         const message = (error as Error).message;
-        expect(message, `${rule} ${dtstart}`).toMatch(/Same occurrence found twice|Malformed|Invalid/);
+        expect(message, `${rule} ${dtstart}`).toMatch(/Same occurrence found twice|Malformed values/);
         expect(() => expand(ics, until, `${int(2026, 2030)}-01-01${zoned ? 'T00:00:00' : ''}`)).toThrow(message);
         continue;
       }
