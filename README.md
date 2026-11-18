@@ -870,7 +870,13 @@ stops — fail closed: `complete: false, stoppedBy: 'budget'` (with several
 (default 1000) stops with `stoppedBy: 'limit'`. Where ical.js gives a rule up inside the range (it ends a
 `YEARLY` rule after 28 years without an occurrence and a `MONTHLY` one after
 336 months, and a fifth Sunday of February can be 40 years away), the result
-is `complete: false, stoppedBy: 'library'`: later occurrences may be missing. Pass the same budget to several
+is `complete: false, stoppedBy: 'library'`: later occurrences may be missing.
+A rule that has nothing left to give up to the end of the range is complete
+instead: each period from the last occurrence on is counted against RFC 5545
+(month lengths and weekdays repeat every 400 years), so
+`FREQ=MONTHLY;BYDAY=5MO;BYSETPOS=5`, which never recurs, is `complete: true`.
+`BYWEEKNO`, and an ordinal weekday with `BYMONTHDAY` or `BYYEARDAY`, are not
+counted: those stay `'library'`. Pass the same budget to several
 calls to bound a whole request.
 
 Pass `from` for a window, not only to filter: what an open-ended series costs

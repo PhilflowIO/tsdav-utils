@@ -5,7 +5,7 @@ import type { DateListEdit, ListOutcome } from './dateLists';
 import type { Anchor } from './typedValue';
 import { fieldsOf, unknownZone, wallOf, zoneOf } from './zone';
 import { UpdateFieldsError, wrapped } from './errors';
-import { BoundUnavailable, fixedYearlyWalls, iterationStart, recurIterator, walkedInFull } from './recur';
+import { BoundUnavailable, fixedYearlyWalls, holdsInstance, iterationStart, recurIterator, walkedInFull } from './recur';
 
 /*
  * A DTSTART write on a series master moves the whole series.
@@ -888,18 +888,23 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
           }
           const emptyAtSetup = Boolean((iterator as unknown as { completed?: boolean }).completed);
           let next = iterator.next();
+          let yielded: number | null = null;
           for (; next; next = iterator.next()) {
             const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
             if (wall > until) {
               break;
             }
+            yielded = wall;
             // before `from`: not needed, and from a moved start not exact
             if (wall >= from) {
               walls.add(wall);
             }
           }
-          if (!next && !emptyAtSetup && !endedByRule(iterator)) {
-            // ical.js gave up its search inside the range
+          if (!next && !emptyAtSetup && !endedByRule(iterator) &&
+              holdsInstance(recur, start.wall, first, yielded, Math.min(until, ruleEnd)) !== false) {
+            // ical.js gave up its search inside the range, and the rule may
+            // have an instance after the last it gave, up to the range's end:
+            // a rule with none left (holdsInstance) has simply ended
             cut = true;
           }
         } catch (error) {

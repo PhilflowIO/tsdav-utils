@@ -1,10 +1,11 @@
 import ICAL from 'ical.js';
 import { describe, expect, it } from 'vitest';
 import { createRecurrenceBudget, expandOccurrences } from '../src/index';
-import { recurIterator } from '../src/recur';
+import { holdsInstance, recurIterator } from '../src/recur';
 import { rfcDates } from './rfcOracle';
 
-// Rules whose period may hold none of its days (#42). Results are checked against
+// Rules whose period may hold none of its days (#42), and rules ical.js gives
+// up on although nothing is left to give. Results are checked against
 // RFC 5545 by brute force (rfcOracle), and with `from` against the full
 // expansion filtered to `from`.
 //
@@ -175,5 +176,63 @@ describe('a MONTHLY;BYMONTHDAY rule whose start month holds none of its days (#4
     expect(compared).toBeGreaterThan(RUNS * 8);
     expect(rfcCompared).toBeGreaterThan(RUNS * 0.3);
     expect(nonEmpty).toBeGreaterThan(compared * 0.3);
+  });
+});
+
+describe('a rule with nothing left to give is complete, one ical.js gives up on is not', () => {
+  it('a fifth Monday by BYSETPOS=5 never recurs: complete, with `from` or without', () => {
+    // a set of at most one Monday has no fifth; ical.js ends the walk after
+    // 336 empty months, which is the rule's end here, not a give-up
+    const ics = series('DTSTART;TZID=Europe/Berlin:19711005T233000', 'FREQ=MONTHLY;INTERVAL=2;BYDAY=5MO;BYSETPOS=5');
+    const whole = expand(ics, '2030-01-01T00:00:00');
+    expect(whole).toMatchObject({ complete: true, stoppedBy: null });
+    expect(expand(ics, '2030-01-01T00:00:00', '2028-10-01T00:00:00')).toMatchObject(
+      { occurrences: [], complete: true, stoppedBy: null });
+  });
+
+  it('a fifth Sunday of February is cut where the next one lies in the range, complete where none does', () => {
+    // 2060 and 2088, then ical.js stops after 28 years; the next is 2128
+    const ics = series('DTSTART:20580120T130000', 'FREQ=YEARLY;BYMONTH=2;BYDAY=5SU');
+    expect(expand(ics, '2125-01-01T00:00:00')).toMatchObject({ complete: true, stoppedBy: null });
+    expect(expand(ics, '2133-08-01T00:00:00')).toMatchObject({ complete: false, stoppedBy: 'library' });
+    expect(expand(ics, '2133-08-01T00:00:00', '2117-01-01T00:00:00')).toMatchObject({ complete: false, stoppedBy: 'library' });
+  });
+
+  it('says a period holds an instance exactly when RFC 5545 gives one, for random rules', () => {
+    const { rnd, int, pick, some } = random(4242);
+    const WD = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+    let held = 0;
+    let empty = 0;
+    for (let i = 0; i < RUNS; i++) {
+      const freq = pick(['MONTHLY', 'YEARLY']);
+      const parts = [`FREQ=${freq}`, `INTERVAL=${pick([1, 1, 2, 3, 5, 12])}`];
+      if (rnd() < 0.5) parts.push(`BYMONTH=${some([1, 2, 3, 4, 6, 9, 11, 12], 3).join(',')}`);
+      const monthDays = rnd() < 0.5;
+      if (monthDays) parts.push(`BYMONTHDAY=${some([1, 13, 28, 29, 30, 31, -1, -29, -30, -31], 3).join(',')}`);
+      if (rnd() < 0.6) {
+        const ordinal = !monthDays && rnd() < 0.6;
+        parts.push(`BYDAY=${some(WD, 2).map((d) => (ordinal ? pick(['1', '2', '4', '5', '-1', '-5', '53', '-53']) : '') + d)
+          .join(',')}`);
+      }
+      if (rnd() < 0.4) parts.push(`BYSETPOS=${some([1, 2, 5, -1, -3, -5, 8], 2).join(',')}`);
+      const rule = parts.join(';');
+      const start = `${int(1990, 2030)}-${p2(int(1, 12))}-${p2(int(1, 28))}`;
+      const startWall = Date.parse(`${start}T00:00:00Z`) / 1000;
+      const begin = startWall + int(0, 60) * 31 * 86400;
+      const end = begin + int(0, 120) * 31 * 86400;
+      const recur = ICAL.Recur.fromString(rule);
+      const verdict = holdsInstance(recur, startWall, begin, null, end);
+      if (verdict === null) continue;
+      // the oracle's instances in the periods from begin's through end's
+      const day = (wall: number) => new Date(wall * 1000).toISOString().slice(0, 10);
+      const periodStart = freq === 'MONTHLY' ? `${day(begin).slice(0, 7)}-01` : `${day(begin).slice(0, 4)}-01-01`;
+      const periodEnd = freq === 'MONTHLY' ? `${day(end).slice(0, 7)}-31` : `${day(end).slice(0, 4)}-12-31`;
+      const want = rfcDates(rule, start, periodEnd, periodStart).length > 0;
+      expect(verdict, `${rule} from ${start}, ${day(begin)} to ${day(end)}`).toBe(want);
+      if (want) held++;
+      else empty++;
+    }
+    expect(held).toBeGreaterThan(RUNS * 0.2);
+    expect(empty).toBeGreaterThan(RUNS * 0.05);
   });
 });
