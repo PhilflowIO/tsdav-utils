@@ -863,6 +863,20 @@ without any occurrence. A month without a listed day no longer yields its 1st
 at the next listed hour either (`BYMONTHDAY=31;BYHOUR=0,23` gave 1 February
 at 23:00).
 
+Every candidate of a `MONTHLY` rule is checked against RFC 5545 where ical.js
+yields all instances and more, and what is no instance is dropped (not counted
+toward `COUNT`): the day ical.js' setup finds untested (`BYDAY=5MO;BYSETPOS=2`
+gave the fifth Monday of `DTSTART`'s month, a first Monday of a December that
+`BYMONTH=6` leaves out), every month `BYMONTH` lists where `INTERVAL` takes
+fewer (`INTERVAL=24;BYMONTH=11` from a May has no instance, ical.js gave every
+November), and every listed day where `BYSETPOS` picks some
+(`BYMONTHDAY=31,30;BYSETPOS=3` has none). With `BYDAY` and a negative
+`BYSETPOS`, the 1st of a month is kept when `BYSETPOS` names it from the back
+(`BYDAY=SA;BYSETPOS=-5`: 1 August 2020). Left as ical.js gives them
+(tsdav-utils#36): `BYDAY` with `BYMONTHDAY` (ical.js steps month by month
+whatever `INTERVAL` says), `BYDAY` with `BYSETPOS` and more than one time of
+day, `BYMONTH` with a fifth weekday, and `YEARLY` rules.
+
 It never loops: ical.js tests rule candidates one by one without a bound of its
 own (`FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0` from 1950 is billions of
 candidates before 2026), so every candidate is charged to `budget`, as in

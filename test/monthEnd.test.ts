@@ -148,10 +148,9 @@ describe('a MONTHLY;BYMONTHDAY rule whose start month holds none of its days (#4
         continue;
       }
       const all = values(whole);
-      // ical.js steps a MONTHLY rule with BYMONTH through its months whatever
-      // INTERVAL says, and reads a YEARLY BYMONTHDAY in ways of its own:
-      // RFC 5545 is checked where neither applies
-      if (freq === 'MONTHLY' && (byMonth.length === 0 || interval === 1) && !zoned) {
+      // ical.js reads a YEARLY BYMONTHDAY in ways of its own (#36): RFC 5545
+      // is checked for MONTHLY
+      if (freq === 'MONTHLY' && !zoned) {
         // `until` is exclusive
         expect(all, `${rule} ${dtstart}`).toEqual([start, ...rfcDates(rule, start, last).filter((v) => v !== start && v < last)]);
         rfcCompared++;
@@ -174,7 +173,89 @@ describe('a MONTHLY;BYMONTHDAY rule whose start month holds none of its days (#4
       }
     }
     expect(compared).toBeGreaterThan(RUNS * 8);
-    expect(rfcCompared).toBeGreaterThan(RUNS * 0.3);
+    expect(rfcCompared).toBeGreaterThan(RUNS * 0.4);
+    expect(nonEmpty).toBeGreaterThan(compared * 0.3);
+  });
+});
+
+describe('a MONTHLY rule yields RFC 5545\'s instances where ical.js yields more', () => {
+  it('a setup day BYSETPOS rules out is dropped', () => {
+    // ical.js' setup yields the fifth Monday it finds, BYSETPOS unread
+    for (const [start, rule] of [['1993-05-08', 'FREQ=MONTHLY;INTERVAL=7;BYDAY=5MO;BYSETPOS=2'],
+      ['2001-01-01', 'FREQ=MONTHLY;BYDAY=5MO;BYSETPOS=5']]) {
+      const ics = series(`DTSTART;VALUE=DATE:${start.replace(/-/g, '')}`, rule);
+      const result = expand(ics, '2040-01-01');
+      expect(values(result), rule).toEqual([start]);
+      expect(rfcDates(rule, start, '2040-01-01')).toEqual([]);
+      expect(result, rule).toMatchObject({ complete: true, stoppedBy: null });
+    }
+  });
+
+  it('BYMONTH with INTERVAL keeps the grid, and COUNT counts instances only', () => {
+    // May + 24k months is never a November; ical.js stepped every November
+    const none = series('DTSTART:20070528T015900', 'FREQ=MONTHLY;INTERVAL=24;BYMONTHDAY=-2,28;BYMONTH=11;COUNT=1');
+    expect(values(expand(none, '2100-01-01T00:00:00'))).toEqual(['2007-05-28T01:59:00']);
+    const rule = 'FREQ=MONTHLY;INTERVAL=2;BYMONTH=1,2,3,4;BYMONTHDAY=1;COUNT=4';
+    expect(values(expand(series('DTSTART;VALUE=DATE:20260101', rule), '2030-01-01')))
+      .toEqual(['2026-01-01', '2026-03-01', '2027-01-01', '2027-03-01']);
+  });
+
+  it('BYSETPOS over BYMONTHDAY picks a position, not every listed day', () => {
+    // a set of at most two days has no third: ical.js gave every 30th and 31st
+    const rule = 'FREQ=MONTHLY;BYMONTHDAY=31,30;BYMONTH=7,4,10,1;BYSETPOS=3';
+    expect(values(expand(series('DTSTART;VALUE=DATE:20100105', rule), '2026-01-01'))).toEqual(['2010-01-05']);
+    const second = 'FREQ=MONTHLY;BYMONTHDAY=31,30,1;BYSETPOS=-2';
+    expect(values(expand(series('DTSTART;VALUE=DATE:20100105', second), '2010-06-01')))
+      .toEqual(['2010-01-05', ...rfcDates(second, '2010-01-05', '2010-06-01').filter((v) => v < '2010-06-01')]);
+  });
+
+  it('for random MONTHLY rules with BYDAY or BYMONTHDAY, BYSETPOS, BYMONTH and INTERVAL, all-day: RFC 5545', () => {
+    const { rnd, int, pick, some } = random(4343);
+    const WD = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+    let compared = 0;
+    let nonEmpty = 0;
+    for (let i = 0; i < RUNS; i++) {
+      const parts = ['FREQ=MONTHLY', `INTERVAL=${pick([1, 1, 2, 3, 5, 7, 12, 24])}`];
+      if (rnd() < 0.5) parts.push(`BYMONTH=${some([1, 2, 3, 4, 6, 9, 11, 12], 3).join(',')}`);
+      const monthDays = rnd() < 0.4;
+      if (monthDays) parts.push(`BYMONTHDAY=${some([1, 13, 28, 29, 30, 31, -1, -29, -30, -31], 3).join(',')}`);
+      // BYDAY with BYMONTHDAY is left as ical.js gives it (#36)
+      if (!monthDays) {
+        const ordinal = rnd() < 0.6;
+        parts.push(`BYDAY=${some(WD, 3).map((d) => (ordinal ? pick(['1', '2', '4', '5', '-1', '-2', '-5']) : '') + d).join(',')}`);
+      }
+      if (rnd() < 0.5) parts.push(`BYSETPOS=${some([1, 2, 3, 5, -1, -2, -5], 2).join(',')}`);
+      if (rnd() < 0.2) parts.push(`COUNT=${int(1, 12)}`);
+      const rule = parts.join(';');
+      // with BYMONTH, a fifth weekday's setup search moves BYMONTH's position
+      // and loses the first year (#36): left as ical.js gives it
+      if (/BYMONTH=/.test(rule) && /[=,]-?5[A-Z]{2}/.test(rule)) continue;
+      const start = `${int(1990, 2024)}-${p2(int(1, 12))}-${p2(int(1, 28))}`;
+      const last = `${int(2026, 2030)}-${p2(int(1, 12))}-01`;
+      let result;
+      try {
+        result = expand(series(`DTSTART;VALUE=DATE:${start.replace(/-/g, '')}`, rule), last);
+      } catch (error) {
+        // ical.js refuses some BYDAY setups (a fifth weekday in a month without one)
+        expect((error as Error).message, rule).toMatch(/Malformed|Invalid/i);
+        continue;
+      }
+      if (!result.complete) {
+        expect(result.stoppedBy, `${rule} from ${start}`).toBe('library');
+        continue;
+      }
+      const count = /COUNT=(\d+)/.exec(rule);
+      let want = rfcDates(rule.replace(/;COUNT=\d+/, ''), start, last).filter((v) => v !== start && v < last);
+      if (count) {
+        // COUNT as ical.js counts it: the instances, DTSTART aside (#36)
+        want = rfcDates(rule.replace(/;COUNT=\d+/, ''), start, '2400-01-01').slice(0, Number(count[1]))
+          .filter((v) => v !== start && v < last);
+      }
+      expect(values(result), `${rule} from ${start}`).toEqual([start, ...want]);
+      compared++;
+      if (want.length > 0) nonEmpty++;
+    }
+    expect(compared).toBeGreaterThan(RUNS * 0.6);
     expect(nonEmpty).toBeGreaterThan(compared * 0.3);
   });
 });

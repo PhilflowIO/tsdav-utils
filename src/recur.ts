@@ -105,6 +105,8 @@ export function recurIterator(recur: ICAL.Recur, start: ICAL.Time): ICAL.RecurIt
     // a MONTHLY;BYMONTHDAY rule without BYDAY
     skipEmptyMonths(iterator);
   }
+  firstDayByPosition(iterator, rule);
+  keepInstances(iterator, rule, start);
   return iterator;
 }
 
@@ -151,6 +153,47 @@ function skipEmptyMonths(iterator: ICAL.RecurIterator): void {
       valid = own.call(this);
     }
     return valid;
+  };
+}
+
+/**
+ * Lets ical.js (2.2) keep the 1st of a month that a negative BYSETPOS names.
+ * In a MONTHLY rule with BYDAY and BYSETPOS (no BYMONTHDAY), next_month
+ * tests each later day of the month against BYSETPOS from the front and from
+ * the back, but on moving to a new month tests its 1st against position 1
+ * only: FREQ=MONTHLY;BYDAY=SA;BYSETPOS=-5 never yields 1 August 2020, the
+ * fifth-last of its five Saturdays. Where next_month rejects a 1st that
+ * matches BYDAY, it is kept when it is the n-th last matching day of the
+ * month and BYSETPOS names -n. ical.js reads BYSETPOS over the days, which
+ * RFC 5545's date-times are only with one time of day: with more, it is left
+ * as it is (tsdav-utils#36).
+ */
+function firstDayByPosition(iterator: ICAL.RecurIterator, rule: ICAL.Recur): void {
+  const count = (part: string) => (rule.getComponent(part) as unknown[]).length;
+  const positions = (rule.getComponent('BYSETPOS') as (number | string)[]).map(Number).filter((v) => v < 0);
+  if (rule.freq !== 'MONTHLY' || count('BYDAY') === 0 || count('BYMONTHDAY') > 0 || positions.length === 0 ||
+      count('BYHOUR') > 1 || count('BYMINUTE') > 1 || count('BYSECOND') > 1) {
+    return;
+  }
+  const it = iterator as unknown as IteratorState & { is_day_in_byday?: (t: ICAL.Time) => number };
+  const own = it.next_month;
+  const inByDay = it.is_day_in_byday;
+  if (typeof own !== 'function' || typeof inByDay !== 'function') {
+    throw new BoundUnavailable('ical.js no longer steps a MONTHLY rule by next_month and is_day_in_byday');
+  }
+  it.next_month = function nextMonth(this: typeof it) {
+    const valid = own.call(this);
+    if (valid || this.last.day !== 1 || !inByDay.call(this, this.last)) {
+      return valid;
+    }
+    const day = this.last.clone();
+    let matching = 0;
+    for (let d = 1, length = daysInMonth(day.year, day.month); d <= length; d++) {
+      day.day = d;
+      matching += inByDay.call(this, day) ? 1 : 0;
+    }
+    // the 1st is the first matching day, so the matching-th from the back
+    return positions.includes(-matching) ? 1 : valid;
   };
 }
 
@@ -697,3 +740,94 @@ export function holdsInstance(recur: ICAL.Recur, dtstart: number, begin: number,
   return false;
 }
 
+/**
+ * Drops from a MONTHLY iteration every candidate ical.js (2.2) yields that
+ * is no instance of the rule by RFC 5545 (periodModel), where ical.js yields
+ * all of them and more:
+ * - its setup yields the day it finds untested: the n-th weekday of the
+ *   start month, BYSETPOS unread (MONTHLY;INTERVAL=7;BYDAY=5MO;BYSETPOS=2
+ *   from 8 May 1993 gives 31 May 1993), also in a month BYMONTH leaves out
+ *   (BYMONTH=6;BYDAY=1MO from a December gives its first Monday);
+ * - with BYMONTH it steps through the listed months and never reads INTERVAL
+ *   (INTERVAL=24;BYMONTH=11 from a May gives every November, RFC 5545 none);
+ * - with BYMONTHDAY and no BYDAY it never reads BYSETPOS (every listed day).
+ * Each of these is a superset of the instances, so dropping what is not one
+ * leaves exactly the instances. Not so where BYDAY, BYSETPOS and more than
+ * one time of day meet (ical.js applies BYSETPOS to the days, RFC 5545 to
+ * the date-times), nor for BYDAY with BYMONTHDAY (_byDayAndMonthDay steps
+ * month by month whatever INTERVAL says): an instance may be missing there,
+ * and such a rule is left as ical.js gives it (tsdav-utils#36). A dropped candidate does not count
+ * toward COUNT. Where no instance comes in a whole cycle of periods
+ * (cyclePeriods), none comes at all: the iteration ends there rather than
+ * dropping ical.js' candidates without end.
+ */
+function keepInstances(iterator: ICAL.RecurIterator, rule: ICAL.Recur, start: ICAL.Time): void {
+  if (rule.freq !== 'MONTHLY') {
+    return;
+  }
+  const t = new Date(0);
+  t.setUTCFullYear(start.year, start.month - 1, start.day);
+  t.setUTCHours(start.hour, start.minute, start.second, 0);
+  const model = periodModel(rule, t.getTime() / 1000, start.isDate);
+  const byDay = (rule.getComponent('BYDAY') as unknown[]).length > 0;
+  if (!model || byDay && (model.bySetPos.length > 0 && model.times.length > 1 ||
+      (rule.getComponent('BYMONTHDAY') as unknown[]).length > 0)) {
+    return;
+  }
+  const it = iterator as unknown as { next: (again?: boolean) => ICAL.Time | null; rule: ICAL.Recur;
+    completed: boolean };
+  const own = it.next;
+  if (typeof own !== 'function') {
+    throw new BoundUnavailable('ical.js no longer iterates by next');
+  }
+  let cached = -1;
+  let cachedDays: number[] = [];
+  const isInstance = (time: ICAL.Time) => {
+    const at = time.year * 12 + time.month - 1;
+    if (at < model.origin || (at - model.origin) % model.step !== 0) {
+      return false;
+    }
+    if (at !== cached) {
+      cached = at;
+      cachedDays = model.days(time.year, time.month);
+    }
+    const di = cachedDays.indexOf(time.day);
+    const ti = model.times.indexOf(time.isDate ? 0 : time.hour * 3600 + time.minute * 60 + time.second);
+    if (di < 0 || ti < 0) {
+      return false;
+    }
+    if (model.bySetPos.length === 0) {
+      return true;
+    }
+    const i = di * model.times.length + ti;
+    const size = cachedDays.length * model.times.length;
+    return model.bySetPos.some((v) => (v > 0 ? v - 1 === i : size + v === i));
+  };
+  const span = cyclePeriods(model.step) * model.step;
+  let kept = model.origin;
+  it.next = function next(this: typeof it, again?: boolean) {
+    if (again) {
+      // ical.js' own retry inside next(): not a candidate of ours
+      return own.call(this, again);
+    }
+    for (;;) {
+      const time = own.call(this);
+      if (!time || isInstance(time)) {
+        if (time) {
+          kept = time.year * 12 + time.month - 1;
+        }
+        return time;
+      }
+      // not counted toward COUNT: ical.js counts what it yields (occurrence_number,
+      // which must stay, as at 0 it yields its setup again), so its own copy of
+      // the rule (chronologicalRecur) counts one more
+      if (this.rule.count) {
+        this.rule.count++;
+      }
+      if (time.year * 12 + time.month - 1 - kept > span) {
+        this.completed = true;
+        return null;
+      }
+    }
+  };
+}
