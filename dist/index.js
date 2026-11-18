@@ -215,6 +215,109 @@ function recurIterator(recur, dtstart) {
   }
   return iterator;
 }
+var FIXED_PERIOD = {
+  SECONDLY: 1,
+  MINUTELY: 60,
+  HOURLY: 3600,
+  DAILY: 86400,
+  WEEKLY: 7 * 86400
+};
+var LEAD_PERIODS = 2;
+var CALENDAR_TRIES = 100;
+var FEWEST_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+function inEveryMonth(recur, dtstart, days) {
+  const byMonth = recur.getComponent("BYMONTH").map(Number);
+  const months = byMonth.length ? byMonth : [new Date(dtstart * 1e3).getUTCMonth() + 1];
+  if (!months.every((m) => Number.isInteger(m) && m >= 1 && m <= 12)) {
+    return false;
+  }
+  const fewest = Math.min(...months.map((m) => FEWEST_DAYS[m - 1]));
+  return days.every((d) => Number.isInteger(d) && d >= 1 && d <= fewest);
+}
+function walkedInFull(recur, dtstart, dateOnly) {
+  const has = (part) => recur.getComponent(part).length > 0;
+  const fixed = FIXED_PERIOD[recur.freq];
+  return Boolean(recur.count) || dateOnly && (fixed !== void 0 && fixed < 86400 || has("BYHOUR") || has("BYMINUTE") || has("BYSECOND")) || recur.freq === "YEARLY" && !inEveryMonth(recur, dtstart, recur.getComponent("BYMONTHDAY").map(Number)) || recur.freq === "MONTHLY" && has("BYDAY") && has("BYMONTHDAY") || recur.freq === "YEARLY" && has("BYDAY") && (has("BYYEARDAY") || has("BYWEEKNO"));
+}
+function iterationStart(recur, dtstart, from, dateOnly) {
+  const interval = Math.max(1, recur.interval || 1);
+  if (!Number.isFinite(from) || from <= dtstart || walkedInFull(recur, dtstart, dateOnly)) {
+    return dtstart;
+  }
+  const fixed = FIXED_PERIOD[recur.freq];
+  if (fixed !== void 0) {
+    const k = Math.floor((from - dtstart) / (fixed * interval)) - LEAD_PERIODS;
+    return k > 0 ? dtstart + k * fixed * interval : dtstart;
+  }
+  const months = recur.freq === "MONTHLY" ? 1 : recur.freq === "YEARLY" ? 12 : 0;
+  if (months === 0) {
+    return dtstart;
+  }
+  const s = new Date(dtstart * 1e3);
+  const f = new Date(from * 1e3);
+  const index = (d) => d.getUTCFullYear() * 12 + d.getUTCMonth();
+  const step = months * interval;
+  const kMax = Math.floor((index(f) - index(s)) / step) - LEAD_PERIODS;
+  for (let k = kMax; k > 0 && k > kMax - CALENDAR_TRIES; k--) {
+    const t = /* @__PURE__ */ new Date(0);
+    t.setUTCFullYear(s.getUTCFullYear(), s.getUTCMonth() + k * step, s.getUTCDate());
+    t.setUTCHours(s.getUTCHours(), s.getUTCMinutes(), s.getUTCSeconds(), 0);
+    if (t.getUTCDate() === s.getUTCDate()) {
+      return t.getTime() / 1e3;
+    }
+  }
+  return dtstart;
+}
+function fixedYearlyWalls(recur, dtstart, from, to, last) {
+  if (recur.freq !== "YEARLY" || recur.count || !Number.isFinite(from)) {
+    return null;
+  }
+  const parts = recur.parts ?? {};
+  const listed = (part) => (Array.isArray(parts[part]) ? parts[part] : []).map(Number);
+  if (Object.entries(parts).some(([part, values]) => Array.isArray(values) && values.length > 0 && part !== "BYMONTH" && part !== "BYMONTHDAY")) {
+    return null;
+  }
+  const s = new Date(dtstart * 1e3);
+  const byMonth = listed("BYMONTH");
+  const byMonthDay = listed("BYMONTHDAY");
+  const distinct = (values) => new Set(values).size === values.length;
+  if (!byMonth.every((m) => Number.isInteger(m) && m >= 1 && m <= 12) || !distinct(byMonth) || !inEveryMonth(recur, dtstart, byMonthDay) || !distinct(byMonthDay)) {
+    return null;
+  }
+  const plain = byMonth.length === 0 && byMonthDay.length === 0;
+  if (plain ? s.getUTCMonth() === 1 && s.getUTCDate() === 29 : byMonthDay.length === 0 && !inEveryMonth(recur, dtstart, [s.getUTCDate()])) {
+    return null;
+  }
+  const startYear = s.getUTCFullYear();
+  const firstYear = new Date(Math.max(from, dtstart) * 1e3).getUTCFullYear();
+  if (!plain && firstYear <= startYear) {
+    return null;
+  }
+  const months = byMonth.length ? [...byMonth].sort((a, b) => a - b) : [s.getUTCMonth() + 1];
+  const days = byMonthDay.length ? [...byMonthDay].sort((a, b) => a - b) : [s.getUTCDate()];
+  const interval = Math.max(1, recur.interval || 1);
+  const end = Math.min(to, last);
+  const out = [];
+  const k0 = Math.max(0, Math.ceil((firstYear - 1 - startYear) / interval));
+  for (let k = k0; ; k++) {
+    const year = startYear + k * interval;
+    if (Date.UTC(year, 0, 1) / 1e3 > end) {
+      break;
+    }
+    for (const month of months) {
+      for (const day of days) {
+        const t = /* @__PURE__ */ new Date(0);
+        t.setUTCFullYear(year, month - 1, day);
+        t.setUTCHours(s.getUTCHours(), s.getUTCMinutes(), s.getUTCSeconds(), 0);
+        const wall = t.getTime() / 1e3;
+        if (wall >= from && wall >= dtstart && wall <= end) {
+          out.push(wall);
+        }
+      }
+    }
+  }
+  return out;
+}
 
 // src/zone.ts
 var DAY = 86400;
@@ -1521,7 +1624,17 @@ function bounded(iterator, budget, recur, horizon) {
   };
   return iterator;
 }
-function expandWalls(master, until, budget, skipUnplaced = false) {
+function yieldsFromStart(recur, dtstart, budget, horizon) {
+  try {
+    return bounded(recurIterator(recur, dtstart), budget, recur, horizon).next() !== null;
+  } catch (error) {
+    if (error instanceof HorizonReached) {
+      return true;
+    }
+    throw error;
+  }
+}
+function expandWalls(master, until, budget, skipUnplaced = false, from = -Infinity) {
   const start = startOf(master);
   if (!start) {
     throw new SeriesUnverifiable("the series has no DTSTART");
@@ -1553,26 +1666,59 @@ function expandWalls(master, until, budget, skipUnplaced = false) {
     }
     for (const property of master.getAllProperties("rrule")) {
       const recur = recurOf(property).clone();
+      const ruleFrom = walkedInFull(recur, start.wall, day) ? -Infinity : from;
+      let ruleEnd = Infinity;
       if (recur.until) {
-        recur.until = timeOf(norm(wallIn(
-          master,
-          stampOf(recur.until.toString(), void 0, property.name.toUpperCase()),
-          frame
-        )));
-      }
-      const iterator = bounded(recurIterator(recur, timeOf(start.wall)), budget, recur, day ? until + DAY2 - 1 : until);
-      try {
-        for (let next = iterator.next(); next; next = iterator.next()) {
-          const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
-          if (wall > until) {
-            break;
-          }
-          walls.add(wall);
+        const last = norm(wallIn(master, stampOf(recur.until.toString(), void 0, property.name.toUpperCase()), frame));
+        if (last < ruleFrom) {
+          recurIterator(recur, timeOf(start.wall));
+          continue;
         }
+        recur.until = timeOf(last);
+        ruleEnd = last;
+      }
+      const fixed = fixedYearlyWalls(recur, start.wall, ruleFrom, until, ruleEnd);
+      if (fixed) {
+        recurIterator(recur, timeOf(start.wall));
+        const cost = stepCost(recur);
+        for (const wall of fixed) {
+          expansionWork.steps++;
+          if ((budget.remaining -= cost) < 0) {
+            throw new SeriesTooSparse("the rule is too sparse to expand within the work limit");
+          }
+          walls.add(norm(wall));
+        }
+        continue;
+      }
+      const walk = (first2) => {
+        try {
+          const iterator = bounded(recurIterator(recur, timeOf(first2)), budget, recur, day ? until + DAY2 - 1 : until);
+          for (let next = iterator.next(); next; next = iterator.next()) {
+            const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
+            if (wall > until) {
+              break;
+            }
+            if (wall >= from) {
+              walls.add(wall);
+            }
+          }
+        } catch (error) {
+          if (!(error instanceof HorizonReached)) {
+            throw error;
+          }
+        }
+      };
+      const first = iterationStart(recur, start.wall, ruleFrom, day);
+      if (first !== start.wall && !yieldsFromStart(recur, timeOf(start.wall), budget, day ? until + DAY2 - 1 : until)) {
+        continue;
+      }
+      try {
+        walk(first);
       } catch (error) {
-        if (!(error instanceof HorizonReached)) {
+        if (first === start.wall || error instanceof SeriesTooSparse || error instanceof BoundUnavailable) {
           throw error;
         }
+        walk(start.wall);
       }
     }
   } catch (error) {
@@ -3163,7 +3309,7 @@ function expandOccurrences(calendarObject, options) {
   const excluded = (wall) => excludedDays.has(dayOf(wall)) || (zoned ? excludedInstants.has(occurrenceInstant(master, wall, frame)) : excludedWalls.has(wall));
   const overrides = /* @__PURE__ */ new Map();
   try {
-    found = expandWalls(master, end - 1, budget);
+    found = expandWalls(master, end - 1, budget, false, norm(start));
     for (const stamp of master.getAllProperties("exdate").filter((p) => p.type !== "period").flatMap(propertyStamps)) {
       if (frame.form === "date") {
         excludedDays.add(dayOf(wallIn(master, stamp, frame)));
