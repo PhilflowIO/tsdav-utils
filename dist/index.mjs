@@ -150,8 +150,10 @@ function chronologicalRecur(recur) {
   }
   return copy;
 }
-function recurIterator(recur, dtstart) {
+function recurIterator(recur, start) {
   const rule = chronologicalRecur(recur);
+  const setup = monthDaySetupStart(rule, start);
+  const dtstart = setup ?? start;
   const field = { BYSECOND: dtstart.second, BYMINUTE: dtstart.minute, BYHOUR: dtstart.hour, BYMONTH: dtstart.month };
   const byIndices = {
     BYSECOND: 0,
@@ -172,7 +174,81 @@ function recurIterator(recur, dtstart) {
   if (iterator.by_indices !== byIndices) {
     throw new BoundUnavailable("ical.js no longer takes the start positions of a rule iteration");
   }
+  if (setup === null) {
+    iterator.completed = true;
+  }
+  if (setup !== void 0) {
+    skipEmptyMonths(iterator);
+  }
   return iterator;
+}
+function skipEmptyMonths(iterator) {
+  const it = iterator;
+  const own = it.next_month;
+  if (typeof own !== "function") {
+    throw new BoundUnavailable("ical.js no longer steps a MONTHLY rule by next_month");
+  }
+  it.next_month = function nextMonth() {
+    let valid = own.call(this);
+    if (valid && !this.by_data.BYMONTHDAY.includes(this.last.day)) {
+      for (const [part, field] of [["BYSECOND", "second"], ["BYMINUTE", "minute"], ["BYHOUR", "hour"]]) {
+        const values = this.by_data[part];
+        if (values?.length) {
+          this.by_indices[part] = values.length - 1;
+          this.last[field] = values[values.length - 1];
+        }
+      }
+      valid = own.call(this);
+    }
+    return valid;
+  };
+}
+function daysInMonth(year, month) {
+  const leap = year % 4 === 0 && year % 100 !== 0 || year % 400 === 0;
+  return month === 2 ? leap ? 29 : 28 : FEWEST_DAYS[month - 1];
+}
+var CYCLE_MONTHS = 400 * 12;
+function monthDaySetupStart(rule, dtstart) {
+  const listed = (part) => rule.getComponent(part).map(Number);
+  const days = listed("BYMONTHDAY");
+  if (rule.freq !== "MONTHLY" || days.length === 0 || listed("BYDAY").length > 0) {
+    return void 0;
+  }
+  const months = listed("BYMONTH");
+  const interval = Math.max(1, rule.interval || 1);
+  const holds2 = (year2, month2) => (months.length === 0 || months.includes(month2)) && days.some((d) => Number.isInteger(d) && d !== 0 && Math.abs(d) <= daysInMonth(year2, month2));
+  let { year, month } = dtstart;
+  if (holds2(year, month)) {
+    return dtstart;
+  }
+  for (let steps = 0; steps < CYCLE_MONTHS; steps++) {
+    if (months.length > 0) {
+      const next = months.find((m) => m > month);
+      year += next === void 0 ? 1 : 0;
+      month = next ?? months[0];
+    } else {
+      month += interval;
+      year += Math.floor((month - 1) / 12);
+      month = (month - 1) % 12 + 1;
+    }
+    if (holds2(year, month)) {
+      const earliest = (part, own) => {
+        const values = listed(part).filter((v) => Number.isInteger(v));
+        return values.length > 0 ? Math.min(...values) : own;
+      };
+      const start = dtstart.clone();
+      start.year = year;
+      start.month = month;
+      start.day = 1;
+      if (!start.isDate) {
+        start.hour = earliest("BYHOUR", dtstart.hour);
+        start.minute = earliest("BYMINUTE", dtstart.minute);
+        start.second = earliest("BYSECOND", dtstart.second);
+      }
+      return start;
+    }
+  }
+  return null;
 }
 var FIXED_PERIOD = {
   SECONDLY: 1,
@@ -285,6 +361,101 @@ function fixedYearlyWalls(recur, dtstart, from, to, last) {
       }
     }
   })();
+}
+function holdsInstance(recur, dtstart, begin, after, end) {
+  const listed = (part) => recur.getComponent(part).map(String);
+  const numbers = (part) => [...new Set(listed(part).map(Number))];
+  const monthly = recur.freq === "MONTHLY";
+  if (!monthly && recur.freq !== "YEARLY" || listed("BYWEEKNO").length > 0) {
+    return null;
+  }
+  const byDay = [];
+  for (const value of listed("BYDAY")) {
+    const m = /^([+-]?\d{1,2})?(SU|MO|TU|WE|TH|FR|SA)$/.exec(value);
+    if (!m) {
+      return null;
+    }
+    byDay.push({ n: m[1] ? Number(m[1]) : 0, w: ["SU", "MO", "TU", "WE", "TH", "FR", "SA"].indexOf(m[2]) });
+  }
+  const byMonth = numbers("BYMONTH");
+  const byMonthDay = numbers("BYMONTHDAY");
+  const byYearDay = numbers("BYYEARDAY");
+  const bySetPos = numbers("BYSETPOS");
+  const ordinal = byDay.some((d) => d.n !== 0);
+  if (ordinal && (byMonthDay.length > 0 || byYearDay.length > 0) || byYearDay.length > 0 && (monthly || byMonth.length > 0 || byMonthDay.length > 0)) {
+    return null;
+  }
+  const times = ["BYHOUR", "BYMINUTE", "BYSECOND"].reduce((n, part) => n * Math.max(1, numbers(part).length), 1);
+  const s = new Date(dtstart * 1e3);
+  const startDay = s.getUTCDate();
+  const leap = (y) => y % 4 === 0 && y % 100 !== 0 || y % 400 === 0;
+  const weekdayOf2 = (y, m, d) => {
+    const t = /* @__PURE__ */ new Date(0);
+    t.setUTCFullYear(y, m - 1, d);
+    return t.getUTCDay();
+  };
+  const monthDays = (y, m) => new Set(byMonthDay.filter((v) => v !== 0 && Math.abs(v) <= daysInMonth(y, m)).map((v) => v > 0 ? v : daysInMonth(y, m) + v + 1));
+  const weekdayMatches = (w, index2, count) => byDay.some((d) => d.w === w && (d.n === 0 || (d.n > 0 ? Math.floor((index2 - 1) / 7) + 1 === d.n : Math.floor((count - index2) / 7) + 1 === -d.n)));
+  const daysOfMonth = (y, m, yearScope) => {
+    const length = daysInMonth(y, m);
+    const listedDays = byMonthDay.length > 0 ? monthDays(y, m) : null;
+    if (byDay.length === 0) {
+      return listedDays ? listedDays.size : startDay <= length ? 1 : 0;
+    }
+    const first = weekdayOf2(y, m, 1);
+    let n = 0;
+    for (let d = 1; d <= length; d++) {
+      if (listedDays && !listedDays.has(d)) {
+        continue;
+      }
+      const index2 = yearScope ? yearScope.offset + d : d;
+      if (weekdayMatches((first + d - 1) % 7, index2, yearScope ? yearScope.length : length)) {
+        n++;
+      }
+    }
+    return n;
+  };
+  const periodDays = (y, m) => {
+    if (monthly) {
+      return byMonth.length > 0 && !byMonth.includes(m) ? 0 : daysOfMonth(y, m, null);
+    }
+    const yearLength = leap(y) ? 366 : 365;
+    if (byYearDay.length > 0) {
+      const first = weekdayOf2(y, 1, 1);
+      const days = new Set(byYearDay.filter((v) => v !== 0 && Math.abs(v) <= yearLength).map((v) => v > 0 ? v : yearLength + v + 1));
+      return [...days].filter((doy) => byDay.length === 0 || weekdayMatches((first + doy - 1) % 7, doy, yearLength)).length;
+    }
+    const months = byMonth.length > 0 ? byMonth.filter((v) => v >= 1 && v <= 12) : byMonthDay.length > 0 || byDay.length > 0 ? [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] : [s.getUTCMonth() + 1];
+    let n = 0;
+    for (const month of months) {
+      let offset = 0;
+      for (let k = 1; k < month; k++) {
+        offset += daysInMonth(y, k);
+      }
+      n += daysOfMonth(y, month, byMonth.length > 0 ? null : { offset, length: yearLength });
+    }
+    return n;
+  };
+  const holds2 = (y, m) => {
+    const n = periodDays(y, m) * times;
+    return bySetPos.length > 0 ? bySetPos.some((v) => v !== 0 && Math.abs(v) <= n) : n > 0;
+  };
+  const step = monthly ? 1 : 12;
+  const interval = Math.max(1, recur.interval || 1) * step;
+  const index = (wall) => {
+    const d = new Date(wall * 1e3);
+    return monthly ? d.getUTCFullYear() * 12 + d.getUTCMonth() : d.getUTCFullYear() * 12;
+  };
+  const origin = index(dtstart);
+  const lowest = after === null ? index(begin) : index(after) + step;
+  const highest = index(end);
+  for (let k = Math.max(0, Math.ceil((lowest - origin) / interval)), periods = 0; origin + k * interval <= highest && periods * interval < CYCLE_MONTHS; k++, periods++) {
+    const at = origin + k * interval;
+    if (holds2(Math.floor(at / 12), at % 12 + 1)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // src/zone.ts
@@ -1680,16 +1851,18 @@ function expandWalls(master, until, budget, skipUnplaced = false, from = -Infini
           }
           const emptyAtSetup = Boolean(iterator.completed);
           let next = iterator.next();
+          let yielded = null;
           for (; next; next = iterator.next()) {
             const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
             if (wall > until) {
               break;
             }
+            yielded = wall;
             if (wall >= from) {
               walls.add(wall);
             }
           }
-          if (!next && !emptyAtSetup && !endedByRule(iterator)) {
+          if (!next && !emptyAtSetup && !endedByRule(iterator) && holdsInstance(recur, start.wall, first2, yielded, Math.min(until, ruleEnd)) !== false) {
             cut = true;
           }
         } catch (error) {
