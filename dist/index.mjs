@@ -152,6 +152,9 @@ function chronologicalRecur(recur) {
 }
 function recurIterator(recur, start) {
   const rule = chronologicalRecur(recur);
+  if (fifthWeekdaySearchEndless(rule, start)) {
+    throw new Error("Invalid BYDAY rule: no month the rule reaches has its fifth or fifth-last weekday, and ical.js would search for one without end");
+  }
   const setup = monthDaySetupStart(rule, start);
   const dtstart = setup ?? start;
   const field = { BYSECOND: dtstart.second, BYMINUTE: dtstart.minute, BYHOUR: dtstart.hour, BYMONTH: dtstart.month };
@@ -180,6 +183,8 @@ function recurIterator(recur, start) {
   if (setup !== void 0) {
     skipEmptyMonths(iterator);
   }
+  firstDayByPosition(iterator, rule);
+  keepInstances(iterator, rule, start);
   return iterator;
 }
 function skipEmptyMonths(iterator) {
@@ -202,6 +207,66 @@ function skipEmptyMonths(iterator) {
     }
     return valid;
   };
+}
+function firstDayByPosition(iterator, rule) {
+  const count = (part) => rule.getComponent(part).length;
+  const positions = rule.getComponent("BYSETPOS").map(Number).filter((v) => v < 0);
+  if (rule.freq !== "MONTHLY" || count("BYDAY") === 0 || count("BYMONTHDAY") > 0 || positions.length === 0 || count("BYHOUR") > 1 || count("BYMINUTE") > 1 || count("BYSECOND") > 1) {
+    return;
+  }
+  const it = iterator;
+  const own = it.next_month;
+  const inByDay = it.is_day_in_byday;
+  if (typeof own !== "function" || typeof inByDay !== "function") {
+    throw new BoundUnavailable("ical.js no longer steps a MONTHLY rule by next_month and is_day_in_byday");
+  }
+  it.next_month = function nextMonth() {
+    const valid = own.call(this);
+    if (valid || this.last.day !== 1 || !inByDay.call(this, this.last)) {
+      return valid;
+    }
+    const day = this.last.clone();
+    let matching = 0;
+    for (let d = 1, length = daysInMonth(day.year, day.month); d <= length; d++) {
+      day.day = d;
+      matching += inByDay.call(this, day) ? 1 : 0;
+    }
+    return positions.includes(-matching) ? 1 : valid;
+  };
+}
+function fifthWeekdaySearchEndless(rule, dtstart) {
+  if (rule.freq !== "MONTHLY") {
+    return false;
+  }
+  const weekdays = rule.getComponent("BYDAY").map((d) => /^[+-]?5(SU|MO|TU|WE|TH|FR|SA)$/.exec(String(d))).filter((m) => m !== null).map((m) => ["SU", "MO", "TU", "WE", "TH", "FR", "SA"].indexOf(m[1]));
+  if (weekdays.length === 0) {
+    return false;
+  }
+  const months = rule.getComponent("BYMONTH").map(Number);
+  const interval = Math.max(1, rule.interval || 1);
+  const hasFive = (y, m, w) => {
+    const t = /* @__PURE__ */ new Date(0);
+    t.setUTCFullYear(y, m - 1, 1);
+    return (w - t.getUTCDay() + 7) % 7 + 29 <= daysInMonth(y, m);
+  };
+  return weekdays.some((w) => {
+    let { year, month } = dtstart;
+    for (let steps = 0; steps <= CYCLE_MONTHS; steps++) {
+      if (hasFive(year, month, w)) {
+        return false;
+      }
+      if (months.length > 0) {
+        const next = months.find((m) => m > month);
+        year += next === void 0 ? 1 : 0;
+        month = next ?? months[0];
+      } else {
+        month += interval;
+        year += Math.floor((month - 1) / 12);
+        month = (month - 1) % 12 + 1;
+      }
+    }
+    return true;
+  });
 }
 function daysInMonth(year, month) {
   const leap = year % 4 === 0 && year % 100 !== 0 || year % 400 === 0;
@@ -362,7 +427,7 @@ function fixedYearlyWalls(recur, dtstart, from, to, last) {
     }
   })();
 }
-function holdsInstance(recur, dtstart, begin, after, end) {
+function periodModel(recur, dtstart, dateOnly) {
   const listed = (part) => recur.getComponent(part).map(String);
   const numbers = (part) => [...new Set(listed(part).map(Number))];
   const monthly = recur.freq === "MONTHLY";
@@ -380,82 +445,171 @@ function holdsInstance(recur, dtstart, begin, after, end) {
   const byMonth = numbers("BYMONTH");
   const byMonthDay = numbers("BYMONTHDAY");
   const byYearDay = numbers("BYYEARDAY");
-  const bySetPos = numbers("BYSETPOS");
   const ordinal = byDay.some((d) => d.n !== 0);
   if (ordinal && (byMonthDay.length > 0 || byYearDay.length > 0) || byYearDay.length > 0 && (monthly || byMonth.length > 0 || byMonthDay.length > 0)) {
     return null;
   }
-  const times = ["BYHOUR", "BYMINUTE", "BYSECOND"].reduce((n, part) => n * Math.max(1, numbers(part).length), 1);
   const s = new Date(dtstart * 1e3);
   const startDay = s.getUTCDate();
+  const own = (part, value) => numbers(part).length > 0 ? numbers(part) : [value];
+  const times = [];
+  if (dateOnly) {
+    times.push(0);
+  } else {
+    for (const h of own("BYHOUR", s.getUTCHours())) {
+      for (const m of own("BYMINUTE", s.getUTCMinutes())) {
+        for (const sec of own("BYSECOND", s.getUTCSeconds())) {
+          times.push(h * 3600 + m * 60 + sec);
+        }
+      }
+    }
+  }
+  times.sort((a, b) => a - b);
   const leap = (y) => y % 4 === 0 && y % 100 !== 0 || y % 400 === 0;
   const weekdayOf2 = (y, m, d) => {
     const t = /* @__PURE__ */ new Date(0);
     t.setUTCFullYear(y, m - 1, d);
     return t.getUTCDay();
   };
-  const monthDays = (y, m) => new Set(byMonthDay.filter((v) => v !== 0 && Math.abs(v) <= daysInMonth(y, m)).map((v) => v > 0 ? v : daysInMonth(y, m) + v + 1));
-  const weekdayMatches = (w, index2, count) => byDay.some((d) => d.w === w && (d.n === 0 || (d.n > 0 ? Math.floor((index2 - 1) / 7) + 1 === d.n : Math.floor((count - index2) / 7) + 1 === -d.n)));
+  const weekdayMatches = (w, index, count) => byDay.some((d) => d.w === w && (d.n === 0 || (d.n > 0 ? Math.floor((index - 1) / 7) + 1 === d.n : Math.floor((count - index) / 7) + 1 === -d.n)));
   const daysOfMonth = (y, m, yearScope) => {
     const length = daysInMonth(y, m);
-    const listedDays = byMonthDay.length > 0 ? monthDays(y, m) : null;
-    if (byDay.length === 0) {
-      return listedDays ? listedDays.size : startDay <= length ? 1 : 0;
-    }
+    const listedDays = byMonthDay.length > 0 ? new Set(byMonthDay.filter((v) => v !== 0 && Math.abs(v) <= length).map((v) => v > 0 ? v : length + v + 1)) : null;
     const first = weekdayOf2(y, m, 1);
-    let n = 0;
+    const out = [];
     for (let d = 1; d <= length; d++) {
-      if (listedDays && !listedDays.has(d)) {
+      if (listedDays ? !listedDays.has(d) : byDay.length === 0 && d !== startDay) {
         continue;
       }
-      const index2 = yearScope ? yearScope.offset + d : d;
-      if (weekdayMatches((first + d - 1) % 7, index2, yearScope ? yearScope.length : length)) {
-        n++;
+      const index = yearScope ? yearScope.offset + d : d;
+      if (byDay.length === 0 || weekdayMatches((first + d - 1) % 7, index, yearScope ? yearScope.length : length)) {
+        out.push(d);
       }
     }
-    return n;
+    return out;
   };
-  const periodDays = (y, m) => {
+  const days = (y, m) => {
     if (monthly) {
-      return byMonth.length > 0 && !byMonth.includes(m) ? 0 : daysOfMonth(y, m, null);
+      return byMonth.length > 0 && !byMonth.includes(m) ? [] : daysOfMonth(y, m, null);
     }
     const yearLength = leap(y) ? 366 : 365;
     if (byYearDay.length > 0) {
       const first = weekdayOf2(y, 1, 1);
-      const days = new Set(byYearDay.filter((v) => v !== 0 && Math.abs(v) <= yearLength).map((v) => v > 0 ? v : yearLength + v + 1));
-      return [...days].filter((doy) => byDay.length === 0 || weekdayMatches((first + doy - 1) % 7, doy, yearLength)).length;
+      return [...new Set(byYearDay.filter((v) => v !== 0 && Math.abs(v) <= yearLength).map((v) => v > 0 ? v : yearLength + v + 1))].filter((doy) => byDay.length === 0 || weekdayMatches((first + doy - 1) % 7, doy, yearLength)).sort((a, b) => a - b);
     }
-    const months = byMonth.length > 0 ? byMonth.filter((v) => v >= 1 && v <= 12) : byMonthDay.length > 0 || byDay.length > 0 ? [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] : [s.getUTCMonth() + 1];
-    let n = 0;
+    const months = byMonth.length > 0 ? byMonth.filter((v) => v >= 1 && v <= 12).sort((a, b) => a - b) : byMonthDay.length > 0 || byDay.length > 0 ? [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] : [s.getUTCMonth() + 1];
+    const out = [];
     for (const month of months) {
       let offset = 0;
       for (let k = 1; k < month; k++) {
         offset += daysInMonth(y, k);
       }
-      n += daysOfMonth(y, month, byMonth.length > 0 ? null : { offset, length: yearLength });
+      for (const d of daysOfMonth(y, month, byMonth.length > 0 ? null : { offset, length: yearLength })) {
+        out.push(offset + d);
+      }
     }
-    return n;
+    return out;
   };
-  const holds2 = (y, m) => {
-    const n = periodDays(y, m) * times;
-    return bySetPos.length > 0 ? bySetPos.some((v) => v !== 0 && Math.abs(v) <= n) : n > 0;
+  const interval = Math.max(1, recur.interval || 1);
+  return {
+    monthly,
+    step: monthly ? interval : 12 * interval,
+    origin: s.getUTCFullYear() * 12 + (monthly ? s.getUTCMonth() : 0),
+    days,
+    times,
+    bySetPos: numbers("BYSETPOS").filter((v) => v !== 0)
   };
-  const step = monthly ? 1 : 12;
-  const interval = Math.max(1, recur.interval || 1) * step;
+}
+var gcd = (a, b) => b === 0 ? a : gcd(b, a % b);
+function cyclePeriods(step) {
+  return CYCLE_MONTHS / gcd(step, CYCLE_MONTHS);
+}
+function holdsInstance(recur, dtstart, begin, after, end, dateOnly, charge = () => void 0) {
+  const model = periodModel(recur, dtstart, dateOnly);
+  if (!model) {
+    return null;
+  }
+  const unit = model.monthly ? 1 : 12;
   const index = (wall) => {
     const d = new Date(wall * 1e3);
-    return monthly ? d.getUTCFullYear() * 12 + d.getUTCMonth() : d.getUTCFullYear() * 12;
+    return d.getUTCFullYear() * 12 + (model.monthly ? d.getUTCMonth() : 0);
   };
-  const origin = index(dtstart);
-  const lowest = after === null ? index(begin) : index(after) + step;
+  const lowest = after === null ? index(begin) : index(after) + unit;
   const highest = index(end);
-  for (let k = Math.max(0, Math.ceil((lowest - origin) / interval)), periods = 0; origin + k * interval <= highest && periods * interval < CYCLE_MONTHS; k++, periods++) {
-    const at = origin + k * interval;
-    if (holds2(Math.floor(at / 12), at % 12 + 1)) {
+  const periods = cyclePeriods(model.step);
+  for (let k = Math.max(0, Math.ceil((lowest - model.origin) / model.step)), n = 0; model.origin + k * model.step <= highest && n < periods; k++, n++) {
+    const at = model.origin + k * model.step;
+    charge(model.monthly ? 1 : 12);
+    const size = model.days(Math.floor(at / 12), at % 12 + 1).length * model.times.length;
+    if (model.bySetPos.length > 0 ? model.bySetPos.some((v) => Math.abs(v) <= size) : size > 0) {
       return true;
     }
   }
   return false;
+}
+function keepInstances(iterator, rule, start) {
+  if (rule.freq !== "MONTHLY") {
+    return;
+  }
+  const t = /* @__PURE__ */ new Date(0);
+  t.setUTCFullYear(start.year, start.month - 1, start.day);
+  t.setUTCHours(start.hour, start.minute, start.second, 0);
+  const model = periodModel(rule, t.getTime() / 1e3, start.isDate);
+  const byDay = rule.getComponent("BYDAY").length > 0;
+  if (!model || byDay && (model.bySetPos.length > 0 && model.times.length > 1 || rule.getComponent("BYMONTHDAY").length > 0)) {
+    return;
+  }
+  const it = iterator;
+  const own = it.next;
+  if (typeof own !== "function") {
+    throw new BoundUnavailable("ical.js no longer iterates by next");
+  }
+  let cached = -1;
+  let cachedDays = [];
+  const isInstance = (time) => {
+    const at = time.year * 12 + time.month - 1;
+    if (at < model.origin || (at - model.origin) % model.step !== 0) {
+      return false;
+    }
+    if (at !== cached) {
+      cached = at;
+      cachedDays = model.days(time.year, time.month);
+    }
+    const di = cachedDays.indexOf(time.day);
+    const ti = model.times.indexOf(time.isDate ? 0 : time.hour * 3600 + time.minute * 60 + time.second);
+    if (di < 0 || ti < 0) {
+      return false;
+    }
+    if (model.bySetPos.length === 0) {
+      return true;
+    }
+    const i = di * model.times.length + ti;
+    const size = cachedDays.length * model.times.length;
+    return model.bySetPos.some((v) => v > 0 ? v - 1 === i : size + v === i);
+  };
+  const span = cyclePeriods(model.step) * model.step;
+  let kept = model.origin;
+  it.next = function next(again) {
+    if (again) {
+      return own.call(this, again);
+    }
+    for (; ; ) {
+      const time = own.call(this);
+      if (!time || isInstance(time)) {
+        if (time) {
+          kept = time.year * 12 + time.month - 1;
+        }
+        return time;
+      }
+      if (this.rule.count) {
+        this.rule.count++;
+      }
+      if (time.year * 12 + time.month - 1 - kept > span) {
+        this.completed = true;
+        return null;
+      }
+    }
+  };
 }
 
 // src/zone.ts
@@ -1862,7 +2016,11 @@ function expandWalls(master, until, budget, skipUnplaced = false, from = -Infini
               walls.add(wall);
             }
           }
-          if (!next && !emptyAtSetup && !endedByRule(iterator) && holdsInstance(recur, start.wall, first2, yielded, Math.min(until, ruleEnd)) !== false) {
+          if (!next && !emptyAtSetup && !endedByRule(iterator) && holdsInstance(recur, start.wall, first2, yielded, Math.min(until, ruleEnd), day, (units) => {
+            if ((budget.remaining -= units) < 0) {
+              throw new SeriesTooSparse("the rule is too sparse to expand within the work limit");
+            }
+          }) !== false) {
             cut = true;
           }
         } catch (error) {
