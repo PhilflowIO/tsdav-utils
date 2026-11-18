@@ -859,7 +859,10 @@ candidates before 2026), so every candidate is charged to `budget`, as in
 `updateFields`' own series checks. When it runs out the result says so and
 stops — fail closed: `complete: false, stoppedBy: 'budget'` (with several
 `RRULE`s an earlier occurrence of a later rule may be missing too). `limit`
-(default 1000) stops with `stoppedBy: 'limit'`. Pass the same budget to several
+(default 1000) stops with `stoppedBy: 'limit'`. Where ical.js gives a rule up inside the range (it ends a
+`YEARLY` rule after 28 years without an occurrence and a `MONTHLY` one after
+336 months, and a fifth Sunday of February can be 40 years away), the result
+is `complete: false, stoppedBy: 'library'`: later occurrences may be missing. Pass the same budget to several
 calls to bound a whole request.
 
 Pass `from` for a window, not only to filter: what an open-ended series costs
@@ -886,9 +889,10 @@ month, 29 with February (ical.js reads it by the month of the instance
 before); `MONTHLY` with `BYDAY` and `BYMONTHDAY` (its search for the
 next match gives up after 48 months and throws); `YEARLY` with `BYDAY` and
 `BYYEARDAY` or `BYWEEKNO` (ical.js ends a rule after 28 years without an
-instance); `MONTHLY` with a fifth or fifth-last weekday such as `5SU` (where
-the start's month lacks it, ical.js' setup searches on month by month and
-yields what it finds untested); a `DTSTART` before the year 100 (ical.js
+instance); `MONTHLY` or `YEARLY` with a fifth or fifth-last weekday such as
+`5SU`, or a `BYSETPOS` of 5 or more either way (a month may lack it: ical.js'
+setup searches on and yields what it finds untested, or finds an instance its
+own walk gives up before); a `DTSTART` before the year 100 (ical.js
 compares those years as 1900 to 1999); and an all-day series with a `FREQ`
 below a day or a `BYHOUR`, `BYMINUTE` or `BYSECOND` part. Before a moved
 walk, ical.js' setup at `DTSTART` is read: a rule it refuses there is

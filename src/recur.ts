@@ -134,8 +134,9 @@ function inEveryMonth(recur: ICAL.Recur, dtstart: number, days: number[]): boole
  * BYHOUR, BYMINUTE or BYSECOND (ical.js yields one date twice and throws, at
  * a step that depends on where it began); YEARLY with a BYMONTHDAY that a
  * month the rule takes may lack (a negative one, 31 with a 30-day month, 29
- * with February); MONTHLY with BYDAY and BYMONTHDAY; MONTHLY with a fifth or
- * fifth-last weekday; YEARLY with BYDAY and BYYEARDAY or BYWEEKNO; a DTSTART
+ * with February); MONTHLY with BYDAY and BYMONTHDAY; MONTHLY or YEARLY with a
+ * fifth or fifth-last weekday or a BYSETPOS of 5 or more either way; YEARLY
+ * with BYDAY and BYYEARDAY or BYWEEKNO; a DTSTART
  * before the year 100 (ical.js compares those times as 1900 to 1999:
  * Time.toUnixTime goes through Date.UTC).
  */
@@ -148,13 +149,18 @@ export function walkedInFull(recur: ICAL.Recur, dtstart: number, dateOnly: boole
       !inEveryMonth(recur, dtstart, (recur.getComponent('BYMONTHDAY') as (number | string)[]).map(Number))) ||
     (recur.freq === 'MONTHLY' && has('BYDAY') && has('BYMONTHDAY')) ||
     (recur.freq === 'YEARLY' && has('BYDAY') && (has('BYYEARDAY') || has('BYWEEKNO'))) ||
-    (recur.freq === 'MONTHLY' && fifthWeekday(recur)) ||
+    ((recur.freq === 'MONTHLY' || recur.freq === 'YEARLY') && (fifthWeekday(recur) || farSetPosition(recur))) ||
     new Date(dtstart * 1000).getUTCFullYear() < 100;
 }
 
 /** Whether BYDAY holds a fifth or fifth-last weekday (5SU, -5FR), one a month may lack */
 function fifthWeekday(recur: ICAL.Recur): boolean {
   return (recur.getComponent('BYDAY') as string[]).some((d) => /^[+-]?5/.test(String(d)));
+}
+
+/** Whether BYSETPOS picks a fifth or later (or fifth-last or earlier) day, which a month may lack too */
+function farSetPosition(recur: ICAL.Recur): boolean {
+  return (recur.getComponent('BYSETPOS') as (number | string)[]).some((v) => Math.abs(Number(v)) >= 5);
 }
 
 /**
@@ -205,14 +211,21 @@ function fifthWeekday(recur: ICAL.Recur): boolean {
  *   what it finds untested — next to the window, from a moved start. Every
  *   month has a first to fourth (and last to fourth-last) of each weekday, so
  *   no other BYDAY makes it search; an ordinal of 6 or more is refused.
+ * - YEARLY whose year may hold no instance (a fifth Sunday of February, a
+ *   BYSETPOS of 5 or more): the setup searches on by years without bound
+ *   (init loops to UNTIL or the year 20000), while a walk ends the rule after
+ *   28 years without an instance (next) — and such a gap can be 40 years
+ *   long. So the walk from DTSTART may end where one from a moved start
+ *   finds the next instance: walked from DTSTART, as are MONTHLY rules of the
+ *   same kind (a walk ends those after 336 empty months). Where a walk ends a
+ *   rule so, inside the range, the expansion says it is not complete.
  * The other setups stay within the start's period (WEEKLY steps to its first
  * BYDAY within the week; MONTHLY;BYMONTHDAY searches at most three months,
- * through the same next_month a walk steps by; YEARLY searches on by years,
- * which move no shared position, to a year whose days it expands as a step
- * would), or end the rule: the caller then walks from DTSTART. Every other
- * way ical.js refuses is decided by the rule or by DTSTART's own setup, which
- * the caller checks at DTSTART. Moving DTSTART never changes which instances
- * are found, only where the walk begins.
+ * through the same next_month a walk steps by), or end the rule: the caller
+ * then walks from DTSTART. Every other way ical.js refuses is decided by the
+ * rule or by DTSTART's own setup, which the caller checks at DTSTART. Moving
+ * DTSTART never changes which instances are found, only where the walk
+ * begins.
  */
 export function iterationStart(recur: ICAL.Recur, dtstart: number, from: number, dateOnly: boolean): number {
   const interval = Math.max(1, recur.interval || 1);

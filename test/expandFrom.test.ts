@@ -221,6 +221,22 @@ describe('with `from` or without, the same verdict', () => {
     expect(expansionWork.restarts - restarts).toBeGreaterThan(3);
   });
 
+  it('a rule ical.js gives up inside the range is not complete, with `from` or without', () => {
+    // fifth Sundays of February lie up to 40 years apart: a walk from 2058
+    // finds 2060 and 2088 (a cut of 28 empty years ends it before 2128),
+    // a setup from a moved start would search on and find 2128-02-29
+    const ics = calendar(...component('c', 'DTSTART:20580120T130000', 'RRULE:FREQ=YEARLY;BYMONTH=2;BYDAY=5SU'));
+    const window = { until: '2133-08-01T00:00:00' };
+    const whole = expandOccurrences(ics, { budget: createRecurrenceBudget(1e8), ...window });
+    const moved = expandOccurrences(ics, { budget: createRecurrenceBudget(1e8), from: '2117-09-19T00:00:00', ...window });
+    expect(whole).toMatchObject({ complete: false, stoppedBy: 'library' });
+    expect(moved).toMatchObject({ complete: false, stoppedBy: 'library' });
+    expect(moved.occurrences).toEqual(whole.occurrences.filter((o) => o.recurrenceId.value >= '2117-09-19T00:00:00'));
+    // a range that ends before ical.js gives up is complete
+    const early = expandOccurrences(ics, { budget: createRecurrenceBudget(1e8), until: '2100-01-01T00:00:00' });
+    expect(early).toMatchObject({ complete: true, stoppedBy: null });
+  });
+
   it('a rule ical.js sets up at DTSTART to yield nothing yields nothing with `from` either', () => {
     // 31 in a November: ical.js' setup searches three months on through BYMONTH, finds none, and never yields
     const ics = calendar(...component('r', 'DTSTART;TZID=Europe/Berlin:20181107T231400',

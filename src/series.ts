@@ -750,15 +750,35 @@ function bounded(iterator: ICAL.RecurIterator, budget: RecurrenceBudget, recur: 
  * first instance is all that is read, charged to the budget like any walk; a
  * search past the horizon counts as yielding (the walk itself decides).
  */
-function yieldsFromStart(recur: ICAL.Recur, dtstart: ICAL.Time, budget: RecurrenceBudget, horizon: number): boolean {
+function yieldsFromStart(recur: ICAL.Recur, dtstart: ICAL.Time, budget: RecurrenceBudget,
+  horizon: number): 'yields' | 'none' | 'cut' {
   try {
-    return bounded(recurIterator(recur, dtstart), budget, recur, horizon).next() !== null;
+    const iterator = bounded(recurIterator(recur, dtstart), budget, recur, horizon);
+    const emptyAtSetup = Boolean((iterator as unknown as { completed?: boolean }).completed);
+    if (iterator.next() !== null) {
+      return 'yields';
+    }
+    return emptyAtSetup || endedByRule(iterator) ? 'none' : 'cut';
   } catch (error) {
     if (error instanceof HorizonReached) {
-      return true;
+      return 'yields';
     }
     throw error;
   }
+}
+
+/**
+ * Whether an iterator whose next() gave null ended because the rule ends
+ * there: its COUNT is reached or the instance it stopped at lies past UNTIL.
+ * Otherwise ical.js gave up a search (RecurIterator.next ends a YEARLY rule
+ * after 28 years without an instance, a MONTHLY one after 336 months; a
+ * fifth Sunday of February can be 40 years apart), and instances may follow
+ * that it never yields: the expansion is then not complete.
+ */
+function endedByRule(iterator: ICAL.RecurIterator): boolean {
+  const it = iterator as unknown as { rule: ICAL.Recur; last: ICAL.Time; occurrence_number: number };
+  return Boolean(it.rule.count && it.occurrence_number >= it.rule.count) ||
+    Boolean(it.rule.until && it.last.compare(it.rule.until) > 0);
 }
 
 /**
@@ -779,7 +799,7 @@ function yieldsFromStart(recur: ICAL.Recur, dtstart: ICAL.Time, budget: Recurren
  * RDATEs are returned as without it.
  */
 export function expandWalls(master: ICAL.Component, until: number, budget: RecurrenceBudget,
-  skipUnplaced = false, from = -Infinity): { walls: Set<number>; complete: boolean } {
+  skipUnplaced = false, from = -Infinity): { walls: Set<number>; complete: boolean; stoppedBy: 'budget' | 'library' | null } {
   const start = startOf(master);
   if (!start) {
     throw new SeriesUnverifiable('the series has no DTSTART');
@@ -791,6 +811,8 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
     ? ICAL.Time.fromDateString(jcalOf(wall, frame))
     : ICAL.Time.fromDateTimeString(jcalOf(wall, 'floating'));
   const walls = new Set<number>();
+  // a rule ical.js stopped searching before the range ended (endedByRule)
+  let cut = false;
   if (norm(start.wall) <= until) {
     walls.add(norm(start.wall));
   }
@@ -860,7 +882,9 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
             // years on, all without a 29 February); from DTSTART it may not
             throw new MovedStartUnset();
           }
-          for (let next = iterator.next(); next; next = iterator.next()) {
+          const emptyAtSetup = Boolean((iterator as unknown as { completed?: boolean }).completed);
+          let next = iterator.next();
+          for (; next; next = iterator.next()) {
             const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
             if (wall > until) {
               break;
@@ -870,16 +894,28 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
               walls.add(wall);
             }
           }
+          if (!next && !emptyAtSetup && !endedByRule(iterator)) {
+            // ical.js gave up its search inside the range
+            cut = true;
+          }
         } catch (error) {
           if (!(error instanceof HorizonReached)) {
             throw error;
           }
         }
       };
-      const first = iterationStart(recur, start.wall, ruleFrom, day);
-      if (first !== start.wall && !yieldsFromStart(recur, timeOf(start.wall), budget, day ? until + DAY - 1 : until)) {
-        // the walk from DTSTART yields nothing: nor does it with `from`
-        continue;
+      let first = iterationStart(recur, start.wall, ruleFrom, day);
+      if (first !== start.wall) {
+        const fromStart = yieldsFromStart(recur, timeOf(start.wall), budget, day ? until + DAY - 1 : until);
+        if (fromStart === 'none') {
+          // the walk from DTSTART yields nothing: nor does it with `from`
+          continue;
+        }
+        if (fromStart === 'cut') {
+          // ical.js gives up before its first instance: the walk from DTSTART
+          // says so, as without `from`
+          first = start.wall;
+        }
       }
       try {
         walk(first);
@@ -899,11 +935,11 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
       throw error;
     }
     if (error instanceof SeriesTooSparse) {
-      return { walls, complete: false };
+      return { walls, complete: false, stoppedBy: 'budget' };
     }
     throw new SeriesUnverifiable((error as Error).message, error);
   }
-  return { walls, complete: true };
+  return { walls, complete: !cut, stoppedBy: cut ? 'library' : null };
 }
 
 /**
@@ -914,7 +950,11 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
  * take part in.
  */
 function expand(master: ICAL.Component, until: number): Set<number> {
-  const { walls, complete } = expandWalls(master, until, { remaining: WORK_BUDGET }, true);
+  const { walls, complete, stoppedBy } = expandWalls(master, until, { remaining: WORK_BUDGET }, true);
+  if (stoppedBy === 'library') {
+    throw new SeriesTooSparse('ical.js stops this rule after a long stretch without an occurrence (28 years, or 336 ' +
+      'months), before the override or EXDATE furthest ahead: it cannot be checked');
+  }
   if (!complete) {
     // a dense rule that runs out reaches far: the reason is the distance
     const frame = frameOf(master)!;

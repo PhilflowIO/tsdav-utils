@@ -69,9 +69,12 @@ export interface ExpansionResult {
   /**
    * Why the list stops early: "budget" — the budget ran out (with several
    * RRULEs an earlier occurrence of a later rule may be missing too); "limit"
-   * — `limit` occurrences were found. Null when complete.
+   * — `limit` occurrences were found; "library" — ical.js gave up a rule in
+   * the range (it ends a YEARLY rule after 28 years without an occurrence, a
+   * MONTHLY one after 336 months), so occurrences after that may be missing.
+   * Null when complete.
    */
-  stoppedBy: 'budget' | 'limit' | null;
+  stoppedBy: 'budget' | 'limit' | 'library' | null;
 }
 
 export interface ExpandOptions {
@@ -265,7 +268,7 @@ export function expandOccurrences(calendarObject: CalendarObjectInput | ICAL.Com
   const end = boundIn(master, frame, until, 'until');
   const start = options.from === undefined ? -Infinity : boundIn(master, frame, options.from, 'from');
 
-  let found: { walls: Set<number>; complete: boolean };
+  let found: { walls: Set<number>; complete: boolean; stoppedBy: 'budget' | 'library' | null };
   // Which occurrences an EXDATE excludes, by the rule every check uses (see
   // namesOccurrence): in a series with a zone the occurrence starting at the
   // instant it names (RFC 5545 3.3.5 in the hour a DST change shows twice),
@@ -332,5 +335,5 @@ export function expandOccurrences(calendarObject: CalendarObjectInput | ICAL.Com
     }
   }
   const complete = found.complete && !limited;
-  return { occurrences, complete, stoppedBy: complete ? null : !found.complete ? 'budget' : 'limit' };
+  return { occurrences, complete, stoppedBy: complete ? null : !found.complete ? found.stoppedBy ?? 'budget' : 'limit' };
 }
