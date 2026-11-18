@@ -862,6 +862,38 @@ stops — fail closed: `complete: false, stoppedBy: 'budget'` (with several
 (default 1000) stops with `stoppedBy: 'limit'`. Pass the same budget to several
 calls to bound a whole request.
 
+Pass `from` for a window, not only to filter: what an open-ended series costs
+then depends on the window, not on its age. A yearly rule of fixed days (a
+birthday, an anniversary: `FREQ=YEARLY` with no `COUNT` and no part but
+`BYMONTH` and a `BYMONTHDAY` every month it takes has, such as
+`BYMONTH=5;BYMONTHDAY=30`) is worked out without walking, 45
+units per occurrence in the window and nothing when there is none, so 5,000
+birthdays cost one week only for those that fall in it. Not 29 February, not
+`BYMONTH` alone on a `DTSTART` day a listed month lacks, and with a `BY` part
+not a window in `DTSTART`'s own year: those are walked.
+Any other rule without `COUNT` is walked from two periods (`FREQ` × `INTERVAL`)
+before the one holding `from`, at `DTSTART` moved by whole periods on the
+series' wall clock (same day of the month, weekday, time of day and `INTERVAL`
+phase), keeping what lies at or after `from`. A rule whose `UNTIL` lies before
+`from` is not walked. The result, a refusal included, is the one the walk
+from `DTSTART` gives: a call with `from` refuses exactly when the same call
+without it does.
+
+The walk still starts at `DTSTART` where only the whole walk gives ical.js'
+result or verdict: `COUNT` (the count needs every earlier instance); `YEARLY`
+with a `BYMONTHDAY` some month it takes may lack, negative, 31 with a 30-day
+month, 29 with February (ical.js reads it by the month of the instance
+before); `MONTHLY` with `BYDAY` and `BYMONTHDAY` (its search for the
+next match gives up after 48 months and throws); `YEARLY` with `BYDAY` and
+`BYYEARDAY` or `BYWEEKNO` (ical.js ends a rule after 28 years without an
+instance); and an all-day series with a `FREQ` below a day or a `BYHOUR`,
+`BYMINUTE` or `BYSECOND` part. Before a moved walk, ical.js' setup at
+`DTSTART` is read: a rule it refuses there is refused, one it sets up to
+yield nothing yields nothing, and a moved start it refuses is walked from
+`DTSTART`. Selection stays by original start: to get every occurrence that
+touches a window, pass its start less the longest duration, and look for
+overrides moved in from elsewhere yourself.
+
 ```typescript
 const budget = createRecurrenceBudget();           // 150000 units, about 0.15 s of ical.js work
 for (const object of objects) {

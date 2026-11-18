@@ -79,7 +79,14 @@ export interface ExpandOptions {
   budget: RecurrenceBudget;
   /** the end of the range, exclusive: occurrences whose original start lies at or after this are not returned */
   until: Date | string;
-  /** occurrences whose original start lies before this are skipped (default: all from DTSTART) */
+  /**
+   * occurrences whose original start lies before this are skipped (default:
+   * all from DTSTART). A rule without COUNT is then walked from near it, not
+   * from DTSTART, so the budget an open-ended series spends does not grow
+   * with its age. Selection stays by original start: a caller that wants
+   * every occurrence touching a window passes its start less the longest
+   * duration, and finds overrides moved in from elsewhere itself.
+   */
   from?: Date | string;
   /** at most this many occurrences (default 1000) */
   limit?: number;
@@ -273,7 +280,7 @@ export function expandOccurrences(calendarObject: CalendarObjectInput | ICAL.Com
     (zoned ? excludedInstants.has(occurrenceInstant(master, wall, frame)) : excludedWalls.has(wall));
   const overrides = new Map<number, ICAL.Component>();
   try {
-    found = expandWalls(master, end - 1, budget);
+    found = expandWalls(master, end - 1, budget, false, norm(start));
     for (const stamp of master.getAllProperties('exdate').filter((p) => p.type !== 'period').flatMap(propertyStamps)) {
       if (frame.form === 'date') {
         excludedDays.add(dayOf(wallIn(master, stamp, frame)));
