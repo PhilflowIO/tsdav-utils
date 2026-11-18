@@ -245,6 +245,17 @@ const CASES = {
       call: () => updateFields(calendar(...event('DTSTART;TZID=Europe/Berlin:20260322T023000', 'RRULE:FREQ=DAILY',
         'EXDATE:21260331T013000Z')), { DTSTART: '2026-03-22T03:30:00' }) },
   ],
+  CHECK_LIBRARY_STOPPED: [
+    // fifth Sundays of February from 2058: ical.js stops after 2088, 28 empty years on
+    { name: 'an added EXDATE past where ical.js gives the rule up', remedy: 'rewrite-object', property: 'EXDATE',
+      message: /^Cannot verify that EXDATE .*: ical\.js stops this rule/,
+      call: () => updateFields(calendar(...event('DTSTART:20580120T130000Z', 'RRULE:FREQ=YEARLY;BYMONTH=2;BYDAY=5SU')),
+        { EXDATE: '2128-02-29T13:00:00Z' }, { lists: { EXDATE: 'add' } }) },
+    { name: 'a new rule checked past where ical.js gives it up', remedy: 'rewrite-object',
+      message: /^Cannot check that the overrides and EXDATEs still name occurrences of the series: .*ical\.js stops this rule/,
+      call: () => updateFields(calendar(...event('DTSTART:20580120T130000Z', 'RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29', 'EXDATE:21280229T130000Z')),
+        { RRULE: 'FREQ=YEARLY;BYMONTH=2;BYDAY=5SU' }) },
+  ],
   SERIES_UNVERIFIABLE: [
     { name: 'a series without DTSTART to check the override against', remedy: 'rewrite-object',
       call: () => updateFields(calendar(

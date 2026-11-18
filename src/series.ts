@@ -694,6 +694,9 @@ class MovedStartUnset extends Error {}
 /** An expansion that ran out of WORK_BUDGET: the check cannot be made, so it fails closed */
 class SeriesTooSparse extends Error {}
 
+/** ical.js gave a rule up (endedByRule) before the furthest wall clock a check needs: it fails closed */
+class RuleGivenUp extends SeriesTooSparse {}
+
 
 /** The iterator has passed the furthest wall clock the expansion needs */
 class HorizonReached extends Error {}
@@ -952,7 +955,7 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
 function expand(master: ICAL.Component, until: number): Set<number> {
   const { walls, complete, stoppedBy } = expandWalls(master, until, { remaining: WORK_BUDGET }, true);
   if (stoppedBy === 'library') {
-    throw new SeriesTooSparse('ical.js stops this rule after a long stretch without an occurrence (28 years, or 336 ' +
+    throw new RuleGivenUp('ical.js stops this rule after a long stretch without an occurrence (28 years, or 336 ' +
       'months), before the override or EXDATE furthest ahead: it cannot be checked');
   }
   if (!complete) {
@@ -1126,7 +1129,8 @@ function checkAddedExdates(master: ICAL.Component, added: { stamp: Stamp; label:
     if (!(error instanceof SeriesTooSparse)) {
       throw error;
     }
-    throw new UpdateFieldsError('CHECK_LIMIT_EXCEEDED', `Cannot verify that ${added.map((a) => a.label).join(', ')} ` +
+    throw new UpdateFieldsError(error instanceof RuleGivenUp ? 'CHECK_LIBRARY_STOPPED' : 'CHECK_LIMIT_EXCEEDED',
+      `Cannot verify that ${added.map((a) => a.label).join(', ')} ` +
       `names an occurrence of the series: ${error.message}. Rewrite the whole iCalendar object with the ` +
       'exclusions it should have', { remedy: 'rewrite-object', property: 'EXDATE' });
   }
@@ -1321,10 +1325,11 @@ export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Co
       return error;
     }
     const rule = master.getFirstProperty('rrule')?.toICALString() ?? 'The rule';
+    const code = error instanceof RuleGivenUp ? 'CHECK_LIBRARY_STOPPED' : 'CHECK_LIMIT_EXCEEDED';
     return shapes
-      ? new UpdateFieldsError('CHECK_LIMIT_EXCEEDED', `Cannot check that the overrides and EXDATEs still name occurrences of the series: ${rule}: ` +
+      ? new UpdateFieldsError(code, `Cannot check that the overrides and EXDATEs still name occurrences of the series: ${rule}: ` +
         `${error.message}. Rewrite the whole iCalendar object instead`, { remedy: 'rewrite-object' })
-      : new UpdateFieldsError('CHECK_LIMIT_EXCEEDED', `Cannot check that moving DTSTART keeps the series' occurrences: ${rule}: ${error.message}. ` +
+      : new UpdateFieldsError(code, `Cannot check that moving DTSTART keeps the series' occurrences: ${rule}: ${error.message}. ` +
         'Give RRULE, UNTIL and EXDATE explicitly in the same call, or rewrite the whole iCalendar object',
       { remedy: 'same-call' });
   };

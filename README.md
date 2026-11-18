@@ -998,6 +998,7 @@ unreadable one is refused (`INVALID_RULE`) rather than rewritten.
 | `UNKNOWN_OCCURRENCE` | an id given to `cancelOccurrences` is no occurrence of the series | `fix-value` |
 | `DST_AMBIGUOUS` | a value of the series sits at a DST change, where the wall clock does not name one instant; or, under `absoluteTime: 'keep-zone'` or `zone`, an instant falls in the second pass of the repeated hour | `same-call` for `UNTIL`; `rewrite-object` for a value sharing its instant with a skipped occurrence, or an override; `fix-value` under `keep-zone` and `zone` |
 | `CHECK_LIMIT_EXCEEDED` | the series is too sparse, or the override or `EXDATE` furthest ahead too far, to check within the work limit | `rewrite-object` on a new rule or an added `EXDATE`; `same-call` on a move |
+| `CHECK_LIBRARY_STOPPED` | ical.js gives the rule up before the override or `EXDATE` furthest ahead (it ends a `YEARLY` rule after 28 years without an occurrence, a `MONTHLY` one after 336 months), so it cannot be checked; `expandOccurrences` reports this as `stoppedBy: 'library'` | `rewrite-object` on a new rule or an added `EXDATE`; `same-call` on a move |
 | `SERIES_UNVERIFIABLE` | whether the overrides and `EXDATE`s still name occurrences cannot be checked: the series has no DTSTART | `rewrite-object` |
 
 A refusal reported inside another keeps its code: an `UNTIL` in the repeated
