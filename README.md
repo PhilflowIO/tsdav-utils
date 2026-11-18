@@ -859,8 +859,49 @@ candidates before 2026), so every candidate is charged to `budget`, as in
 `updateFields`' own series checks. When it runs out the result says so and
 stops — fail closed: `complete: false, stoppedBy: 'budget'` (with several
 `RRULE`s an earlier occurrence of a later rule may be missing too). `limit`
-(default 1000) stops with `stoppedBy: 'limit'`. Pass the same budget to several
+(default 1000) stops with `stoppedBy: 'limit'`. Where ical.js gives a rule up inside the range (it ends a
+`YEARLY` rule after 28 years without an occurrence and a `MONTHLY` one after
+336 months, and a fifth Sunday of February can be 40 years away), the result
+is `complete: false, stoppedBy: 'library'`: later occurrences may be missing. Pass the same budget to several
 calls to bound a whole request.
+
+Pass `from` for a window, not only to filter: what an open-ended series costs
+then depends on the window, not on its age. A yearly rule of fixed days (a
+birthday, an anniversary: `FREQ=YEARLY` with no `COUNT` and no part but
+`BYMONTH` and a `BYMONTHDAY` every month it takes has, such as
+`BYMONTH=5;BYMONTHDAY=30`) is worked out without walking, 45
+units per occurrence in the window and nothing when there is none, so 5,000
+birthdays cost one week only for those that fall in it. Not 29 February, not
+`BYMONTH` alone on a `DTSTART` day a listed month lacks, and with a `BY` part
+not a window in `DTSTART`'s own year: those are walked.
+Any other rule without `COUNT` is walked from two periods (`FREQ` × `INTERVAL`)
+before the one holding `from`, at `DTSTART` moved by whole periods on the
+series' wall clock (same day of the month, weekday, time of day and `INTERVAL`
+phase), keeping what lies at or after `from`. A rule whose `UNTIL` lies before
+`from` is not walked. The result, a refusal included, is the one the walk
+from `DTSTART` gives: a call with `from` refuses exactly when the same call
+without it does.
+
+The walk still starts at `DTSTART` where only the whole walk gives ical.js'
+result or verdict: `COUNT` (the count needs every earlier instance); `YEARLY`
+with a `BYMONTHDAY` some month it takes may lack, negative, 31 with a 30-day
+month, 29 with February (ical.js reads it by the month of the instance
+before); `MONTHLY` with `BYDAY` and `BYMONTHDAY` (its search for the
+next match gives up after 48 months and throws); `YEARLY` with `BYDAY` and
+`BYYEARDAY` or `BYWEEKNO` (ical.js ends a rule after 28 years without an
+instance); `MONTHLY` or `YEARLY` with a fifth or fifth-last weekday such as
+`5SU`, or a `BYSETPOS` of 5 or more either way (a month may lack it: ical.js'
+setup searches on and yields what it finds untested, or finds an instance its
+own walk gives up before); a `DTSTART` before the year 100 (ical.js
+compares those years as 1900 to 1999); and an all-day series with a `FREQ`
+below a day or a `BYHOUR`, `BYMINUTE` or `BYSECOND` part. Before a moved
+walk, ical.js' setup at `DTSTART` is read: a rule it refuses there is
+refused, one it sets up to yield nothing yields nothing, and a moved start it
+refuses, or whose setup ends the rule, is walked from `DTSTART`. A rule
+worked out without walking is charged instance by instance and stops at the
+budget like a walk. Selection stays by original start: to get every occurrence that
+touches a window, pass its start less the longest duration, and look for
+overrides moved in from elsewhere yourself.
 
 ```typescript
 const budget = createRecurrenceBudget();           // 150000 units, about 0.15 s of ical.js work
@@ -957,6 +998,7 @@ unreadable one is refused (`INVALID_RULE`) rather than rewritten.
 | `UNKNOWN_OCCURRENCE` | an id given to `cancelOccurrences` is no occurrence of the series | `fix-value` |
 | `DST_AMBIGUOUS` | a value of the series sits at a DST change, where the wall clock does not name one instant; or, under `absoluteTime: 'keep-zone'` or `zone`, an instant falls in the second pass of the repeated hour | `same-call` for `UNTIL`; `rewrite-object` for a value sharing its instant with a skipped occurrence, or an override; `fix-value` under `keep-zone` and `zone` |
 | `CHECK_LIMIT_EXCEEDED` | the series is too sparse, or the override or `EXDATE` furthest ahead too far, to check within the work limit | `rewrite-object` on a new rule or an added `EXDATE`; `same-call` on a move |
+| `CHECK_LIBRARY_STOPPED` | ical.js gives the rule up before the override or `EXDATE` furthest ahead (it ends a `YEARLY` rule after 28 years without an occurrence, a `MONTHLY` one after 336 months), so it cannot be checked; `expandOccurrences` reports this as `stoppedBy: 'library'` | `rewrite-object` on a new rule or an added `EXDATE`; `same-call` on a move |
 | `SERIES_UNVERIFIABLE` | whether the overrides and `EXDATE`s still name occurrences cannot be checked: the series has no DTSTART | `rewrite-object` |
 
 A refusal reported inside another keeps its code: an `UNTIL` in the repeated

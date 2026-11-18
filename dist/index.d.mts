@@ -200,7 +200,7 @@ declare function updateFields(calendarObject: CalendarObjectInput, fields: Field
  *
  * See "Errors" in the README for when each code occurs.
  */
-declare const CODES: readonly ["INVALID_INPUT", "INVALID_ICALENDAR", "INVALID_TYPE", "INVALID_FLOATING_TIME", "INVALID_ABSOLUTE_TIME", "COMPONENT_NOT_FOUND", "WRONG_OBJECT_KIND", "NO_MASTER", "INVALID_VALUE", "VALUE_TYPE_MISMATCH", "ZONE_MISMATCH", "UNKNOWN_TZID", "UNSUPPORTED_VTIMEZONE", "UNKNOWN_RULE_PART", "DUPLICATE_RULE_PART", "INVALID_RULE", "END_BEFORE_START", "RECURRENCE_ID_ON_MASTER", "SERIES_MOVE_REFUSED", "ORPHANED_EXCEPTIONS", "UNMATCHED_EXDATE", "NOT_IN_LIST", "UNKNOWN_OCCURRENCE", "DST_AMBIGUOUS", "CHECK_LIMIT_EXCEEDED", "SERIES_UNVERIFIABLE"];
+declare const CODES: readonly ["INVALID_INPUT", "INVALID_ICALENDAR", "INVALID_TYPE", "INVALID_FLOATING_TIME", "INVALID_ABSOLUTE_TIME", "COMPONENT_NOT_FOUND", "WRONG_OBJECT_KIND", "NO_MASTER", "INVALID_VALUE", "VALUE_TYPE_MISMATCH", "ZONE_MISMATCH", "UNKNOWN_TZID", "UNSUPPORTED_VTIMEZONE", "UNKNOWN_RULE_PART", "DUPLICATE_RULE_PART", "INVALID_RULE", "END_BEFORE_START", "RECURRENCE_ID_ON_MASTER", "SERIES_MOVE_REFUSED", "ORPHANED_EXCEPTIONS", "UNMATCHED_EXDATE", "NOT_IN_LIST", "UNKNOWN_OCCURRENCE", "DST_AMBIGUOUS", "CHECK_LIMIT_EXCEEDED", "CHECK_LIBRARY_STOPPED", "SERIES_UNVERIFIABLE"];
 /** Every code, frozen */
 declare const UPDATE_FIELDS_ERROR_CODES: typeof CODES;
 /** A stable reason for a refusal; see UPDATE_FIELDS_ERROR_CODES */
@@ -395,16 +395,26 @@ interface ExpansionResult {
     /**
      * Why the list stops early: "budget" — the budget ran out (with several
      * RRULEs an earlier occurrence of a later rule may be missing too); "limit"
-     * — `limit` occurrences were found. Null when complete.
+     * — `limit` occurrences were found; "library" — ical.js gave up a rule in
+     * the range (it ends a YEARLY rule after 28 years without an occurrence, a
+     * MONTHLY one after 336 months), so occurrences after that may be missing.
+     * Null when complete.
      */
-    stoppedBy: 'budget' | 'limit' | null;
+    stoppedBy: 'budget' | 'limit' | 'library' | null;
 }
 interface ExpandOptions {
     /** the work budget to spend (see createRecurrenceBudget); shared across calls if the same object is passed */
     budget: RecurrenceBudget;
     /** the end of the range, exclusive: occurrences whose original start lies at or after this are not returned */
     until: Date | string;
-    /** occurrences whose original start lies before this are skipped (default: all from DTSTART) */
+    /**
+     * occurrences whose original start lies before this are skipped (default:
+     * all from DTSTART). A rule without COUNT is then walked from near it, not
+     * from DTSTART, so the budget an open-ended series spends does not grow
+     * with its age. Selection stays by original start: a caller that wants
+     * every occurrence touching a window passes its start less the longest
+     * duration, and finds overrides moved in from elsewhere itself.
+     */
     from?: Date | string;
     /** at most this many occurrences (default 1000) */
     limit?: number;

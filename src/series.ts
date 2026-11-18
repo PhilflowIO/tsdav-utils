@@ -5,7 +5,7 @@ import type { DateListEdit, ListOutcome } from './dateLists';
 import type { Anchor } from './typedValue';
 import { fieldsOf, unknownZone, wallOf, zoneOf } from './zone';
 import { UpdateFieldsError, wrapped } from './errors';
-import { BoundUnavailable, recurIterator } from './recur';
+import { BoundUnavailable, fixedYearlyWalls, iterationStart, recurIterator, walkedInFull } from './recur';
 
 /*
  * A DTSTART write on a series master moves the whole series.
@@ -682,11 +682,20 @@ function stepCost(recur: ICAL.Recur): number {
   }
 }
 
-/** Candidates tested since the module loaded, so a test can see the budget is charged */
-export const expansionWork = { steps: 0 };
+/**
+ * Candidates tested since the module loaded, so a test can see the budget is
+ * charged, and moved walks given up for the walk from DTSTART (restarts)
+ */
+export const expansionWork = { steps: 0, restarts: 0 };
+
+/** ical.js' setup at a moved start refused the start or ended the rule there: the walk from DTSTART decides */
+class MovedStartUnset extends Error {}
 
 /** An expansion that ran out of WORK_BUDGET: the check cannot be made, so it fails closed */
 class SeriesTooSparse extends Error {}
+
+/** ical.js gave a rule up (endedByRule) before the furthest wall clock a check needs: it fails closed */
+class RuleGivenUp extends SeriesTooSparse {}
 
 
 /** The iterator has passed the furthest wall clock the expansion needs */
@@ -735,6 +744,47 @@ function bounded(iterator: ICAL.RecurIterator, budget: RecurrenceBudget, recur: 
 }
 
 /**
+ * Whether the walk from DTSTART yields an instance at all, read before a walk
+ * from a moved start. ical.js settles some rules at DTSTART's setup: it
+ * refuses them (thrown here, as the walk without `from` throws), or it sets
+ * them up to yield nothing, without an error (MONTHLY;BYMONTH=2,4,6,10;
+ * BYMONTHDAY=31 from a November: its setup searches three months on through
+ * BYMONTH and gives up), where a walk from a later start would yield. The
+ * first instance is all that is read, charged to the budget like any walk; a
+ * search past the horizon counts as yielding (the walk itself decides).
+ */
+function yieldsFromStart(recur: ICAL.Recur, dtstart: ICAL.Time, budget: RecurrenceBudget,
+  horizon: number): 'yields' | 'none' | 'cut' {
+  try {
+    const iterator = bounded(recurIterator(recur, dtstart), budget, recur, horizon);
+    const emptyAtSetup = Boolean((iterator as unknown as { completed?: boolean }).completed);
+    if (iterator.next() !== null) {
+      return 'yields';
+    }
+    return emptyAtSetup || endedByRule(iterator) ? 'none' : 'cut';
+  } catch (error) {
+    if (error instanceof HorizonReached) {
+      return 'yields';
+    }
+    throw error;
+  }
+}
+
+/**
+ * Whether an iterator whose next() gave null ended because the rule ends
+ * there: its COUNT is reached or the instance it stopped at lies past UNTIL.
+ * Otherwise ical.js gave up a search (RecurIterator.next ends a YEARLY rule
+ * after 28 years without an instance, a MONTHLY one after 336 months; a
+ * fifth Sunday of February can be 40 years apart), and instances may follow
+ * that it never yields: the expansion is then not complete.
+ */
+function endedByRule(iterator: ICAL.RecurIterator): boolean {
+  const it = iterator as unknown as { rule: ICAL.Recur; last: ICAL.Time; occurrence_number: number };
+  return Boolean(it.rule.count && it.occurrence_number >= it.rule.count) ||
+    Boolean(it.rule.until && it.last.compare(it.rule.until) > 0);
+}
+
+/**
  * The occurrences of the series as it stands up to `until` (a wall clock of the
  * series' frame) — DTSTART, the instances of each RRULE and the RDATEs (EXDATE
  * does not count: an override of an excluded instance still names it), on the
@@ -743,9 +793,16 @@ function bounded(iterator: ICAL.RecurIterator, budget: RecurrenceBudget, recur: 
  * several RRULEs, an earlier occurrence of a later rule may be missing).
  * Throws SeriesUnverifiable when it cannot be told at all (a rule ical.js
  * cannot expand, a zone that cannot be read).
+ *
+ * With `from` (a wall clock of the same frame) only the rule instances from
+ * it on are needed: those before it are left out, and a rule without COUNT is
+ * walked from near it rather than from DTSTART (iterationStart), or, for a
+ * yearly rule of fixed days, worked out without a walk (fixedYearlyWalls),
+ * so the cost of an open-ended series no longer grows with its age. DTSTART and the
+ * RDATEs are returned as without it.
  */
 export function expandWalls(master: ICAL.Component, until: number, budget: RecurrenceBudget,
-  skipUnplaced = false): { walls: Set<number>; complete: boolean } {
+  skipUnplaced = false, from = -Infinity): { walls: Set<number>; complete: boolean; stoppedBy: 'budget' | 'library' | null } {
   const start = startOf(master);
   if (!start) {
     throw new SeriesUnverifiable('the series has no DTSTART');
@@ -757,6 +814,8 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
     ? ICAL.Time.fromDateString(jcalOf(wall, frame))
     : ICAL.Time.fromDateTimeString(jcalOf(wall, 'floating'));
   const walls = new Set<number>();
+  // a rule ical.js stopped searching before the range ended (endedByRule)
+  let cut = false;
   if (norm(start.wall) <= until) {
     walls.add(norm(start.wall));
   }
@@ -781,27 +840,97 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
     }
     for (const property of master.getAllProperties('rrule')) {
       const recur = recurOf(property).clone();
+      // a rule only the whole walk can read (walkedInFull) is walked in full,
+      // so a call with `from` gives what the call without it gives, refusal
+      // included
+      const ruleFrom = walkedInFull(recur, start.wall, day) ? -Infinity : from;
+      let ruleEnd = Infinity;
       if (recur.until) {
-        recur.until = timeOf(norm(wallIn(master, stampOf(recur.until.toString(), undefined, property.name.toUpperCase()),
-          frame)));
+        const last = norm(wallIn(master, stampOf(recur.until.toString(), undefined, property.name.toUpperCase()), frame));
+        if (last < ruleFrom) {
+          // every instance lies at or before UNTIL, so before `from`; ical.js'
+          // setup at DTSTART still refuses what it refuses without `from`
+          recurIterator(recur, timeOf(start.wall));
+          continue;
+        }
+        recur.until = timeOf(last);
+        ruleEnd = last;
+      }
+      const fixed = fixedYearlyWalls(recur, start.wall, ruleFrom, until, ruleEnd);
+      if (fixed) {
+        // ical.js' setup at DTSTART (no step, so no charge) refuses what it
+        // refuses without `from`; the instances are charged as ical.js would
+        // charge the candidates it yields
+        recurIterator(recur, timeOf(start.wall));
+        const cost = stepCost(recur);
+        for (const wall of fixed) {
+          expansionWork.steps++;
+          if ((budget.remaining -= cost) < 0) {
+            throw new SeriesTooSparse('the rule is too sparse to expand within the work limit');
+          }
+          walls.add(norm(wall));
+        }
+        continue;
       }
       // a date series compares days; its last candidate day starts at `until`.
       // recurIterator yields in time order, so the first instance past `until`
       // (and the first candidate past the horizon) ends the rule: nothing
       // after it can lie in the range
-      const iterator = bounded(recurIterator(recur, timeOf(start.wall)), budget, recur, day ? until + DAY - 1 : until);
-      try {
-        for (let next = iterator.next(); next; next = iterator.next()) {
-          const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
-          if (wall > until) {
-            break;
+      const walk = (first: number) => {
+        try {
+          const iterator = bounded(recurIterator(recur, timeOf(first)), budget, recur, day ? until + DAY - 1 : until);
+          if (first !== start.wall && (iterator as unknown as { completed?: boolean }).completed) {
+            // the setup found no instance from the moved start and ended the
+            // rule (YEARLY;BYYEARDAY=366 from 2097: its search looks three
+            // years on, all without a 29 February); from DTSTART it may not
+            throw new MovedStartUnset();
           }
-          walls.add(wall);
+          const emptyAtSetup = Boolean((iterator as unknown as { completed?: boolean }).completed);
+          let next = iterator.next();
+          for (; next; next = iterator.next()) {
+            const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
+            if (wall > until) {
+              break;
+            }
+            // before `from`: not needed, and from a moved start not exact
+            if (wall >= from) {
+              walls.add(wall);
+            }
+          }
+          if (!next && !emptyAtSetup && !endedByRule(iterator)) {
+            // ical.js gave up its search inside the range
+            cut = true;
+          }
+        } catch (error) {
+          if (!(error instanceof HorizonReached)) {
+            throw error;
+          }
         }
+      };
+      let first = iterationStart(recur, start.wall, ruleFrom, day);
+      if (first !== start.wall) {
+        const fromStart = yieldsFromStart(recur, timeOf(start.wall), budget, day ? until + DAY - 1 : until);
+        if (fromStart === 'none') {
+          // the walk from DTSTART yields nothing: nor does it with `from`
+          continue;
+        }
+        if (fromStart === 'cut') {
+          // ical.js gives up before its first instance: the walk from DTSTART
+          // says so, as without `from`
+          first = start.wall;
+        }
+      }
+      try {
+        walk(first);
       } catch (error) {
-        if (!(error instanceof HorizonReached)) {
+        // ical.js' setup may refuse a moved start, or end the rule there,
+        // where at DTSTART it does neither: the walk from DTSTART decides.
+        // What the moved walk found before is exact, and that walk finds it too.
+        if (first === start.wall || error instanceof SeriesTooSparse || error instanceof BoundUnavailable) {
           throw error;
         }
+        expansionWork.restarts++;
+        walk(start.wall);
       }
     }
   } catch (error) {
@@ -809,11 +938,11 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
       throw error;
     }
     if (error instanceof SeriesTooSparse) {
-      return { walls, complete: false };
+      return { walls, complete: false, stoppedBy: 'budget' };
     }
     throw new SeriesUnverifiable((error as Error).message, error);
   }
-  return { walls, complete: true };
+  return { walls, complete: !cut, stoppedBy: cut ? 'library' : null };
 }
 
 /**
@@ -824,7 +953,11 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
  * take part in.
  */
 function expand(master: ICAL.Component, until: number): Set<number> {
-  const { walls, complete } = expandWalls(master, until, { remaining: WORK_BUDGET }, true);
+  const { walls, complete, stoppedBy } = expandWalls(master, until, { remaining: WORK_BUDGET }, true);
+  if (stoppedBy === 'library') {
+    throw new RuleGivenUp('ical.js stops this rule after a long stretch without an occurrence (28 years, or 336 ' +
+      'months), before the override or EXDATE furthest ahead: it cannot be checked');
+  }
   if (!complete) {
     // a dense rule that runs out reaches far: the reason is the distance
     const frame = frameOf(master)!;
@@ -996,7 +1129,8 @@ function checkAddedExdates(master: ICAL.Component, added: { stamp: Stamp; label:
     if (!(error instanceof SeriesTooSparse)) {
       throw error;
     }
-    throw new UpdateFieldsError('CHECK_LIMIT_EXCEEDED', `Cannot verify that ${added.map((a) => a.label).join(', ')} ` +
+    throw new UpdateFieldsError(error instanceof RuleGivenUp ? 'CHECK_LIBRARY_STOPPED' : 'CHECK_LIMIT_EXCEEDED',
+      `Cannot verify that ${added.map((a) => a.label).join(', ')} ` +
       `names an occurrence of the series: ${error.message}. Rewrite the whole iCalendar object with the ` +
       'exclusions it should have', { remedy: 'rewrite-object', property: 'EXDATE' });
   }
@@ -1191,10 +1325,11 @@ export function beginSeriesEdit(calendar: ICAL.Component | null, master: ICAL.Co
       return error;
     }
     const rule = master.getFirstProperty('rrule')?.toICALString() ?? 'The rule';
+    const code = error instanceof RuleGivenUp ? 'CHECK_LIBRARY_STOPPED' : 'CHECK_LIMIT_EXCEEDED';
     return shapes
-      ? new UpdateFieldsError('CHECK_LIMIT_EXCEEDED', `Cannot check that the overrides and EXDATEs still name occurrences of the series: ${rule}: ` +
+      ? new UpdateFieldsError(code, `Cannot check that the overrides and EXDATEs still name occurrences of the series: ${rule}: ` +
         `${error.message}. Rewrite the whole iCalendar object instead`, { remedy: 'rewrite-object' })
-      : new UpdateFieldsError('CHECK_LIMIT_EXCEEDED', `Cannot check that moving DTSTART keeps the series' occurrences: ${rule}: ${error.message}. ` +
+      : new UpdateFieldsError(code, `Cannot check that moving DTSTART keeps the series' occurrences: ${rule}: ${error.message}. ` +
         'Give RRULE, UNTIL and EXDATE explicitly in the same call, or rewrite the whole iCalendar object',
       { remedy: 'same-call' });
   };

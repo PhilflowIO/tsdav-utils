@@ -60,6 +60,13 @@ const CODES = [
   'DST_AMBIGUOUS',
   /** the series is too sparse, or what has to be checked too far ahead, to check within the work limit */
   'CHECK_LIMIT_EXCEEDED',
+  /**
+   * ical.js gives the rule up before what has to be checked (it ends a YEARLY
+   * rule after 28 years without an occurrence, a MONTHLY one after 336
+   * months), so the check cannot be made; expandOccurrences reports the same
+   * as stoppedBy "library"
+   */
+  'CHECK_LIBRARY_STOPPED',
   /** whether the overrides and EXDATEs still name occurrences cannot be checked: the series has no DTSTART */
   'SERIES_UNVERIFIABLE',
 ] as const;

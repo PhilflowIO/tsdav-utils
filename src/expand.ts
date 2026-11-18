@@ -69,9 +69,12 @@ export interface ExpansionResult {
   /**
    * Why the list stops early: "budget" — the budget ran out (with several
    * RRULEs an earlier occurrence of a later rule may be missing too); "limit"
-   * — `limit` occurrences were found. Null when complete.
+   * — `limit` occurrences were found; "library" — ical.js gave up a rule in
+   * the range (it ends a YEARLY rule after 28 years without an occurrence, a
+   * MONTHLY one after 336 months), so occurrences after that may be missing.
+   * Null when complete.
    */
-  stoppedBy: 'budget' | 'limit' | null;
+  stoppedBy: 'budget' | 'limit' | 'library' | null;
 }
 
 export interface ExpandOptions {
@@ -79,7 +82,14 @@ export interface ExpandOptions {
   budget: RecurrenceBudget;
   /** the end of the range, exclusive: occurrences whose original start lies at or after this are not returned */
   until: Date | string;
-  /** occurrences whose original start lies before this are skipped (default: all from DTSTART) */
+  /**
+   * occurrences whose original start lies before this are skipped (default:
+   * all from DTSTART). A rule without COUNT is then walked from near it, not
+   * from DTSTART, so the budget an open-ended series spends does not grow
+   * with its age. Selection stays by original start: a caller that wants
+   * every occurrence touching a window passes its start less the longest
+   * duration, and finds overrides moved in from elsewhere itself.
+   */
   from?: Date | string;
   /** at most this many occurrences (default 1000) */
   limit?: number;
@@ -258,7 +268,7 @@ export function expandOccurrences(calendarObject: CalendarObjectInput | ICAL.Com
   const end = boundIn(master, frame, until, 'until');
   const start = options.from === undefined ? -Infinity : boundIn(master, frame, options.from, 'from');
 
-  let found: { walls: Set<number>; complete: boolean };
+  let found: { walls: Set<number>; complete: boolean; stoppedBy: 'budget' | 'library' | null };
   // Which occurrences an EXDATE excludes, by the rule every check uses (see
   // namesOccurrence): in a series with a zone the occurrence starting at the
   // instant it names (RFC 5545 3.3.5 in the hour a DST change shows twice),
@@ -273,7 +283,7 @@ export function expandOccurrences(calendarObject: CalendarObjectInput | ICAL.Com
     (zoned ? excludedInstants.has(occurrenceInstant(master, wall, frame)) : excludedWalls.has(wall));
   const overrides = new Map<number, ICAL.Component>();
   try {
-    found = expandWalls(master, end - 1, budget);
+    found = expandWalls(master, end - 1, budget, false, norm(start));
     for (const stamp of master.getAllProperties('exdate').filter((p) => p.type !== 'period').flatMap(propertyStamps)) {
       if (frame.form === 'date') {
         excludedDays.add(dayOf(wallIn(master, stamp, frame)));
@@ -325,5 +335,5 @@ export function expandOccurrences(calendarObject: CalendarObjectInput | ICAL.Com
     }
   }
   const complete = found.complete && !limited;
-  return { occurrences, complete, stoppedBy: complete ? null : !found.complete ? 'budget' : 'limit' };
+  return { occurrences, complete, stoppedBy: complete ? null : !found.complete ? found.stoppedBy ?? 'budget' : 'limit' };
 }
