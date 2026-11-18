@@ -136,7 +136,17 @@ describe('a MONTHLY;BYMONTHDAY rule whose start month holds none of its days (#4
       const last = `${int(2026, 2030)}-${p2(int(1, 12))}-${p2(int(1, 28))}`;
       const until = zoned ? `${last}T00:00:00` : last;
       const ics = series(dtstart, rule);
-      const whole = expand(ics, until);
+      let whole;
+      try {
+        whole = expand(ics, until);
+      } catch (error) {
+        // ical.js refuses some YEARLY BYMONTHDAY lists (two listed days on one
+        // date: "Same occurrence found twice"), as 0.8.0 did: with `from` alike
+        const message = (error as Error).message;
+        expect(message, `${rule} ${dtstart}`).toMatch(/Same occurrence found twice|Malformed|Invalid/);
+        expect(() => expand(ics, until, `${int(2026, 2030)}-01-01${zoned ? 'T00:00:00' : ''}`)).toThrow(message);
+        continue;
+      }
       if (!whole.complete) {
         // ical.js reads a YEARLY BYMONTHDAY without BYMONTH in DTSTART's month
         // only (RFC 5545: every month) and BYMONTHDAY by the month before:
