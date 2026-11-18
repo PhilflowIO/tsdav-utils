@@ -189,7 +189,10 @@ function inEveryMonth(recur, dtstart, days) {
 function walkedInFull(recur, dtstart, dateOnly) {
   const has = (part) => recur.getComponent(part).length > 0;
   const fixed = FIXED_PERIOD[recur.freq];
-  return Boolean(recur.count) || dateOnly && (fixed !== void 0 && fixed < 86400 || has("BYHOUR") || has("BYMINUTE") || has("BYSECOND")) || recur.freq === "YEARLY" && !inEveryMonth(recur, dtstart, recur.getComponent("BYMONTHDAY").map(Number)) || recur.freq === "MONTHLY" && has("BYDAY") && has("BYMONTHDAY") || recur.freq === "YEARLY" && has("BYDAY") && (has("BYYEARDAY") || has("BYWEEKNO"));
+  return Boolean(recur.count) || dateOnly && (fixed !== void 0 && fixed < 86400 || has("BYHOUR") || has("BYMINUTE") || has("BYSECOND")) || recur.freq === "YEARLY" && !inEveryMonth(recur, dtstart, recur.getComponent("BYMONTHDAY").map(Number)) || recur.freq === "MONTHLY" && has("BYDAY") && has("BYMONTHDAY") || recur.freq === "YEARLY" && has("BYDAY") && (has("BYYEARDAY") || has("BYWEEKNO")) || recur.freq === "MONTHLY" && fifthWeekday(recur) || new Date(dtstart * 1e3).getUTCFullYear() < 100;
+}
+function fifthWeekday(recur) {
+  return recur.getComponent("BYDAY").some((d) => /^[+-]?5/.test(String(d)));
 }
 function iterationStart(recur, dtstart, from, dateOnly) {
   const interval = Math.max(1, recur.interval || 1);
@@ -249,26 +252,29 @@ function fixedYearlyWalls(recur, dtstart, from, to, last) {
   const days = byMonthDay.length ? [...byMonthDay].sort((a, b) => a - b) : [s.getUTCDate()];
   const interval = Math.max(1, recur.interval || 1);
   const end = Math.min(to, last);
-  const out = [];
   const k0 = Math.max(0, Math.ceil((firstYear - 1 - startYear) / interval));
-  for (let k = k0; ; k++) {
-    const year = startYear + k * interval;
-    if (Date.UTC(year, 0, 1) / 1e3 > end) {
-      break;
-    }
-    for (const month of months) {
-      for (const day of days) {
-        const t = /* @__PURE__ */ new Date(0);
-        t.setUTCFullYear(year, month - 1, day);
-        t.setUTCHours(s.getUTCHours(), s.getUTCMinutes(), s.getUTCSeconds(), 0);
-        const wall = t.getTime() / 1e3;
-        if (wall >= from && wall >= dtstart && wall <= end) {
-          out.push(wall);
+  const at = (year, month, day, h = 0, m = 0, sec = 0) => {
+    const t = /* @__PURE__ */ new Date(0);
+    t.setUTCFullYear(year, month - 1, day);
+    t.setUTCHours(h, m, sec, 0);
+    return t.getTime() / 1e3;
+  };
+  return (function* instances() {
+    for (let k = k0; ; k++) {
+      const year = startYear + k * interval;
+      if (at(year, 1, 1) > end) {
+        return;
+      }
+      for (const month of months) {
+        for (const day of days) {
+          const wall = at(year, month, day, s.getUTCHours(), s.getUTCMinutes(), s.getUTCSeconds());
+          if (wall >= from && wall >= dtstart && wall <= end) {
+            yield wall;
+          }
         }
       }
     }
-  }
-  return out;
+  })();
 }
 
 // src/zone.ts
@@ -1545,7 +1551,9 @@ function stepCost(recur) {
       return 45;
   }
 }
-var expansionWork = { steps: 0 };
+var expansionWork = { steps: 0, restarts: 0 };
+var MovedStartUnset = class extends Error {
+};
 var SeriesTooSparse = class extends Error {
 };
 var HorizonReached = class extends Error {
@@ -1645,6 +1653,9 @@ function expandWalls(master, until, budget, skipUnplaced = false, from = -Infini
       const walk = (first2) => {
         try {
           const iterator = bounded(recurIterator(recur, timeOf(first2)), budget, recur, day ? until + DAY2 - 1 : until);
+          if (first2 !== start.wall && iterator.completed) {
+            throw new MovedStartUnset();
+          }
           for (let next = iterator.next(); next; next = iterator.next()) {
             const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
             if (wall > until) {
@@ -1670,6 +1681,7 @@ function expandWalls(master, until, budget, skipUnplaced = false, from = -Infini
         if (first === start.wall || error instanceof SeriesTooSparse || error instanceof BoundUnavailable) {
           throw error;
         }
+        expansionWork.restarts++;
         walk(start.wall);
       }
     }
