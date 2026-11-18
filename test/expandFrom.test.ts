@@ -304,8 +304,11 @@ describe('a yearly rule of fixed days is worked out without walking', () => {
       const taken = months.length ? months : [Number(start.slice(5, 7))];
       const fewest = Math.min(...taken.map((m) => [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]));
       const fits = (d: number) => d >= 1 && d <= fewest;
+      // BYMONTHDAY without BYMONTH takes every month (RFC 5545), which ical.js
+      // reads as DTSTART's only: walked and checked, not worked out
       const fixed = shape === 0 ? start.slice(5, 10) !== '02-29'
-        : (monthDays.length ? monthDays.every(fits) : fits(Number(start.slice(8, 10)))) &&
+        : !(monthDays.length && !months.length) &&
+          (monthDays.length ? monthDays.every(fits) : fits(Number(start.slice(8, 10)))) &&
           Number(f.slice(0, 4)) > Number(start.slice(0, 4));
       if (fixed) {
         expect(1e8 - budget.remaining, `${rule} ${dtstart} from ${f}`).toBe(45 * got.occurrences.length);
@@ -313,7 +316,7 @@ describe('a yearly rule of fixed days is worked out without walking', () => {
       }
       if (got.occurrences.length) nonEmpty++;
     }
-    expect(worked).toBeGreaterThan(RUNS * 0.6);
+    expect(worked).toBeGreaterThan(RUNS * 0.4);
     expect(nonEmpty).toBeGreaterThan(RUNS * 0.2);
   });
 

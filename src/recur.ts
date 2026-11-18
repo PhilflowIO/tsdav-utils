@@ -611,6 +611,10 @@ export function fixedYearlyWalls(recur: ICAL.Recur, dtstart: number, from: numbe
       !inEveryMonth(recur, dtstart, byMonthDay) || !distinct(byMonthDay)) {
     return null;
   }
+  if (byMonthDay.length > 0 && byMonth.length === 0) {
+    // RFC 5545 takes every month; ical.js DTSTART's only: walked, and checked (keepInstances)
+    return null;
+  }
   const plain = byMonth.length === 0 && byMonthDay.length === 0;
   if (plain ? s.getUTCMonth() === 1 && s.getUTCDate() === 29
     : byMonthDay.length === 0 && !inEveryMonth(recur, dtstart, [s.getUTCDate()])) {
@@ -784,18 +788,6 @@ function periodModel(recur: ICAL.Recur, dtstart: number, dateOnly: boolean): Per
   };
 }
 
-/**
- * Whether keepInstances checks every candidate of the rule against its
- * PeriodModel: MONTHLY, except BYDAY with BYMONTHDAY, and BYDAY with BYSETPOS
- * and more than one time of day, where ical.js yields no superset of the
- * instances (see keepInstances).
- */
-function candidatesChecked(rule: ICAL.Recur, model: PeriodModel): boolean {
-  const has = (part: string) => (rule.getComponent(part) as unknown[]).length > 0;
-  return model.monthly &&
-    !(has('BYDAY') && ((model.bySetPos.length > 0 && model.times.length > 1) || has('BYMONTHDAY')));
-}
-
 /** The greatest common divisor */
 const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
 
@@ -821,8 +813,7 @@ function cyclePeriods(step: number): number {
  * instance in one of its periods after the one holding `after` — from the one
  * holding `begin` where `after` is null — up to the one holding `end`, all
  * wall clocks of the series; null where it cannot be told here (another
- * FREQ, BYWEEKNO, an ordinal BYDAY under BYMONTHDAY or BYYEARDAY) or where
- * BYSETPOS meets candidates nothing checks (candidatesChecked). A period
+ * FREQ, BYWEEKNO, an ordinal BYDAY under BYMONTHDAY or BYYEARDAY). A period
  * holds an instance when its set of date-times is not empty and, with
  * BYSETPOS, has a position BYSETPOS names. `charge` is called with the units
  * each period costs to count (one a month).
@@ -836,11 +827,7 @@ function cyclePeriods(step: number): number {
 export function holdsInstance(recur: ICAL.Recur, dtstart: number, begin: number, after: number | null,
   end: number, dateOnly: boolean, charge: (units: number) => void = () => undefined): boolean | null {
   const model = periodModel(recur, dtstart, dateOnly);
-  // with BYSETPOS, ical.js' setup yields days BYSETPOS rules out (a YEARLY
-  // BYDAY=5TU;BYSETPOS=2 gives a fifth Tuesday every year, RFC 5545 none):
-  // where its candidates are not checked, what it gave cannot be trusted to
-  // be all there is, and its give-up stays one
-  if (!model || (model.bySetPos.length > 0 && !candidatesChecked(recur, model))) {
+  if (!model) {
     return null;
   }
   const unit = model.monthly ? 1 : 12;
@@ -878,69 +865,110 @@ function wallOfTime(time: ICAL.Time): number {
   return wallAt(time.year, time.month, time.day, time.isDate ? 0 : time.hour * 3600 + time.minute * 60 + time.second);
 }
 
+/** What keepInstances leaves on an iterator: whether ical.js passed an instance in [lower, end] (wall clocks) without yielding it */
+export type MissedCheck = (lower: number, end: number) => boolean;
+
 /**
- * Drops from a MONTHLY iteration every candidate ical.js (2.2) yields that
- * is no instance of the rule by RFC 5545 (periodModel), where ical.js yields
- * all of them and more:
- * - its setup yields the day it finds untested: the n-th weekday of the
- *   start month, BYSETPOS unread (MONTHLY;INTERVAL=7;BYDAY=5MO;BYSETPOS=2
- *   from 8 May 1993 gives 31 May 1993), also in a month BYMONTH leaves out
- *   (BYMONTH=6;BYDAY=1MO from a December gives its first Monday);
- * - with BYMONTH it steps through the listed months and never reads INTERVAL
- *   (INTERVAL=24;BYMONTH=11 from a May gives every November, RFC 5545 none);
- * - with BYMONTHDAY and no BYDAY it never reads BYSETPOS (every listed day).
- * Each of these is a superset of the instances, so dropping what is not one
- * leaves exactly the instances. Not so where BYDAY, BYSETPOS and more than
- * one time of day meet (ical.js applies BYSETPOS to the days, RFC 5545 to
- * the date-times), nor for BYDAY with BYMONTHDAY (_byDayAndMonthDay steps
- * month by month whatever INTERVAL says): an instance may be missing there,
- * and such a rule is left as ical.js gives it (tsdav-utils#36). A dropped candidate does not count
- * toward COUNT. Where no instance comes in a whole cycle of periods
- * (cyclePeriods), none comes at all: the iteration ends there rather than
- * dropping ical.js' candidates without end.
+ * Checks a MONTHLY or YEARLY iteration against RFC 5545 (periodModel), where
+ * the rule has one, both ways:
+ * - every candidate ical.js (2.2) yields that is no instance is dropped. Its
+ *   setup yields the day it finds untested (MONTHLY;INTERVAL=7;BYDAY=5MO;
+ *   BYSETPOS=2 from 8 May 1993 gives 31 May 1993); with BYMONTH a MONTHLY
+ *   rule steps every listed month whatever INTERVAL says; BYSETPOS goes
+ *   unread under a MONTHLY BYMONTHDAY and a YEARLY fifth weekday; a YEARLY
+ *   BYMONTHDAY a month lacks becomes a day of the next month
+ *   (BYMONTH=2;BYMONTHDAY=30 gives 2 March). A dropped candidate does not
+ *   count toward COUNT: ical.js counts what it yields, so its own copy of
+ *   the rule (chronologicalRecur) counts one more;
+ * - every period the iteration passes is compared with the rule's instances
+ *   in it from `start` on: one ical.js never yielded (a YEARLY BYMONTHDAY
+ *   without BYMONTH it reads in DTSTART's month only, a MONTHLY BYDAY with
+ *   BYMONTHDAY it steps month by month whatever INTERVAL says) is recorded,
+ *   and the MissedCheck left on the iterator (`missed`) reports it for the
+ *   range the caller walked: the result is then not complete.
+ * So what passes is exactly RFC 5545's instances, or the caller learns it is
+ * not. Where no instance comes in a whole cycle of periods (cyclePeriods),
+ * none comes at all: the iteration ends there rather than dropping ical.js'
+ * candidates without end.
  */
 function keepInstances(iterator: ICAL.RecurIterator, rule: ICAL.Recur, start: ICAL.Time): void {
-  if (rule.freq !== 'MONTHLY') {
+  if (rule.freq !== 'MONTHLY' && rule.freq !== 'YEARLY') {
     return;
   }
-  const t = new Date(0);
-  t.setUTCFullYear(start.year, start.month - 1, start.day);
-  t.setUTCHours(start.hour, start.minute, start.second, 0);
-  const model = periodModel(rule, t.getTime() / 1000, start.isDate);
-  if (!model || !candidatesChecked(rule, model)) {
+  const startWall = wallOfTime(start);
+  const model = periodModel(rule, startWall, start.isDate);
+  if (!model) {
     return;
   }
   const it = iterator as unknown as { next: (again?: boolean) => ICAL.Time | null; rule: ICAL.Recur;
-    completed: boolean };
+    completed: boolean; missed?: MissedCheck };
   const own = it.next;
   if (typeof own !== 'function') {
     throw new BoundUnavailable('ical.js no longer iterates by next');
   }
-  let cached = -1;
-  let cachedDays: number[] = [];
-  const isInstance = (time: ICAL.Time) => {
-    const at = time.year * 12 + time.month - 1;
-    if (at < model.origin || (at - model.origin) % model.step !== 0) {
-      return false;
+  const periodOf = (year: number, month: number) => year * 12 + (model.monthly ? month - 1 : 0);
+  /** The instances of the period at month index `at`, as wall clocks in order; none off the grid */
+  let cachedAt = Number.NaN;
+  let cached = new Set<number>();
+  let cachedList: number[] = [];
+  const instancesOf = (at: number): number[] => {
+    if (at === cachedAt) {
+      return cachedList;
     }
-    if (at !== cached) {
-      cached = at;
-      cachedDays = model.days(time.year, time.month);
+    const list: number[] = [];
+    if (at >= model.origin && (at - model.origin) % model.step === 0) {
+      const year = Math.floor(at / 12);
+      const days = model.days(year, (at % 12) + 1);
+      const all: number[] = [];
+      for (const day of days) {
+        const base = model.monthly ? wallAt(year, (at % 12) + 1, day) : wallAt(year, 1, day);
+        for (const time of model.times) {
+          all.push(base + time);
+        }
+      }
+      if (model.bySetPos.length === 0) {
+        list.push(...all);
+      } else {
+        all.forEach((wall, i) => {
+          if (model.bySetPos.some((v) => (v > 0 ? v - 1 === i : all.length + v === i))) {
+            list.push(wall);
+          }
+        });
+      }
     }
-    const di = cachedDays.indexOf(time.day);
-    const ti = model.times.indexOf(time.isDate ? 0 : time.hour * 3600 + time.minute * 60 + time.second);
-    if (di < 0 || ti < 0) {
-      return false;
+    cachedAt = at;
+    cachedList = list;
+    cached = new Set(list);
+    return list;
+  };
+  // the first period of the grid at or after the one holding `start`
+  const first = periodOf(start.year, start.month);
+  let pointer = model.origin + Math.max(0, Math.ceil((first - model.origin) / model.step)) * model.step;
+  let yielded = new Set<number>();
+  /** Instances ical.js passed without yielding them, as wall clocks */
+  const missed: number[] = [];
+  /** Compares every grid period before `at` not yet compared, and moves on to `at` */
+  const passTo = (at: number) => {
+    for (; pointer < at; pointer += model.step) {
+      for (const wall of instancesOf(pointer)) {
+        if (wall >= startWall && !yielded.has(wall)) {
+          missed.push(wall);
+        }
+      }
+      yielded = new Set();
     }
-    if (model.bySetPos.length === 0) {
-      return true;
-    }
-    const i = di * model.times.length + ti;
-    const size = cachedDays.length * model.times.length;
-    return model.bySetPos.some((v) => (v > 0 ? v - 1 === i : size + v === i));
+  };
+  it.missed = (lower: number, end: number) => {
+    const d = new Date(end * 1000);
+    const at = periodOf(d.getUTCFullYear(), d.getUTCMonth() + 1);
+    // a range past a whole cycle without a check: the periods repeat, so one cycle tells
+    passTo(Math.min(at, pointer + cyclePeriods(model.step) * model.step));
+    const open = pointer === at ? instancesOf(at).filter((wall) => wall >= startWall && !yielded.has(wall)) : [];
+    return [...missed, ...open].some((wall) => wall >= lower && wall <= end);
   };
   const span = cyclePeriods(model.step) * model.step;
   let kept = model.origin;
+  let lastAt = -Infinity;
   it.next = function next(this: typeof it, again?: boolean) {
     if (again) {
       // ical.js' own retry inside next(): not a candidate of ours
@@ -948,19 +976,28 @@ function keepInstances(iterator: ICAL.RecurIterator, rule: ICAL.Recur, start: IC
     }
     for (;;) {
       const time = own.call(this);
-      if (!time || isInstance(time)) {
-        if (time) {
-          kept = time.year * 12 + time.month - 1;
-        }
+      if (!time) {
         return time;
       }
-      // not counted toward COUNT: ical.js counts what it yields (occurrence_number,
-      // which must stay, as at 0 it yields its setup again), so its own copy of
-      // the rule (chronologicalRecur) counts one more
+      const at = periodOf(time.year, time.month);
+      if (at < lastAt) {
+        // a candidate of a period already passed: ical.js went back
+        missed.push(wallOfTime(time));
+      } else {
+        passTo(at);
+        lastAt = at;
+      }
+      const wall = wallOfTime(time);
+      instancesOf(at);
+      if (cached.has(wall)) {
+        yielded.add(wall);
+        kept = at;
+        return time;
+      }
       if (this.rule.count) {
         this.rule.count++;
       }
-      if (time.year * 12 + time.month - 1 - kept > span) {
+      if (at - kept > span) {
         this.completed = true;
         return null;
       }

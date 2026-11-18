@@ -6,6 +6,7 @@ import type { Anchor } from './typedValue';
 import { fieldsOf, unknownZone, wallOf, zoneOf } from './zone';
 import { UpdateFieldsError, wrapped } from './errors';
 import { BoundUnavailable, fixedYearlyWalls, holdsInstance, iterationStart, recurIterator, walkedInFull } from './recur';
+import type { MissedCheck } from './recur';
 
 /*
  * A DTSTART write on a series master moves the whole series.
@@ -878,8 +879,12 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
       // (and the first candidate past the horizon) ends the rule: nothing
       // after it can lie in the range
       const walk = (first: number) => {
+        // how far the walk's result stands for the rule; ical.js may have
+        // passed an instance there without yielding it (keepInstances)
+        let checkedTo = Math.min(until, ruleEnd);
+        let iterator: ICAL.RecurIterator | null = null;
         try {
-          const iterator = bounded(recurIterator(recur, timeOf(first)), budget, recur, day ? until + DAY - 1 : until);
+          iterator = bounded(recurIterator(recur, timeOf(first)), budget, recur, day ? until + DAY - 1 : until);
           if (first !== start.wall && (iterator as unknown as { completed?: boolean }).completed) {
             // the setup found no instance from the moved start and ended the
             // rule (YEARLY;BYYEARDAY=366 from 2097: its search looks three
@@ -900,6 +905,14 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
               walls.add(wall);
             }
           }
+          if (!next && endedByRule(iterator) && iterator.rule.count) {
+            // COUNT reached: nothing after the last instance belongs to the rule
+            checkedTo = yielded ?? -Infinity;
+          }
+          if (!next && !emptyAtSetup && !endedByRule(iterator)) {
+            // the give-up: holdsInstance tells what comes after the last instance
+            checkedTo = yielded ?? -Infinity;
+          }
           if (!next && !emptyAtSetup && !endedByRule(iterator) &&
               holdsInstance(recur, start.wall, first, yielded, Math.min(until, ruleEnd), day, (units) => {
                 // counting the periods is work like any walk: charged to the same budget
@@ -916,6 +929,11 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
           if (!(error instanceof HorizonReached)) {
             throw error;
           }
+        }
+        const missed = (iterator as unknown as { missed?: MissedCheck } | null)?.missed;
+        if (missed && missed(from, checkedTo)) {
+          // ical.js passed an instance of the range without yielding it
+          cut = true;
         }
       };
       let first = iterationStart(recur, start.wall, ruleFrom, day);

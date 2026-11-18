@@ -863,19 +863,33 @@ without any occurrence. A month without a listed day no longer yields its 1st
 at the next listed hour either (`BYMONTHDAY=31;BYHOUR=0,23` gave 1 February
 at 23:00).
 
-Every candidate of a `MONTHLY` rule is checked against RFC 5545 where ical.js
-yields all instances and more, and what is no instance is dropped (not counted
-toward `COUNT`): the day ical.js' setup finds untested (`BYDAY=5MO;BYSETPOS=2`
-gave the fifth Monday of `DTSTART`'s month, a first Monday of a December that
-`BYMONTH=6` leaves out), every month `BYMONTH` lists where `INTERVAL` takes
-fewer (`INTERVAL=24;BYMONTH=11` from a May has no instance, ical.js gave every
-November), and every listed day where `BYSETPOS` picks some
-(`BYMONTHDAY=31,30;BYSETPOS=3` has none). With `BYDAY` and a negative
-`BYSETPOS`, the 1st of a month is kept when `BYSETPOS` names it from the back
-(`BYDAY=SA;BYSETPOS=-5`: 1 August 2020). Left as ical.js gives them
-(tsdav-utils#36): `BYDAY` with `BYMONTHDAY` (ical.js steps month by month
-whatever `INTERVAL` says), `BYDAY` with `BYSETPOS` and more than one time of
-day, `BYMONTH` with a fifth weekday, and `YEARLY` rules.
+Every candidate of a `MONTHLY` or `YEARLY` rule is checked against RFC 5545,
+and what is no instance is dropped (not counted toward `COUNT`): the day
+ical.js' setup finds untested (`BYDAY=5MO;BYSETPOS=2` gave the fifth Monday of
+`DTSTART`'s month, a first Monday of a December that `BYMONTH=6` leaves out),
+every month `BYMONTH` lists where `INTERVAL` takes fewer (`INTERVAL=24;BYMONTH=11`
+from a May has no instance, ical.js gave every November), every listed day
+where `BYSETPOS` picks some (`BYMONTHDAY=31,30;BYSETPOS=3` has none), and a
+`YEARLY` day a month lacks (`BYMONTH=2;BYMONTHDAY=30` gave 2 March). Each period
+the iteration passes is also compared with the rule's instances in it: one
+ical.js never yields makes the result `complete: false, stoppedBy: 'library'`
+— a `YEARLY` `BYMONTHDAY` without `BYMONTH` (RFC 5545 takes every month, ical.js
+`DTSTART`'s only), a `MONTHLY` `BYDAY` with `BYMONTHDAY` (ical.js steps month by
+month whatever `INTERVAL` says). So a complete result is RFC 5545's, or the
+result says it is not. With `BYDAY` and a negative `BYSETPOS`, the 1st of a
+month is kept when `BYSETPOS` names it from the back (`BYDAY=SA;BYSETPOS=-5`:
+1 August 2020). Not checked: `BYWEEKNO`, and an ordinal weekday with
+`BYMONTHDAY` or `BYYEARDAY` (RFC 5545 leaves its scope open).
+
+A `MONTHLY` rule whose `BYDAY` setup ical.js would never finish (it searches for
+a fifth or fifth-last weekday the start month lacks, month by month without a
+bound: `INTERVAL=24;BYDAY=-1TH,5MO` from February 2019 visits only Februaries of
+odd years) is not handed to ical.js. If the rule has no instance at all
+(`INTERVAL=24;BYDAY=5MO` from February 2019) the result is `DTSTART` alone,
+complete; otherwise it is refused, as rules ical.js rejects are, where 0.8.0 never
+returned. No rule ical.js sets up is refused: the search is modelled exactly
+(ical.js skips it once an earlier `BYDAY` entry found a day in the start month,
+so `INTERVAL=24;BYDAY=1MO,5TU` from 4 February 2019 is expanded).
 
 It never loops: ical.js tests rule candidates one by one without a bound of its
 own (`FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0` from 1950 is billions of
@@ -893,10 +907,7 @@ for at most one cycle of the rule's own periods, after which every period
 shape has come round (month lengths and weekdays repeat every 4,800 months,
 so 4,800 / gcd(months per period, 4,800) periods: 400 for `YEARLY;INTERVAL=7`,
 2,800 years). So `FREQ=MONTHLY;BYDAY=5MO;BYSETPOS=5`, which never recurs, is
-`complete: true`. The count is charged to `budget`, one unit a month. With
-`BYSETPOS`, only where every candidate is checked as described above (`MONTHLY`
-without `BYDAY`+`BYMONTHDAY`): elsewhere ical.js may have invented what it gave
-(`YEARLY;BYDAY=5TU;BYSETPOS=2`), and its give-up stays `'library'`.
+`complete: true`. The count is charged to `budget`, one unit a month.
 `BYWEEKNO`, and an ordinal weekday with `BYMONTHDAY` or `BYYEARDAY`, are not
 counted: those stay `'library'`. Pass the same budget to several
 calls to bound a whole request.

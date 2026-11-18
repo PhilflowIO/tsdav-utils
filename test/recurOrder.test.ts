@@ -337,12 +337,43 @@ describe('expansion matches a brute-force reading of the rule, in any listed ord
           if (wall >= wallOf(dtstart) && wall <= horizon && genuine(wall)) want.push(wall);
         }
       }
-      const ordered = [...new Set(collect(recurIterator(ICAL.Recur.fromString(rule), dtstart), horizon))].filter(genuine);
       const listed = [...new Set(collect(ICAL.Recur.fromString(rule).iterator(dtstart), horizon + 366 * D))]
         .filter((w) => w <= horizon && genuine(w)).sort((a, b) => a - b);
       expect(want.length, rule).toBeGreaterThan(0);
-      expect(ordered.map(basic), rule).toEqual(want.map(basic));
       expect(listed.map(basic), rule).toEqual(want.map(basic));
+      // recurIterator checks ical.js against RFC 5545 (keepInstances): it
+      // yields RFC 5545's instances only, BYSETPOS read over each period's
+      // date-times (a month, or a year), and reports any it passed without
+      // yielding
+      const iterator = recurIterator(ICAL.Recur.fromString(rule), dtstart);
+      const ordered = collect(iterator, horizon);
+      const rfc: number[] = [];
+      const periodStarts: number[] = [];
+      // from the start of the period holding DTSTART: BYSETPOS counts that period's days before DTSTART too
+      const periodBegin = Date.UTC(dtstart.year, yearly ? 0 : dtstart.month - 1, 1) / 1000 / D;
+      for (let day = periodBegin; day * D <= horizon; day++) {
+        const t = new Date(day * D * 1000);
+        if (yearly ? t.getUTCMonth() === 0 && t.getUTCDate() === 1 : t.getUTCDate() === 1) periodStarts.push(day);
+      }
+      for (const first of periodStarts) {
+        const set: number[] = [];
+        const begin = new Date(first * D * 1000);
+        for (let day = first; ; day++) {
+          const t = new Date(day * D * 1000);
+          if (yearly ? t.getUTCFullYear() !== begin.getUTCFullYear() : t.getUTCMonth() !== begin.getUTCMonth()) break;
+          if (months && !months.includes(t.getUTCMonth() + 1)) continue;
+          if (!weekdays.includes(t.getUTCDay())) continue;
+          for (const h of hourList) set.push(day * D + h * 3600);
+        }
+        for (const p of positions) {
+          const wall = set.at(p > 0 ? p - 1 : p);
+          if (wall !== undefined && wall >= wallOf(dtstart) && wall <= horizon && !rfc.includes(wall)) rfc.push(wall);
+        }
+      }
+      rfc.sort((a, b) => a - b);
+      expect(ordered.filter((w) => !rfc.includes(w)).map(basic), rule).toEqual([]);
+      const missed = (iterator as unknown as { missed: (lower: number, end: number) => boolean }).missed;
+      expect(missed(-Infinity, horizon), rule).toBe(rfc.some((w) => !ordered.includes(w)));
     }
   });
 });

@@ -139,12 +139,10 @@ describe('a MONTHLY;BYMONTHDAY rule whose start month holds none of its days (#4
       const whole = expand(ics, until);
       if (!whole.complete) {
         // ical.js reads a YEARLY BYMONTHDAY without BYMONTH in DTSTART's month
-        // only and gives up where that month lacks the day (-31 from a
-        // November); RFC 5545 takes every month, so instances follow: a
-        // library stop, with `from` as without it
+        // only (RFC 5545: every month) and BYMONTHDAY by the month before:
+        // the instances it passes without yielding make it a library stop
         expect(freq, `${rule} ${dtstart}`).toBe('YEARLY');
         expect(whole.stoppedBy, `${rule} ${dtstart}`).toBe('library');
-        expect(expand(ics, until, `${int(2026, 2030)}-01-01${zoned ? 'T00:00:00' : ''}`).stoppedBy).toBe('library');
         continue;
       }
       const all = values(whole);
@@ -172,7 +170,7 @@ describe('a MONTHLY;BYMONTHDAY rule whose start month holds none of its days (#4
         if (want.length > 0) nonEmpty++;
       }
     }
-    expect(compared).toBeGreaterThan(RUNS * 8);
+    expect(compared).toBeGreaterThan(RUNS * 6);
     expect(rfcCompared).toBeGreaterThan(RUNS * 0.4);
     expect(nonEmpty).toBeGreaterThan(compared * 0.3);
   });
@@ -325,16 +323,22 @@ describe('a rule with nothing left to give is complete, one ical.js gives up on 
       wall('3400-12-31'), true)).toBe(false);
   });
 
-  it('does not vouch for BYSETPOS where nothing checks ical.js\' candidates', () => {
-    // ical.js' YEARLY yields a fifth Tuesday every 7 years although BYSETPOS=2
-    // of at most one day names none (#36): a give-up there is no proof of an
-    // end, so holdsInstance does not count; checked MONTHLY candidates it does
-    const wall = (d: string) => Date.parse(`${d}T00:00:00Z`) / 1000;
-    const at = wall('1990-09-30');
-    expect(holdsInstance(ICAL.Recur.fromString('FREQ=YEARLY;INTERVAL=7;BYDAY=5TU;BYSETPOS=2'), at, at, null, wall('2100-01-01'),
-      true)).toBeNull();
-    expect(holdsInstance(ICAL.Recur.fromString('FREQ=MONTHLY;INTERVAL=7;BYDAY=5TU;BYSETPOS=2'), at, at, null, wall('2100-01-01'),
-      true)).toBe(false);
+  it('a YEARLY day ical.js invents is dropped, and an instance it never yields makes it a library stop', () => {
+    // BYSETPOS=2 of at most one fifth Tuesday a year names none; ical.js gave one every 7 years
+    const fifth = series('DTSTART;VALUE=DATE:19900930', 'FREQ=YEARLY;INTERVAL=7;BYDAY=5TU;BYSETPOS=2');
+    expect(expand(fifth, '2100-01-01')).toMatchObject({ occurrences: [expect.anything()], complete: true });
+    // 30 February does not exist; ical.js gave 2 March (1 March in leap years)
+    const february = series('DTSTART;VALUE=DATE:20190130', 'FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30');
+    const result = expand(february, '2030-01-01');
+    expect(values(result)).toEqual(['2019-01-30']);
+    expect(result).toMatchObject({ complete: true, stoppedBy: null });
+    // COUNT counts instances only
+    const counted = series('DTSTART;VALUE=DATE:20190130', 'FREQ=YEARLY;BYMONTH=2,3;BYMONTHDAY=30;COUNT=2');
+    expect(values(expand(counted, '2030-01-01'))).toEqual(['2019-01-30', '2019-03-30', '2020-03-30']);
+    // the 15th of every month (RFC 5545); ical.js gives January's only
+    const monthly = series('DTSTART;VALUE=DATE:20190115', 'FREQ=YEARLY;BYMONTHDAY=15');
+    expect(expand(monthly, '2020-01-01')).toMatchObject({ complete: false, stoppedBy: 'library' });
+    expect(expand(monthly, '2020-01-01', '2019-01-02')).toMatchObject({ complete: false, stoppedBy: 'library' });
   });
 
   it('charges counting the periods to the budget', () => {
