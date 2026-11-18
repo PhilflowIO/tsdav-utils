@@ -886,11 +886,16 @@ month, 29 with February (ical.js reads it by the month of the instance
 before); `MONTHLY` with `BYDAY` and `BYMONTHDAY` (its search for the
 next match gives up after 48 months and throws); `YEARLY` with `BYDAY` and
 `BYYEARDAY` or `BYWEEKNO` (ical.js ends a rule after 28 years without an
-instance); and an all-day series with a `FREQ` below a day or a `BYHOUR`,
-`BYMINUTE` or `BYSECOND` part. Before a moved walk, ical.js' setup at
-`DTSTART` is read: a rule it refuses there is refused, one it sets up to
-yield nothing yields nothing, and a moved start it refuses is walked from
-`DTSTART`. Selection stays by original start: to get every occurrence that
+instance); `MONTHLY` with a fifth or fifth-last weekday such as `5SU` (where
+the start's month lacks it, ical.js' setup searches on month by month and
+yields what it finds untested); a `DTSTART` before the year 100 (ical.js
+compares those years as 1900 to 1999); and an all-day series with a `FREQ`
+below a day or a `BYHOUR`, `BYMINUTE` or `BYSECOND` part. Before a moved
+walk, ical.js' setup at `DTSTART` is read: a rule it refuses there is
+refused, one it sets up to yield nothing yields nothing, and a moved start it
+refuses, or whose setup ends the rule, is walked from `DTSTART`. A rule
+worked out without walking is charged instance by instance and stops at the
+budget like a walk. Selection stays by original start: to get every occurrence that
 touches a window, pass its start less the longest duration, and look for
 overrides moved in from elsewhere yourself.
 

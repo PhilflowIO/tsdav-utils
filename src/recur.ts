@@ -134,8 +134,10 @@ function inEveryMonth(recur: ICAL.Recur, dtstart: number, days: number[]): boole
  * BYHOUR, BYMINUTE or BYSECOND (ical.js yields one date twice and throws, at
  * a step that depends on where it began); YEARLY with a BYMONTHDAY that a
  * month the rule takes may lack (a negative one, 31 with a 30-day month, 29
- * with February); MONTHLY with BYDAY and BYMONTHDAY; YEARLY with BYDAY and
- * BYYEARDAY or BYWEEKNO.
+ * with February); MONTHLY with BYDAY and BYMONTHDAY; MONTHLY with a fifth or
+ * fifth-last weekday; YEARLY with BYDAY and BYYEARDAY or BYWEEKNO; a DTSTART
+ * before the year 100 (ical.js compares those times as 1900 to 1999:
+ * Time.toUnixTime goes through Date.UTC).
  */
 export function walkedInFull(recur: ICAL.Recur, dtstart: number, dateOnly: boolean): boolean {
   const has = (part: string) => (recur.getComponent(part) as unknown[]).length > 0;
@@ -145,7 +147,14 @@ export function walkedInFull(recur: ICAL.Recur, dtstart: number, dateOnly: boole
     (recur.freq === 'YEARLY' &&
       !inEveryMonth(recur, dtstart, (recur.getComponent('BYMONTHDAY') as (number | string)[]).map(Number))) ||
     (recur.freq === 'MONTHLY' && has('BYDAY') && has('BYMONTHDAY')) ||
-    (recur.freq === 'YEARLY' && has('BYDAY') && (has('BYYEARDAY') || has('BYWEEKNO')));
+    (recur.freq === 'YEARLY' && has('BYDAY') && (has('BYYEARDAY') || has('BYWEEKNO'))) ||
+    (recur.freq === 'MONTHLY' && fifthWeekday(recur)) ||
+    new Date(dtstart * 1000).getUTCFullYear() < 100;
+}
+
+/** Whether BYDAY holds a fifth or fifth-last weekday (5SU, -5FR), one a month may lack */
+function fifthWeekday(recur: ICAL.Recur): boolean {
+  return (recur.getComponent('BYDAY') as string[]).some((d) => /^[+-]?5/.test(String(d)));
 }
 
 /**
@@ -154,10 +163,12 @@ export function walkedInFull(recur: ICAL.Recur, dtstart: number, dateOnly: boole
  * date series a day at 00:00): DTSTART moved by whole multiples of INTERVAL
  * periods, so every field the rule leaves open (the day of the month, the
  * weekday, the time of day) and the phase of INTERVAL stay as they were. That
- * is the same rule from a start of the same shape, and ical.js evaluates BY
- * parts and BYSETPOS per period, so every period after the first is expanded
- * as from DTSTART. The first period is not: ical.js yields the start itself
- * untested and filters by it within its period. So the start is moved to at
+ * is the same rule from a start of the same shape, and ical.js' steps
+ * (next_month, next_year, …) evaluate BY parts and BYSETPOS per period, so
+ * once a walk is past its setup, every period is expanded as from DTSTART.
+ * The setup is not a step: ical.js yields what it finds there untested (no
+ * BYSETPOS, no contracting rule) and filters by the start within its period.
+ * So the start is moved to at
  * least LEAD_PERIODS periods before the one holding `from`, and the caller
  * drops every instance before `from` — which also covers a YEARLY;BYWEEKNO
  * period whose weeks reach a few days into the next year, and a WEEKLY period
@@ -175,8 +186,7 @@ export function walkedInFull(recur: ICAL.Recur, dtstart: number, dateOnly: boole
  * by is always one the rule takes (_nextByYearDay sets it from the days of
  * those months), so a positive day each of them has in every year — any day
  * from 1 to 28, 30 with BYMONTH=4,6, 31 with BYMONTH=1,3 — reads the same
- * whatever the month; a day from 1 to 28
- * exists in every month and reads the same whatever the month.
+ * whatever the month.
  *
  * Nor is a start moved where ical.js may refuse or stop in the middle of a
  * walk depending on how far back it began, so that a walk from near `from`
@@ -188,9 +198,21 @@ export function walkedInFull(recur: ICAL.Recur, dtstart: number, dateOnly: boole
  * - YEARLY with BYDAY and BYYEARDAY or BYWEEKNO: ical.js ends a YEARLY rule
  *   in silence after 28 years without an instance (next), and a weekday
  *   pinned to a day of the year can skip that long (day 366 on a Monday).
- * Every other way ical.js refuses is decided by the rule or by DTSTART's own
- * setup, which the caller checks at DTSTART. Moving DTSTART never changes
- * which instances are found, only where the walk begins.
+ * - MONTHLY with a fifth or fifth-last weekday (5SU, -5FR): where the
+ *   start's month lacks it, the setup searches on month by month
+ *   (increment_month) until a month has it, advancing BYMONTH's position,
+ *   which resetting the instance it searched from does not undo, and yields
+ *   what it finds untested — next to the window, from a moved start. Every
+ *   month has a first to fourth (and last to fourth-last) of each weekday, so
+ *   no other BYDAY makes it search; an ordinal of 6 or more is refused.
+ * The other setups stay within the start's period (WEEKLY steps to its first
+ * BYDAY within the week; MONTHLY;BYMONTHDAY searches at most three months,
+ * through the same next_month a walk steps by; YEARLY searches on by years,
+ * which move no shared position, to a year whose days it expands as a step
+ * would), or end the rule: the caller then walks from DTSTART. Every other
+ * way ical.js refuses is decided by the rule or by DTSTART's own setup, which
+ * the caller checks at DTSTART. Moving DTSTART never changes which instances
+ * are found, only where the walk begins.
  */
 export function iterationStart(recur: ICAL.Recur, dtstart: number, from: number, dateOnly: boolean): number {
   const interval = Math.max(1, recur.interval || 1);
@@ -253,9 +275,11 @@ export function iterationStart(recur: ICAL.Recur, dtstart: number, from: number,
  * out: in DTSTART's year ical.js yields BYMONTHDAY in the order written
  * before it first sorts it, and that year is cheap to walk.
  * So a birthday costs the instances in the window and nothing for the years
- * before, none at all when the window holds no such day.
+ * before, none at all when the window holds no such day. The instances are
+ * yielded one by one, for the caller to charge as they come.
  */
-export function fixedYearlyWalls(recur: ICAL.Recur, dtstart: number, from: number, to: number, last: number): number[] | null {
+export function fixedYearlyWalls(recur: ICAL.Recur, dtstart: number, from: number, to: number,
+  last: number): Iterable<number> | null {
   if (recur.freq !== 'YEARLY' || recur.count || !Number.isFinite(from)) {
     return null;
   }
@@ -287,24 +311,30 @@ export function fixedYearlyWalls(recur: ICAL.Recur, dtstart: number, from: numbe
   const days = byMonthDay.length ? [...byMonthDay].sort((a, b) => a - b) : [s.getUTCDate()];
   const interval = Math.max(1, recur.interval || 1);
   const end = Math.min(to, last);
-  const out: number[] = [];
   const k0 = Math.max(0, Math.ceil((firstYear - 1 - startYear) / interval));
-  for (let k = k0; ; k++) {
-    const year = startYear + k * interval;
-    if (Date.UTC(year, 0, 1) / 1000 > end) {
-      break;
-    }
-    for (const month of months) {
-      for (const day of days) {
-        const t = new Date(0);
-        t.setUTCFullYear(year, month - 1, day);
-        t.setUTCHours(s.getUTCHours(), s.getUTCMinutes(), s.getUTCSeconds(), 0);
-        const wall = t.getTime() / 1000;
-        if (wall >= from && wall >= dtstart && wall <= end) {
-          out.push(wall);
+  const at = (year: number, month: number, day: number, h = 0, m = 0, sec = 0) => {
+    // setUTCFullYear, not Date.UTC: that reads the years 0 to 99 as 1900 to 1999
+    const t = new Date(0);
+    t.setUTCFullYear(year, month - 1, day);
+    t.setUTCHours(h, m, sec, 0);
+    return t.getTime() / 1000;
+  };
+  // lazy: the caller charges each instance as it is taken and stops when the
+  // budget runs out, so a window of any length costs no more than the budget
+  return (function* instances() {
+    for (let k = k0; ; k++) {
+      const year = startYear + k * interval;
+      if (at(year, 1, 1) > end) {
+        return;
+      }
+      for (const month of months) {
+        for (const day of days) {
+          const wall = at(year, month, day, s.getUTCHours(), s.getUTCMinutes(), s.getUTCSeconds());
+          if (wall >= from && wall >= dtstart && wall <= end) {
+            yield wall;
+          }
         }
       }
     }
-  }
-  return out;
+  })();
 }

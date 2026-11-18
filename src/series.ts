@@ -682,8 +682,14 @@ function stepCost(recur: ICAL.Recur): number {
   }
 }
 
-/** Candidates tested since the module loaded, so a test can see the budget is charged */
-export const expansionWork = { steps: 0 };
+/**
+ * Candidates tested since the module loaded, so a test can see the budget is
+ * charged, and moved walks given up for the walk from DTSTART (restarts)
+ */
+export const expansionWork = { steps: 0, restarts: 0 };
+
+/** ical.js' setup at a moved start refused the start or ended the rule there: the walk from DTSTART decides */
+class MovedStartUnset extends Error {}
 
 /** An expansion that ran out of WORK_BUDGET: the check cannot be made, so it fails closed */
 class SeriesTooSparse extends Error {}
@@ -848,6 +854,12 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
       const walk = (first: number) => {
         try {
           const iterator = bounded(recurIterator(recur, timeOf(first)), budget, recur, day ? until + DAY - 1 : until);
+          if (first !== start.wall && (iterator as unknown as { completed?: boolean }).completed) {
+            // the setup found no instance from the moved start and ended the
+            // rule (YEARLY;BYYEARDAY=366 from 2097: its search looks three
+            // years on, all without a 29 February); from DTSTART it may not
+            throw new MovedStartUnset();
+          }
           for (let next = iterator.next(); next; next = iterator.next()) {
             const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
             if (wall > until) {
@@ -872,13 +884,13 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
       try {
         walk(first);
       } catch (error) {
-        // ical.js refuses some starts it would not refuse at DTSTART (its
-        // MONTHLY;BYDAY;BYMONTHDAY setup checks the day it finds against the
-        // length of the start's month): the walk from DTSTART decides. What
-        // the moved walk found is exact, and that walk finds it too.
+        // ical.js' setup may refuse a moved start, or end the rule there,
+        // where at DTSTART it does neither: the walk from DTSTART decides.
+        // What the moved walk found before is exact, and that walk finds it too.
         if (first === start.wall || error instanceof SeriesTooSparse || error instanceof BoundUnavailable) {
           throw error;
         }
+        expansionWork.restarts++;
         walk(start.wall);
       }
     }

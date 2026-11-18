@@ -111,6 +111,23 @@ describe('the shapes a moved start must not get wrong', () => {
     }
   });
 
+  // ical.js' MONTHLY;BYDAY setup searches forward, month by month, for a
+  // fifth weekday the start's month lacks; the search steps BYMONTH's shared
+  // position and yields what it finds untested (no BYSETPOS). From a moved
+  // start that happens next to the window: such rules are walked from DTSTART
+  it.each([
+    ['DTSTART;VALUE=DATE:20080405', 'FREQ=MONTHLY;BYMONTH=11;BYDAY=5SU,5TH', '2015-05-09', '2017-05-09', '2015-11-29'],
+    ['DTSTART;VALUE=DATE:20001228', 'FREQ=MONTHLY;BYMONTH=2,6;BYDAY=WE,5SU,MO;BYSETPOS=-2,1', '2010-05-21', '2011-10-06',
+      '2010-06-02'],
+    ['DTSTART;TZID=America/New_York:20221229T140000', 'FREQ=MONTHLY;BYDAY=5SU;BYSETPOS=3,-2', '2043-11-17T00:00:00',
+      '2045-07-28T00:00:00', null],
+  ])('a fifth weekday, %s %s', (dtstart, rule, from, until, holds) => {
+    const ics = calendar(...component('f', dtstart, `RRULE:${rule}`));
+    const got = values(ics, from, until);
+    expect(got).toEqual(full(ics, from, until));
+    if (holds) expect(got).toContain(holds);
+  });
+
   it('an override, RDATE and EXDATE in the window are applied as without the moved start', () => {
     const ics = calendar(
       ...component('o', 'DTSTART;TZID=Europe/Berlin:20100104T090000', 'DTEND;TZID=Europe/Berlin:20100104T100000',
@@ -160,17 +177,48 @@ describe('with `from` or without, the same verdict', () => {
     expect(refusal(call(ics, from))).toBe(message);
   });
 
-  it('a moved start ical.js refuses is walked from DTSTART, which it accepts', () => {
-    const rule = 'FREQ=MONTHLY;BYDAY=5SU,5FR';
-    const ics = calendar(...component('r', 'DTSTART:20200101T090000', `RRULE:${rule}`));
-    // `from` in June 2024 moves the start two months back, to 1 April 2024,
-    // laid out as April 1991, whose setup ical.js refuses (the case above)
-    expect(() => recurIterator(ICAL.Recur.fromString(rule), ICAL.Time.fromDateTimeString('2024-04-01T09:00:00')))
-      .toThrow(/Malformed values in BYDAY part/);
-    const all = call(ics)().occurrences.map((o) => o.recurrenceId.value);
-    const moved = call(ics, '2024-06-10T00:00:00')().occurrences.map((o) => o.recurrenceId.value);
-    expect(moved.length).toBeGreaterThan(10);
-    expect(moved).toEqual(all.filter((v) => v >= '2024-06-10T00:00:00'));
+  /** As call, with a window to 2110 */
+  const late = (ics: string, from?: string) => expandOccurrences(ics,
+    { budget: createRecurrenceBudget(1e8), until: '2110-01-01T00:00:00Z', ...(from ? { from } : {}), limit: 1e6 });
+
+  it('a moved start whose setup ends the rule is walked from DTSTART instead', () => {
+    // from 2100 the start moves to 31 December 2097; ical.js' setup looks for
+    // day 366 there and in the three years after, all without a 29 February
+    // (2100 is none), ends the rule, and would lose 2104 — DTSTART's walk has it
+    const rule = 'FREQ=YEARLY;BYYEARDAY=366';
+    const ics = calendar(...component('r', 'DTSTART;VALUE=DATE:20001231', `RRULE:${rule}`));
+    const at2097 = recurIterator(ICAL.Recur.fromString(rule), ICAL.Time.fromDateString('2097-12-31'));
+    expect(at2097.next()).toBeNull();
+    const restarts = expansionWork.restarts;
+    const all = late(ics).occurrences.map((o) => o.recurrenceId.value);
+    const moved = late(ics, '2100-06-01').occurrences.map((o) => o.recurrenceId.value);
+    expect(expansionWork.restarts).toBe(restarts + 1);
+    expect(moved).toEqual(['2104-12-31', '2108-12-31']);
+    expect(moved).toEqual(all.filter((v) => v >= '2100-06-01'));
+  });
+
+  it('restarts from DTSTART give the full result filtered, for random day-366 rules around 2100', () => {
+    let seed = seedFor(366) * 1000003;
+    const rnd = () => mulberry(seed++);
+    const int = (lo: number, hi: number) => lo + Math.floor(rnd() * (hi - lo + 1));
+    const restarts = expansionWork.restarts;
+    for (let i = 0; i < Math.max(40, RUNS / 5); i++) {
+      const date = rnd() < 0.5;
+      const leap = [1996, 2000, 2004, 2008, 2012, 2016, 2020, 2024, 2028, 2032, 2036, 2040, 2044][int(0, 12)];
+      const v = date ? `VALUE=DATE:${leap}1231` : `TZID=Europe/Berlin:${leap}1231T${String(int(0, 23)).padStart(2, '0')}3000`;
+      let rule = `FREQ=YEARLY;BYYEARDAY=${['366', '-366', '366,1', '-366,200'][int(0, 3)]}`;
+      if (rnd() < 0.3) rule += ';INTERVAL=2';
+      if (!date && rnd() < 0.3) rule += `;BYHOUR=${int(0, 11)},${int(12, 23)}`;
+      const ics = calendar(...component('r', `DTSTART;${v}`, `RRULE:${rule}`));
+      const fromDay = `${int(2096, 2104)}-${String(int(1, 12)).padStart(2, '0')}-${String(int(1, 28)).padStart(2, '0')}`;
+      const from = date ? fromDay : `${fromDay}T00:00:00`;
+      const full = late(ics);
+      const got = late(ics, from);
+      expect(got.occurrences, `${rule} ${v} from ${from}`)
+        .toEqual(full.occurrences.filter((o) => o.recurrenceId.value >= from));
+    }
+    // the restart path is taken, not only the moved walk
+    expect(expansionWork.restarts - restarts).toBeGreaterThan(3);
   });
 
   it('a rule ical.js sets up at DTSTART to yield nothing yields nothing with `from` either', () => {
@@ -259,6 +307,36 @@ describe('a yearly rule of fixed days is worked out without walking', () => {
     expect(r.units).toBe(0);
   });
 
+  it('a window of any length is charged as it is worked out, and stops at the budget', () => {
+    // 336 days a year, to the year 200000: worked out in full first, that is
+    // 60 million values; taken one by one, the budget ends it after 6,666
+    const days = Array.from({ length: 28 }, (_, i) => i + 1).join(',');
+    const ics = calendar(...component('w', 'DTSTART:20000101T000000Z',
+      `RRULE:FREQ=YEARLY;BYMONTH=1,2,3,4,5,6,7,8,9,10,11,12;BYMONTHDAY=${days}`));
+    const until = new Date(Date.UTC(2000, 0, 1));
+    until.setUTCFullYear(200000);
+    const budget = createRecurrenceBudget(300000);
+    const heap = process.memoryUsage().heapUsed;
+    const r = expandOccurrences(ics, { budget, from: '2001-01-01T00:00:00Z', until, limit: 1e6 });
+    expect(process.memoryUsage().heapUsed - heap).toBeLessThan(64 * 1024 * 1024);
+    expect(r).toMatchObject({ complete: false, stoppedBy: 'budget' });
+    expect(300000 - budget.remaining).toBeLessThanOrEqual(300000 + 45);
+    expect(r.occurrences.length).toBe(Math.floor(300000 / 45));
+  });
+
+  it('before the year 100, with `from` as without it', () => {
+    // ical.js reads the years 0 to 99 as 1900 to 1999 when it compares times
+    // (Time.toUnixTime goes through Date.UTC): a series from then is walked
+    // from DTSTART, as without `from`
+    for (const rule of ['RRULE:FREQ=YEARLY', 'RRULE:FREQ=YEARLY;BYMONTH=6,7;BYMONTHDAY=3', 'RRULE:FREQ=MONTHLY']) {
+      const ics = calendar(...component('a', 'DTSTART;VALUE=DATE:00500603', rule));
+      const all = expandOccurrences(ics, { budget: createRecurrenceBudget(1e8), until: '0060-01-01', limit: 1e6 });
+      const got = expandOccurrences(ics, { budget: createRecurrenceBudget(1e8), from: '0055-01-01', until: '0060-01-01', limit: 1e6 });
+      expect(got.complete, rule).toBe(all.complete);
+      expect(got.occurrences, rule).toEqual(all.occurrences.filter((o) => o.recurrenceId.value >= '0055-01-01'));
+    }
+  });
+
   it('5,000 birthdays from 1960 fit well inside one budget of 300,000 units', () => {
     const week = { from: '2026-06-01', until: '2026-06-08' };
     const budget = createRecurrenceBudget(300000);
@@ -344,7 +422,7 @@ describe('expansion with `from` equals the full expansion filtered to `from`', (
     if (rnd() < (freq === 'WEEKLY' ? 0.7 : 0.4)) {
       byday = true;
       const ordinal = monthly && !parts.some((p) => p.startsWith('BYWEEKNO')) && rnd() < 0.3;
-      parts.push(`BYDAY=${some(DAYS, 3).map((d) => (ordinal ? pick(['1', '2', '-1', '']) : '') + d)}`);
+      parts.push(`BYDAY=${some(DAYS, 3).map((d) => (ordinal ? pick(['1', '2', '-1', '5', '-5', '']) : '') + d)}`);
     }
     if (rnd() < (sub ? 0.3 : 0.4)) parts.push(`BYHOUR=${some([0, 2, 3, 9, 13, 23], 3)}`);
     if (rnd() < 0.3) parts.push(`BYMINUTE=${some([0, 15, 30, 45], 2)}`);
