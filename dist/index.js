@@ -237,10 +237,13 @@ function inEveryMonth(recur, dtstart, days) {
 function walkedInFull(recur, dtstart, dateOnly) {
   const has = (part) => recur.getComponent(part).length > 0;
   const fixed = FIXED_PERIOD[recur.freq];
-  return Boolean(recur.count) || dateOnly && (fixed !== void 0 && fixed < 86400 || has("BYHOUR") || has("BYMINUTE") || has("BYSECOND")) || recur.freq === "YEARLY" && !inEveryMonth(recur, dtstart, recur.getComponent("BYMONTHDAY").map(Number)) || recur.freq === "MONTHLY" && has("BYDAY") && has("BYMONTHDAY") || recur.freq === "YEARLY" && has("BYDAY") && (has("BYYEARDAY") || has("BYWEEKNO")) || recur.freq === "MONTHLY" && fifthWeekday(recur) || new Date(dtstart * 1e3).getUTCFullYear() < 100;
+  return Boolean(recur.count) || dateOnly && (fixed !== void 0 && fixed < 86400 || has("BYHOUR") || has("BYMINUTE") || has("BYSECOND")) || recur.freq === "YEARLY" && !inEveryMonth(recur, dtstart, recur.getComponent("BYMONTHDAY").map(Number)) || recur.freq === "MONTHLY" && has("BYDAY") && has("BYMONTHDAY") || recur.freq === "YEARLY" && has("BYDAY") && (has("BYYEARDAY") || has("BYWEEKNO")) || (recur.freq === "MONTHLY" || recur.freq === "YEARLY") && (fifthWeekday(recur) || farSetPosition(recur)) || new Date(dtstart * 1e3).getUTCFullYear() < 100;
 }
 function fifthWeekday(recur) {
   return recur.getComponent("BYDAY").some((d) => /^[+-]?5/.test(String(d)));
+}
+function farSetPosition(recur) {
+  return recur.getComponent("BYSETPOS").some((v) => Math.abs(Number(v)) >= 5);
 }
 function iterationStart(recur, dtstart, from, dateOnly) {
   const interval = Math.max(1, recur.interval || 1);
@@ -1634,13 +1637,22 @@ function bounded(iterator, budget, recur, horizon) {
 }
 function yieldsFromStart(recur, dtstart, budget, horizon) {
   try {
-    return bounded(recurIterator(recur, dtstart), budget, recur, horizon).next() !== null;
+    const iterator = bounded(recurIterator(recur, dtstart), budget, recur, horizon);
+    const emptyAtSetup = Boolean(iterator.completed);
+    if (iterator.next() !== null) {
+      return "yields";
+    }
+    return emptyAtSetup || endedByRule(iterator) ? "none" : "cut";
   } catch (error) {
     if (error instanceof HorizonReached) {
-      return true;
+      return "yields";
     }
     throw error;
   }
+}
+function endedByRule(iterator) {
+  const it = iterator;
+  return Boolean(it.rule.count && it.occurrence_number >= it.rule.count) || Boolean(it.rule.until && it.last.compare(it.rule.until) > 0);
 }
 function expandWalls(master, until, budget, skipUnplaced = false, from = -Infinity) {
   const start = startOf(master);
@@ -1652,6 +1664,7 @@ function expandWalls(master, until, budget, skipUnplaced = false, from = -Infini
   const norm = (wall) => day ? dayOf(wall) : wall;
   const timeOf = (wall) => day ? import_ical4.default.Time.fromDateString(jcalOf(wall, frame)) : import_ical4.default.Time.fromDateTimeString(jcalOf(wall, "floating"));
   const walls = /* @__PURE__ */ new Set();
+  let cut = false;
   if (norm(start.wall) <= until) {
     walls.add(norm(start.wall));
   }
@@ -1704,7 +1717,9 @@ function expandWalls(master, until, budget, skipUnplaced = false, from = -Infini
           if (first2 !== start.wall && iterator.completed) {
             throw new MovedStartUnset();
           }
-          for (let next = iterator.next(); next; next = iterator.next()) {
+          const emptyAtSetup = Boolean(iterator.completed);
+          let next = iterator.next();
+          for (; next; next = iterator.next()) {
             const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
             if (wall > until) {
               break;
@@ -1713,15 +1728,24 @@ function expandWalls(master, until, budget, skipUnplaced = false, from = -Infini
               walls.add(wall);
             }
           }
+          if (!next && !emptyAtSetup && !endedByRule(iterator)) {
+            cut = true;
+          }
         } catch (error) {
           if (!(error instanceof HorizonReached)) {
             throw error;
           }
         }
       };
-      const first = iterationStart(recur, start.wall, ruleFrom, day);
-      if (first !== start.wall && !yieldsFromStart(recur, timeOf(start.wall), budget, day ? until + DAY2 - 1 : until)) {
-        continue;
+      let first = iterationStart(recur, start.wall, ruleFrom, day);
+      if (first !== start.wall) {
+        const fromStart = yieldsFromStart(recur, timeOf(start.wall), budget, day ? until + DAY2 - 1 : until);
+        if (fromStart === "none") {
+          continue;
+        }
+        if (fromStart === "cut") {
+          first = start.wall;
+        }
       }
       try {
         walk(first);
@@ -1738,14 +1762,17 @@ function expandWalls(master, until, budget, skipUnplaced = false, from = -Infini
       throw error;
     }
     if (error instanceof SeriesTooSparse) {
-      return { walls, complete: false };
+      return { walls, complete: false, stoppedBy: "budget" };
     }
     throw new SeriesUnverifiable(error.message, error);
   }
-  return { walls, complete: true };
+  return { walls, complete: !cut, stoppedBy: cut ? "library" : null };
 }
 function expand(master, until) {
-  const { walls, complete } = expandWalls(master, until, { remaining: WORK_BUDGET }, true);
+  const { walls, complete, stoppedBy } = expandWalls(master, until, { remaining: WORK_BUDGET }, true);
+  if (stoppedBy === "library") {
+    throw new SeriesTooSparse("ical.js stops this rule after a long stretch without an occurrence (28 years, or 336 months), before the override or EXDATE furthest ahead: it cannot be checked");
+  }
   if (!complete) {
     const frame = frameOf(master);
     throw new SeriesTooSparse(walls.size > 200 ? `the override or EXDATE furthest ahead (${icalForm(jcalOf(until, frame))}) lies too far ahead to check within the work limit` : "the rule is too sparse to expand within the work limit");
@@ -3373,7 +3400,7 @@ function expandOccurrences(calendarObject, options) {
     }
   }
   const complete = found.complete && !limited;
-  return { occurrences: occurrences2, complete, stoppedBy: complete ? null : !found.complete ? "budget" : "limit" };
+  return { occurrences: occurrences2, complete, stoppedBy: complete ? null : !found.complete ? found.stoppedBy ?? "budget" : "limit" };
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {

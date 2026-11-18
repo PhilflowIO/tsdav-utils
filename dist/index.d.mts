@@ -395,9 +395,12 @@ interface ExpansionResult {
     /**
      * Why the list stops early: "budget" — the budget ran out (with several
      * RRULEs an earlier occurrence of a later rule may be missing too); "limit"
-     * — `limit` occurrences were found. Null when complete.
+     * — `limit` occurrences were found; "library" — ical.js gave up a rule in
+     * the range (it ends a YEARLY rule after 28 years without an occurrence, a
+     * MONTHLY one after 336 months), so occurrences after that may be missing.
+     * Null when complete.
      */
-    stoppedBy: 'budget' | 'limit' | null;
+    stoppedBy: 'budget' | 'limit' | 'library' | null;
 }
 interface ExpandOptions {
     /** the work budget to spend (see createRecurrenceBudget); shared across calls if the same object is passed */
