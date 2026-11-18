@@ -65,6 +65,13 @@ var CODES = [
   "DST_AMBIGUOUS",
   /** the series is too sparse, or what has to be checked too far ahead, to check within the work limit */
   "CHECK_LIMIT_EXCEEDED",
+  /**
+   * ical.js gives the rule up before what has to be checked (it ends a YEARLY
+   * rule after 28 years without an occurrence, a MONTHLY one after 336
+   * months), so the check cannot be made; expandOccurrences reports the same
+   * as stoppedBy "library"
+   */
+  "CHECK_LIBRARY_STOPPED",
   /** whether the overrides and EXDATEs still name occurrences cannot be checked: the series has no DTSTART */
   "SERIES_UNVERIFIABLE"
 ];
@@ -1559,6 +1566,8 @@ var MovedStartUnset = class extends Error {
 };
 var SeriesTooSparse = class extends Error {
 };
+var RuleGivenUp = class extends SeriesTooSparse {
+};
 var HorizonReached = class extends Error {
 };
 var SeriesUnverifiable = class extends Error {
@@ -1723,7 +1732,7 @@ function expandWalls(master, until, budget, skipUnplaced = false, from = -Infini
 function expand(master, until) {
   const { walls, complete, stoppedBy } = expandWalls(master, until, { remaining: WORK_BUDGET }, true);
   if (stoppedBy === "library") {
-    throw new SeriesTooSparse("ical.js stops this rule after a long stretch without an occurrence (28 years, or 336 months), before the override or EXDATE furthest ahead: it cannot be checked");
+    throw new RuleGivenUp("ical.js stops this rule after a long stretch without an occurrence (28 years, or 336 months), before the override or EXDATE furthest ahead: it cannot be checked");
   }
   if (!complete) {
     const frame = frameOf(master);
@@ -1835,7 +1844,11 @@ function checkAddedExdates(master, added, purpose) {
     if (!(error instanceof SeriesTooSparse)) {
       throw error;
     }
-    throw new UpdateFieldsError("CHECK_LIMIT_EXCEEDED", `Cannot verify that ${added.map((a) => a.label).join(", ")} names an occurrence of the series: ${error.message}. Rewrite the whole iCalendar object with the exclusions it should have`, { remedy: "rewrite-object", property: "EXDATE" });
+    throw new UpdateFieldsError(
+      error instanceof RuleGivenUp ? "CHECK_LIBRARY_STOPPED" : "CHECK_LIMIT_EXCEEDED",
+      `Cannot verify that ${added.map((a) => a.label).join(", ")} names an occurrence of the series: ${error.message}. Rewrite the whole iCalendar object with the exclusions it should have`,
+      { remedy: "rewrite-object", property: "EXDATE" }
+    );
   }
   const named = namesOccurrence(master, frame, added.map((a) => a.stamp), walls);
   const lost = added.filter((_, i) => !named[i]);
@@ -1967,8 +1980,9 @@ function beginSeriesEdit(calendar, master, written, source = null, lists = null)
       return error;
     }
     const rule = master.getFirstProperty("rrule")?.toICALString() ?? "The rule";
-    return shapes ? new UpdateFieldsError("CHECK_LIMIT_EXCEEDED", `Cannot check that the overrides and EXDATEs still name occurrences of the series: ${rule}: ${error.message}. Rewrite the whole iCalendar object instead`, { remedy: "rewrite-object" }) : new UpdateFieldsError(
-      "CHECK_LIMIT_EXCEEDED",
+    const code = error instanceof RuleGivenUp ? "CHECK_LIBRARY_STOPPED" : "CHECK_LIMIT_EXCEEDED";
+    return shapes ? new UpdateFieldsError(code, `Cannot check that the overrides and EXDATEs still name occurrences of the series: ${rule}: ${error.message}. Rewrite the whole iCalendar object instead`, { remedy: "rewrite-object" }) : new UpdateFieldsError(
+      code,
       `Cannot check that moving DTSTART keeps the series' occurrences: ${rule}: ${error.message}. Give RRULE, UNTIL and EXDATE explicitly in the same call, or rewrite the whole iCalendar object`,
       { remedy: "same-call" }
     );
