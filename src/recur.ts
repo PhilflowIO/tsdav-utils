@@ -68,6 +68,12 @@ export function recurIterator(recur: ICAL.Recur, start: ICAL.Time): ICAL.RecurIt
   const rule = chronologicalRecur(recur);
   // where ical.js' own setup would go wrong, it is set up in the first month
   // that holds an instance (monthDaySetupStart)
+  if (fifthWeekdaySearchEndless(rule, start)) {
+    // fail closed, as for any rule ical.js refuses: the alternative is a
+    // process that never returns
+    throw new Error('Invalid BYDAY rule: no month the rule reaches has its fifth or fifth-last weekday, ' +
+      'and ical.js would search for one without end');
+  }
   const setup = monthDaySetupStart(rule, start);
   const dtstart = setup ?? start;
   const field = { BYSECOND: dtstart.second, BYMINUTE: dtstart.minute, BYHOUR: dtstart.hour, BYMONTH: dtstart.month };
@@ -195,6 +201,58 @@ function firstDayByPosition(iterator: ICAL.RecurIterator, rule: ICAL.Recur): voi
     // the 1st is the first matching day, so the matching-th from the back
     return positions.includes(-matching) ? 1 : valid;
   };
+}
+
+/**
+ * Whether ical.js' (2.2) setup of a MONTHLY rule would never return. For each
+ * fifth or fifth-last weekday in BYDAY (5MO, -5FR) that DTSTART's month
+ * lacks, init steps on with increment_month (INTERVAL months, or through the
+ * BYMONTH list) until a month has it, with no bound:
+ * FREQ=MONTHLY;INTERVAL=24;BYDAY=5MO from February 2019 visits only the
+ * Februaries of odd years, none of which has five Mondays, and the call
+ * never returns, outside any budget. Month lengths and weekdays repeat every
+ * CYCLE_MONTHS, so a search that finds no such month in that many steps
+ * never finds one. (ical.js skips an entry whose search an earlier entry
+ * made unneeded in the start month; such a rule is refused here as well,
+ * which fails closed.)
+ */
+function fifthWeekdaySearchEndless(rule: ICAL.Recur, dtstart: ICAL.Time): boolean {
+  if (rule.freq !== 'MONTHLY') {
+    return false;
+  }
+  const weekdays = (rule.getComponent('BYDAY') as string[]).map((d) => /^[+-]?5(SU|MO|TU|WE|TH|FR|SA)$/.exec(String(d)))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map((m) => ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'].indexOf(m[1]));
+  if (weekdays.length === 0) {
+    return false;
+  }
+  const months = (rule.getComponent('BYMONTH') as (number | string)[]).map(Number);
+  const interval = Math.max(1, rule.interval || 1);
+  /** Whether month m of year y has five of weekday w */
+  const hasFive = (y: number, m: number, w: number) => {
+    const t = new Date(0);
+    t.setUTCFullYear(y, m - 1, 1);
+    return (w - t.getUTCDay() + 7) % 7 + 29 <= daysInMonth(y, m);
+  };
+  return weekdays.some((w) => {
+    let { year, month } = dtstart;
+    for (let steps = 0; steps <= CYCLE_MONTHS; steps++) {
+      if (hasFive(year, month, w)) {
+        return false;
+      }
+      // increment_month: the next listed month (a year on past the last), or INTERVAL months on
+      if (months.length > 0) {
+        const next = months.find((m) => m > month);
+        year += next === undefined ? 1 : 0;
+        month = next ?? months[0];
+      } else {
+        month += interval;
+        year += Math.floor((month - 1) / 12);
+        month = ((month - 1) % 12) + 1;
+      }
+    }
+    return true;
+  });
 }
 
 /** The days of a month, January = 1, for any year of the proleptic Gregorian calendar */

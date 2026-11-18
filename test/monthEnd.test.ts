@@ -209,6 +209,17 @@ describe('a MONTHLY rule yields RFC 5545\'s instances where ical.js yields more'
       .toEqual(['2010-01-05', ...rfcDates(second, '2010-01-05', '2010-06-01').filter((v) => v < '2010-06-01')]);
   });
 
+  it('a fifth weekday no month on the grid has is refused, not searched for without end', () => {
+    // every second February from 2019 is one of an odd year: never five Mondays.
+    // ical.js' setup searched on forever, outside any budget
+    const ics = series('DTSTART;VALUE=DATE:20190214', 'FREQ=MONTHLY;INTERVAL=24;BYDAY=-1TH,5MO');
+    expect(() => expand(ics, '2030-01-01')).toThrow(/fifth or fifth-last weekday/);
+    expect(() => expand(ics, '2030-01-01', '2026-01-01')).toThrow(/fifth or fifth-last weekday/);
+    // a grid that reaches such a month is set up as before
+    const leap = series('DTSTART;VALUE=DATE:20190214', 'FREQ=MONTHLY;INTERVAL=12;BYDAY=5MO');
+    expect(values(expand(leap, '2045-01-01'))).toEqual(['2019-02-14', '2044-02-29']);
+  });
+
   it('for random MONTHLY rules with BYDAY or BYMONTHDAY, BYSETPOS, BYMONTH and INTERVAL, all-day: RFC 5545', () => {
     const { rnd, int, pick, some } = random(4343);
     const WD = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
@@ -227,16 +238,20 @@ describe('a MONTHLY rule yields RFC 5545\'s instances where ical.js yields more'
       if (rnd() < 0.5) parts.push(`BYSETPOS=${some([1, 2, 3, 5, -1, -2, -5], 2).join(',')}`);
       if (rnd() < 0.2) parts.push(`COUNT=${int(1, 12)}`);
       const rule = parts.join(';');
-      // with BYMONTH, a fifth weekday's setup search moves BYMONTH's position
-      // and loses the first year (#36): left as ical.js gives it
-      if (/BYMONTH=/.test(rule) && /[=,]-?5[A-Z]{2}/.test(rule)) continue;
+      // where DTSTART's month lacks a fifth weekday, ical.js' setup searches
+      // on for it and can lose the first instances (with BYMONTH it moves
+      // BYMONTH's position, beside another BYDAY it skips that one's first):
+      // #36, left as ical.js gives it; the fixed cases above cover the days
+      // that setup invents
+      if (/[=,]-?5[A-Z]{2}/.test(rule)) continue;
       const start = `${int(1990, 2024)}-${p2(int(1, 12))}-${p2(int(1, 28))}`;
       const last = `${int(2026, 2030)}-${p2(int(1, 12))}-01`;
       let result;
       try {
         result = expand(series(`DTSTART;VALUE=DATE:${start.replace(/-/g, '')}`, rule), last);
       } catch (error) {
-        // ical.js refuses some BYDAY setups (a fifth weekday in a month without one)
+        // ical.js refuses some BYDAY setups (a fifth weekday in a month without one,
+        // or none on the grid at all)
         expect((error as Error).message, rule).toMatch(/Malformed|Invalid/i);
         continue;
       }
