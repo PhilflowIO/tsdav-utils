@@ -747,9 +747,10 @@ function bounded(iterator: ICAL.RecurIterator, budget: RecurrenceBudget, recur: 
  * Whether the walk from DTSTART yields an instance at all, read before a walk
  * from a moved start. ical.js settles some rules at DTSTART's setup: it
  * refuses them (thrown here, as the walk without `from` throws), or it sets
- * them up to yield nothing, without an error (MONTHLY;BYMONTH=2,4,6,10;
- * BYMONTHDAY=31 from a November: its setup searches three months on through
- * BYMONTH and gives up), where a walk from a later start would yield. The
+ * them up to yield nothing, without an error (YEARLY;BYYEARDAY=366 whose
+ * setup finds no 29 February in the three years it looks at; a rule that has
+ * no instance at all, MONTHLY;BYMONTH=6;BYMONTHDAY=31), where a walk from a
+ * later start might yield. The
  * first instance is all that is read, charged to the budget like any walk; a
  * search past the horizon counts as yielding (the walk itself decides).
  */

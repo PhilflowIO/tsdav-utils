@@ -853,6 +853,14 @@ master's length, each from its own start. An override moved into the range
 from outside it is not found (selection is by original start; `until` is an
 exclusive end).
 
+A `MONTHLY` rule with `BYMONTHDAY` and no `BYDAY` whose `DTSTART` month holds
+none of the listed days (`INTERVAL=5;BYMONTHDAY=31,-31` from 30 June) is
+iterated from the first month of its own grid that holds one. ical.js' own
+setup searched from there with the list not yet read against the month, so
+`-31` in June became day 0, and every later month came a month early; and it
+gave up after three months, leaving `BYMONTHDAY=31;INTERVAL=5` from a June
+without any occurrence.
+
 It never loops: ical.js tests rule candidates one by one without a bound of its
 own (`FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0` from 1950 is billions of
 candidates before 2026), so every candidate is charged to `budget`, as in

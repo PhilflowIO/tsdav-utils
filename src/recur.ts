@@ -60,12 +60,16 @@ export function chronologicalRecur(recur: ICAL.Recur): ICAL.Recur {
 }
 
 /**
- * An iterator over a rule's instances from `dtstart`, in chronological order
+ * An iterator over a rule's instances from `start`, in chronological order
  * and each once. Every expansion in this package goes through here, so a loop
  * over next() may stop at the first instance past its end.
  */
-export function recurIterator(recur: ICAL.Recur, dtstart: ICAL.Time): ICAL.RecurIterator {
+export function recurIterator(recur: ICAL.Recur, start: ICAL.Time): ICAL.RecurIterator {
   const rule = chronologicalRecur(recur);
+  // where ical.js' own setup would go wrong, it is set up in the first month
+  // that holds an instance (monthDaySetupStart)
+  const setup = monthDaySetupStart(rule, start);
+  const dtstart = setup ?? start;
   const field = { BYSECOND: dtstart.second, BYMINUTE: dtstart.minute, BYHOUR: dtstart.hour, BYMONTH: dtstart.month };
   // the positions ical.js starts from (its constructor takes them to resume an iteration)
   const byIndices: Record<string, number> = {
@@ -92,7 +96,153 @@ export function recurIterator(recur: ICAL.Recur, dtstart: ICAL.Time): ICAL.Recur
   if ((iterator as unknown as { by_indices?: unknown }).by_indices !== byIndices) {
     throw new BoundUnavailable('ical.js no longer takes the start positions of a rule iteration');
   }
+  if (setup === null) {
+    // no month the iteration reaches holds a listed day, in any year: the
+    // rule has no instance, which ical.js marks so itself where it sees it
+    (iterator as unknown as { completed: boolean }).completed = true;
+  }
+  if (setup !== undefined) {
+    // a MONTHLY;BYMONTHDAY rule without BYDAY
+    skipEmptyMonths(iterator);
+  }
   return iterator;
+}
+
+/** The parts of an ical.js iteration this module reads or steps */
+interface IteratorState {
+  next_month?: () => number;
+  by_data: Record<string, number[]>;
+  by_indices: Record<string, number>;
+  last: ICAL.Time;
+}
+
+/**
+ * Keeps ical.js (2.2) from yielding a time of day inside a month that holds
+ * none of a MONTHLY rule's BYMONTHDAY days. next_month steps the times of
+ * the day (BYSECOND, BYMINUTE, BYHOUR, which a MONTHLY rule expands) before
+ * the day: in a month it moved to that holds no listed day it reports no
+ * instance, but leaves the day at 1, so its next call steps to the next
+ * listed time and reports day 1 at that time as one.
+ * FREQ=MONTHLY;BYMONTHDAY=31;BYHOUR=0,23 yields 1 February and 1 April at
+ * 23:00; which such days appear depends on the months a walk passes, so a
+ * walk from near `from` and one from DTSTART differ too. Where next_month
+ * lands on a day the month's list (normalised by increment_month) does not
+ * hold, every time list is set to its last value, so the step after it ends
+ * the day and moves on to the next month, which is the step the empty month
+ * needed: one invalid month, as without a time list, and no instance or
+ * charge for the times between.
+ */
+function skipEmptyMonths(iterator: ICAL.RecurIterator): void {
+  const it = iterator as unknown as IteratorState;
+  const own = it.next_month;
+  if (typeof own !== 'function') {
+    throw new BoundUnavailable('ical.js no longer steps a MONTHLY rule by next_month');
+  }
+  it.next_month = function nextMonth(this: IteratorState) {
+    let valid = own.call(this);
+    if (valid && !this.by_data.BYMONTHDAY.includes(this.last.day)) {
+      for (const [part, field] of [['BYSECOND', 'second'], ['BYMINUTE', 'minute'], ['BYHOUR', 'hour']] as const) {
+        const values = this.by_data[part];
+        if (values?.length) {
+          this.by_indices[part] = values.length - 1;
+          this.last[field] = values[values.length - 1];
+        }
+      }
+      valid = own.call(this);
+    }
+    return valid;
+  };
+}
+
+/** The days of a month, January = 1, for any year of the proleptic Gregorian calendar */
+function daysInMonth(year: number, month: number): number {
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  return month === 2 ? (leap ? 29 : 28) : FEWEST_DAYS[month - 1];
+}
+
+/** Months in a cycle of the Gregorian calendar: month lengths, and weekdays, repeat every 400 years */
+const CYCLE_MONTHS = 400 * 12;
+
+/**
+ * Where ical.js (2.2) must set up a MONTHLY;BYMONTHDAY rule without BYDAY so
+ * that it yields the rule's instances (undefined for any other rule):
+ * `dtstart` itself where its month is
+ * one the rule takes (BYMONTH) and holds a listed day; otherwise day 1 of the
+ * first month after it that ical.js' own steps reach and that is such a
+ * month, at the earliest time of day an instance has (the smallest listed
+ * BYHOUR, BYMINUTE, BYSECOND, else DTSTART's); null where no such month comes
+ * in a full cycle of the calendar, so never.
+ *
+ * ical.js' setup (init) is exact only in such a month. In any other it
+ * searches on with next_month, at most three times, which
+ * - reads the BYMONTHDAY list as written, not yet normalised to the month:
+ *   its second value, if negative and longer than the month (-31 in a June),
+ *   gives day 0 or less, which rolls into the month before, so every later
+ *   step lands a month early — FREQ=MONTHLY;INTERVAL=5;BYMONTHDAY=31,-31
+ *   from 30 June 1992 yields May+5k months (July and December of 2026)
+ *   instead of June+5k (March and August), and from a moved start the
+ *   phase depends on the month it lands in (#42);
+ * - gives up after three months and leaves the rule without any instance,
+ *   where with INTERVAL or BYMONTH the next month holding the day is further
+ *   (BYMONTHDAY=31;INTERVAL=5 from a June: June, November, April,
+ *   September, February are all short);
+ * - and a start month BYMONTH leaves out but which holds the day is yielded
+ *   as is, untested.
+ * Starting in a month the rule takes that holds a listed day takes the
+ * setup's exact branch (the days of that month, normalised), with the same
+ * state a correct search would reach: the walk then steps by next_month and
+ * increment_month, which normalise BYMONTHDAY for every month. ical.js steps
+ * by INTERVAL months, or with BYMONTH through its months in order (it
+ * ignores INTERVAL there, from DTSTART as from here), so the start stays on
+ * the iteration's own grid; no instance lies in the months skipped, as none
+ * of them holds a listed day the rule takes.
+ */
+function monthDaySetupStart(rule: ICAL.Recur, dtstart: ICAL.Time): ICAL.Time | null | undefined {
+  const listed = (part: string) => (rule.getComponent(part) as (number | string)[]).map(Number);
+  const days = listed('BYMONTHDAY');
+  if (rule.freq !== 'MONTHLY' || days.length === 0 || listed('BYDAY').length > 0) {
+    return undefined;
+  }
+  const months = listed('BYMONTH');
+  const interval = Math.max(1, rule.interval || 1);
+  const holds = (year: number, month: number) => (months.length === 0 || months.includes(month)) &&
+    days.some((d) => Number.isInteger(d) && d !== 0 && Math.abs(d) <= daysInMonth(year, month));
+  let { year, month } = dtstart;
+  if (holds(year, month)) {
+    return dtstart;
+  }
+  for (let steps = 0; steps < CYCLE_MONTHS; steps++) {
+    // increment_month: the next listed month (a year on past the last), or INTERVAL months on
+    if (months.length > 0) {
+      const next = months.find((m) => m > month);
+      year += next === undefined ? 1 : 0;
+      month = next ?? months[0];
+    } else {
+      month += interval;
+      year += Math.floor((month - 1) / 12);
+      month = ((month - 1) % 12) + 1;
+    }
+    if (holds(year, month)) {
+      // the earliest time of day an instance has: ical.js drops what lies
+      // before its start, and takes a time part BYHOUR, BYMINUTE or BYSECOND
+      // leaves open from it (its setup takes the first listed one otherwise)
+      const earliest = (part: string, own: number) => {
+        const values = listed(part).filter((v) => Number.isInteger(v));
+        return values.length > 0 ? Math.min(...values) : own;
+      };
+      const start = dtstart.clone();
+      start.year = year;
+      start.month = month;
+      start.day = 1;
+      if (!start.isDate) {
+        start.hour = earliest('BYHOUR', dtstart.hour);
+        start.minute = earliest('BYMINUTE', dtstart.minute);
+        start.second = earliest('BYSECOND', dtstart.second);
+      }
+      return start;
+    }
+  }
+  return null;
 }
 
 /** The length of a rule period of a fixed length, in seconds of the wall clock */
@@ -220,9 +370,10 @@ function farSetPosition(recur: ICAL.Recur): boolean {
  *   same kind (a walk ends those after 336 empty months). Where a walk ends a
  *   rule so, inside the range, the expansion says it is not complete.
  * The other setups stay within the start's period (WEEKLY steps to its first
- * BYDAY within the week; MONTHLY;BYMONTHDAY searches at most three months,
- * through the same next_month a walk steps by), or end the rule: the caller
- * then walks from DTSTART. Every other way ical.js refuses is decided by the
+ * BYDAY within the week; MONTHLY;BYMONTHDAY without BYDAY is set up in the
+ * first month on the start's own grid that holds a listed day, see
+ * monthDaySetupStart: ical.js' own search there shifted the grid by a month),
+ * or end the rule: the caller then walks from DTSTART. Every other way ical.js refuses is decided by the
  * rule or by DTSTART's own setup, which the caller checks at DTSTART. Moving
  * DTSTART never changes which instances are found, only where the walk
  * begins.
@@ -351,3 +502,4 @@ export function fixedYearlyWalls(recur: ICAL.Recur, dtstart: number, from: numbe
     }
   })();
 }
+

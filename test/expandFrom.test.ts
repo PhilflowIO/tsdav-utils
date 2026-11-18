@@ -237,13 +237,17 @@ describe('with `from` or without, the same verdict', () => {
     expect(early).toMatchObject({ complete: true, stoppedBy: null });
   });
 
-  it('a rule ical.js sets up at DTSTART to yield nothing yields nothing with `from` either', () => {
-    // 31 in a November: ical.js' setup searches three months on through BYMONTH, finds none, and never yields
+  it('a rule whose setup month holds none of its days yields from the first that does, with `from` or without', () => {
+    // 31 in a November: ical.js' own setup searched three months on through
+    // BYMONTH (February, April, June), found none and never yielded; the
+    // iteration is set up in October instead (#42)
     const ics = calendar(...component('r', 'DTSTART;TZID=Europe/Berlin:20181107T231400',
       'RRULE:FREQ=MONTHLY;BYMONTH=6,10,4,2;BYMONTHDAY=31;BYMINUTE=30;BYSETPOS=-1,2;WKST=SA'));
     const all = call(ics)().occurrences.map((o) => o.recurrenceId.value);
-    expect(all).toEqual(['2018-11-07T23:14:00']);
-    expect(call(ics, '2027-03-28T00:05:16.000Z')().occurrences).toEqual([]);
+    expect(all.slice(0, 3)).toEqual(['2018-11-07T23:14:00', '2019-10-31T23:30:00', '2020-10-31T23:30:00']);
+    expect(all).toHaveLength(1 + 2050 - 2019);
+    expect(call(ics, '2027-03-28T00:05:16.000Z')().occurrences.map((o) => o.recurrenceId.value))
+      .toEqual(all.filter((v) => v >= '2027-03-28T01:05:16'));
   });
 
   it('a YEARLY weekday pinned to day 366 is walked from DTSTART, so it ends where the walk from DTSTART ends', () => {
@@ -431,7 +435,7 @@ describe('expansion with `from` equals the full expansion filtered to `from`', (
     if (rnd() < 0.5) parts.push(`INTERVAL=${int(2, sub ? 7 : 4)}`);
     if (rnd() < (freq === 'YEARLY' ? 0.6 : sub ? 0.15 : 0.3)) parts.push(`BYMONTH=${some([1, 2, 3, 4, 6, 9, 10, 12], 4)}`);
     const monthly = freq === 'MONTHLY' || freq === 'YEARLY';
-    if (monthly && rnd() < 0.35) parts.push(`BYMONTHDAY=${some([1, 5, 13, 28, 29, 30, 31, -1, -2], 3)}`);
+    if (monthly && rnd() < 0.35) parts.push(`BYMONTHDAY=${some([1, 5, 13, 28, 29, 30, 31, -1, -2, -29, -30, -31], 3)}`);
     else if (freq === 'YEARLY' && rnd() < 0.15) parts.push(`BYWEEKNO=${some([1, 2, 10, 52, 53, -1], 2)}`);
     else if (freq === 'YEARLY' && rnd() < 0.15) parts.push(`BYYEARDAY=${some([1, 59, 60, 200, 365, 366, -1], 3)}`);
     let byday = false;
