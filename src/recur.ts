@@ -735,6 +735,18 @@ function periodModel(recur: ICAL.Recur, dtstart: number, dateOnly: boolean): Per
   };
 }
 
+/**
+ * Whether keepInstances checks every candidate of the rule against its
+ * PeriodModel: MONTHLY, except BYDAY with BYMONTHDAY, and BYDAY with BYSETPOS
+ * and more than one time of day, where ical.js yields no superset of the
+ * instances (see keepInstances).
+ */
+function candidatesChecked(rule: ICAL.Recur, model: PeriodModel): boolean {
+  const has = (part: string) => (rule.getComponent(part) as unknown[]).length > 0;
+  return model.monthly &&
+    !(has('BYDAY') && ((model.bySetPos.length > 0 && model.times.length > 1) || has('BYMONTHDAY')));
+}
+
 /** The greatest common divisor */
 const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
 
@@ -760,7 +772,8 @@ function cyclePeriods(step: number): number {
  * instance in one of its periods after the one holding `after` — from the one
  * holding `begin` where `after` is null — up to the one holding `end`, all
  * wall clocks of the series; null where it cannot be told here (another
- * FREQ, BYWEEKNO, an ordinal BYDAY under BYMONTHDAY or BYYEARDAY). A period
+ * FREQ, BYWEEKNO, an ordinal BYDAY under BYMONTHDAY or BYYEARDAY) or where
+ * BYSETPOS meets candidates nothing checks (candidatesChecked). A period
  * holds an instance when its set of date-times is not empty and, with
  * BYSETPOS, has a position BYSETPOS names. `charge` is called with the units
  * each period costs to count (one a month).
@@ -774,7 +787,11 @@ function cyclePeriods(step: number): number {
 export function holdsInstance(recur: ICAL.Recur, dtstart: number, begin: number, after: number | null,
   end: number, dateOnly: boolean, charge: (units: number) => void = () => undefined): boolean | null {
   const model = periodModel(recur, dtstart, dateOnly);
-  if (!model) {
+  // with BYSETPOS, ical.js' setup yields days BYSETPOS rules out (a YEARLY
+  // BYDAY=5TU;BYSETPOS=2 gives a fifth Tuesday every year, RFC 5545 none):
+  // where its candidates are not checked, what it gave cannot be trusted to
+  // be all there is, and its give-up stays one
+  if (!model || (model.bySetPos.length > 0 && !candidatesChecked(recur, model))) {
     return null;
   }
   const unit = model.monthly ? 1 : 12;
@@ -827,9 +844,7 @@ function keepInstances(iterator: ICAL.RecurIterator, rule: ICAL.Recur, start: IC
   t.setUTCFullYear(start.year, start.month - 1, start.day);
   t.setUTCHours(start.hour, start.minute, start.second, 0);
   const model = periodModel(rule, t.getTime() / 1000, start.isDate);
-  const byDay = (rule.getComponent('BYDAY') as unknown[]).length > 0;
-  if (!model || byDay && (model.bySetPos.length > 0 && model.times.length > 1 ||
-      (rule.getComponent('BYMONTHDAY') as unknown[]).length > 0)) {
+  if (!model || !candidatesChecked(rule, model)) {
     return;
   }
   const it = iterator as unknown as { next: (again?: boolean) => ICAL.Time | null; rule: ICAL.Recur;

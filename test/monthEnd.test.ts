@@ -309,6 +309,18 @@ describe('a rule with nothing left to give is complete, one ical.js gives up on 
       wall('3400-12-31'), true)).toBe(false);
   });
 
+  it('does not vouch for BYSETPOS where nothing checks ical.js\' candidates', () => {
+    // ical.js' YEARLY yields a fifth Tuesday every 7 years although BYSETPOS=2
+    // of at most one day names none (#36): a give-up there is no proof of an
+    // end, so holdsInstance does not count; checked MONTHLY candidates it does
+    const wall = (d: string) => Date.parse(`${d}T00:00:00Z`) / 1000;
+    const at = wall('1990-09-30');
+    expect(holdsInstance(ICAL.Recur.fromString('FREQ=YEARLY;INTERVAL=7;BYDAY=5TU;BYSETPOS=2'), at, at, null, wall('2100-01-01'),
+      true)).toBeNull();
+    expect(holdsInstance(ICAL.Recur.fromString('FREQ=MONTHLY;INTERVAL=7;BYDAY=5TU;BYSETPOS=2'), at, at, null, wall('2100-01-01'),
+      true)).toBe(false);
+  });
+
   it('charges counting the periods to the budget', () => {
     // INTERVAL=2: 2,400 periods of one month to prove the fifth Monday never comes
     const ics = series('DTSTART;VALUE=DATE:20010101', 'FREQ=MONTHLY;INTERVAL=2;BYDAY=5MO;BYSETPOS=5');

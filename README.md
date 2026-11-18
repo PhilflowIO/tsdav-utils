@@ -893,7 +893,10 @@ for at most one cycle of the rule's own periods, after which every period
 shape has come round (month lengths and weekdays repeat every 4,800 months,
 so 4,800 / gcd(months per period, 4,800) periods: 400 for `YEARLY;INTERVAL=7`,
 2,800 years). So `FREQ=MONTHLY;BYDAY=5MO;BYSETPOS=5`, which never recurs, is
-`complete: true`. The count is charged to `budget`, one unit a month.
+`complete: true`. The count is charged to `budget`, one unit a month. With
+`BYSETPOS`, only where every candidate is checked as described above (`MONTHLY`
+without `BYDAY`+`BYMONTHDAY`): elsewhere ical.js may have invented what it gave
+(`YEARLY;BYDAY=5TU;BYSETPOS=2`), and its give-up stays `'library'`.
 `BYWEEKNO`, and an ordinal weekday with `BYMONTHDAY` or `BYYEARDAY`, are not
 counted: those stay `'library'`. Pass the same budget to several
 calls to bound a whole request.
