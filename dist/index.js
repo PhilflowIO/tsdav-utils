@@ -568,13 +568,17 @@ function periodModel(recur, dtstart, dateOnly) {
     bySetPos: numbers("BYSETPOS").filter((v) => v !== 0)
   };
 }
+function candidatesChecked(rule, model) {
+  const has = (part) => rule.getComponent(part).length > 0;
+  return model.monthly && !(has("BYDAY") && (model.bySetPos.length > 0 && model.times.length > 1 || has("BYMONTHDAY")));
+}
 var gcd = (a, b) => b === 0 ? a : gcd(b, a % b);
 function cyclePeriods(step) {
   return CYCLE_MONTHS / gcd(step, CYCLE_MONTHS);
 }
 function holdsInstance(recur, dtstart, begin, after, end, dateOnly, charge = () => void 0) {
   const model = periodModel(recur, dtstart, dateOnly);
-  if (!model) {
+  if (!model || model.bySetPos.length > 0 && !candidatesChecked(recur, model)) {
     return null;
   }
   const unit = model.monthly ? 1 : 12;
@@ -603,8 +607,7 @@ function keepInstances(iterator, rule, start) {
   t.setUTCFullYear(start.year, start.month - 1, start.day);
   t.setUTCHours(start.hour, start.minute, start.second, 0);
   const model = periodModel(rule, t.getTime() / 1e3, start.isDate);
-  const byDay = rule.getComponent("BYDAY").length > 0;
-  if (!model || byDay && (model.bySetPos.length > 0 && model.times.length > 1 || rule.getComponent("BYMONTHDAY").length > 0)) {
+  if (!model || !candidatesChecked(rule, model)) {
     return;
   }
   const it = iterator;
