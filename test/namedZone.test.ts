@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import ICAL from 'ical.js';
 import { UpdateFieldsError, seriesMaster, updateFields } from '../src/index';
 import { scanCacheSize, vtimezoneFor as generateVtimezone } from '../src/vtimezone';
@@ -247,19 +247,27 @@ describe('generated VTIMEZONE against Intl', () => {
       .toEqual(generateVtimezone('Australia/Sydney', 2026, 2027).toString());
   });
 
-  it('does not scan past the zone\'s final state: an UNTIL in 9999 or a value in year 1 is fast', () => {
-    for (const [tzid, until] of [['Europe/Berlin', '99991231T000000Z'], ['Africa/Cairo', '50001231T000000Z'],
-      ['Asia/Gaza', '99991231T000000Z']]) {
-      // warm the zone's scan of the years up to today, which any first use pays
-      generateVtimezone(tzid, 2026, 2026);
-      const t0 = performance.now();
-      const out = updateFields(skeleton(), { DTSTART: '2026-10-05T09:00:00', RRULE: `FREQ=WEEKLY;UNTIL=${until}` }, { zone: tzid });
-      expect(performance.now() - t0).toBeLessThan(200);
-      expect(out).toContain(`UNTIL=${until.slice(0, 4)}`);
+  it('does not scan past the zone\'s final state: an UNTIL in 9999 or a value in year 1 is cheap', () => {
+    // Counted in Intl lookups, not milliseconds: a clock bound fails at random
+    // on a loaded machine. A scan into the far future samples the offset daily,
+    // millions of lookups; a run that stops at the final state takes a few.
+    const lookups = vi.spyOn(Intl.DateTimeFormat.prototype, 'formatToParts');
+    try {
+      for (const [tzid, until] of [['Europe/Berlin', '99991231T000000Z'], ['Africa/Cairo', '50001231T000000Z'],
+        ['Asia/Gaza', '99991231T000000Z']]) {
+        // warm the zone's scan of the years up to today, which any first use pays
+        generateVtimezone(tzid, 2026, 2026);
+        lookups.mockClear();
+        const out = updateFields(skeleton(), { DTSTART: '2026-10-05T09:00:00', RRULE: `FREQ=WEEKLY;UNTIL=${until}` }, { zone: tzid });
+        expect(lookups.mock.calls.length, tzid).toBeLessThan(1000);
+        expect(out).toContain(`UNTIL=${until.slice(0, 4)}`);
+      }
+      lookups.mockClear();
+      expect(refusal(() => generateVtimezone('Europe/Berlin', 1, 1)).code).toBe('UNSUPPORTED_VTIMEZONE');
+      expect(lookups.mock.calls.length).toBeLessThan(100);
+    } finally {
+      lookups.mockRestore();
     }
-    const t0 = performance.now();
-    expect(refusal(() => generateVtimezone('Europe/Berlin', 1, 1)).code).toBe('UNSUPPORTED_VTIMEZONE');
-    expect(performance.now() - t0).toBeLessThan(200);
   });
 
   it('keeps one cache entry per zone, of its changes only, grown for new years', () => {

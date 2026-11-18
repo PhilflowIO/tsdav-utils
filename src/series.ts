@@ -5,7 +5,8 @@ import type { DateListEdit, ListOutcome } from './dateLists';
 import type { Anchor } from './typedValue';
 import { fieldsOf, unknownZone, wallOf, zoneOf } from './zone';
 import { UpdateFieldsError, wrapped } from './errors';
-import { BoundUnavailable, fixedYearlyWalls, iterationStart, recurIterator, walkedInFull } from './recur';
+import { BoundUnavailable, fixedYearlyWalls, holdsInstance, iterationStart, recurIterator, walkedInFull } from './recur';
+import type { MissedCheck } from './recur';
 
 /*
  * A DTSTART write on a series master moves the whole series.
@@ -747,9 +748,10 @@ function bounded(iterator: ICAL.RecurIterator, budget: RecurrenceBudget, recur: 
  * Whether the walk from DTSTART yields an instance at all, read before a walk
  * from a moved start. ical.js settles some rules at DTSTART's setup: it
  * refuses them (thrown here, as the walk without `from` throws), or it sets
- * them up to yield nothing, without an error (MONTHLY;BYMONTH=2,4,6,10;
- * BYMONTHDAY=31 from a November: its setup searches three months on through
- * BYMONTH and gives up), where a walk from a later start would yield. The
+ * them up to yield nothing, without an error (YEARLY;BYYEARDAY=366 whose
+ * setup finds no 29 February in the three years it looks at; a rule that has
+ * no instance at all, MONTHLY;BYMONTH=6;BYMONTHDAY=31), where a walk from a
+ * later start might yield. The
  * first instance is all that is read, charged to the budget like any walk; a
  * search past the horizon counts as yielding (the walk itself decides).
  */
@@ -779,8 +781,10 @@ function yieldsFromStart(recur: ICAL.Recur, dtstart: ICAL.Time, budget: Recurren
  * that it never yields: the expansion is then not complete.
  */
 function endedByRule(iterator: ICAL.RecurIterator): boolean {
-  const it = iterator as unknown as { rule: ICAL.Recur; last: ICAL.Time; occurrence_number: number };
-  return Boolean(it.rule.count && it.occurrence_number >= it.rule.count) ||
+  const it = iterator as unknown as { rule: ICAL.Recur; last: ICAL.Time; occurrence_number: number;
+    countReached?: boolean };
+  // COUNT reached: ical.js' own count, or the one keepInstances keeps
+  return Boolean(it.countReached) || Boolean(it.rule.count && it.occurrence_number >= it.rule.count) ||
     Boolean(it.rule.until && it.last.compare(it.rule.until) > 0);
 }
 
@@ -877,8 +881,12 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
       // (and the first candidate past the horizon) ends the rule: nothing
       // after it can lie in the range
       const walk = (first: number) => {
+        // how far the walk's result stands for the rule; ical.js may have
+        // passed an instance there without yielding it (keepInstances)
+        let checkedTo = Math.min(until, ruleEnd);
+        let iterator: ICAL.RecurIterator | null = null;
         try {
-          const iterator = bounded(recurIterator(recur, timeOf(first)), budget, recur, day ? until + DAY - 1 : until);
+          iterator = bounded(recurIterator(recur, timeOf(first)), budget, recur, day ? until + DAY - 1 : until);
           if (first !== start.wall && (iterator as unknown as { completed?: boolean }).completed) {
             // the setup found no instance from the moved start and ended the
             // rule (YEARLY;BYYEARDAY=366 from 2097: its search looks three
@@ -887,18 +895,38 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
           }
           const emptyAtSetup = Boolean((iterator as unknown as { completed?: boolean }).completed);
           let next = iterator.next();
+          let yielded: number | null = null;
+          added.length = 0;
           for (; next; next = iterator.next()) {
             const wall = norm(wallOf(next.year, next.month, next.day, next.hour, next.minute, next.second));
             if (wall > until) {
               break;
             }
+            yielded = wall;
             // before `from`: not needed, and from a moved start not exact
-            if (wall >= from) {
+            if (wall >= from && !walls.has(wall)) {
               walls.add(wall);
+              added.push(wall);
             }
           }
+          if (!next && endedByRule(iterator) && recur.count) {
+            // COUNT reached: nothing after the last instance belongs to the rule
+            checkedTo = yielded ?? -Infinity;
+          }
           if (!next && !emptyAtSetup && !endedByRule(iterator)) {
-            // ical.js gave up its search inside the range
+            // the give-up: holdsInstance tells what comes after the last instance
+            checkedTo = yielded ?? -Infinity;
+          }
+          if (!next && !emptyAtSetup && !endedByRule(iterator) &&
+              holdsInstance(recur, start.wall, first, yielded, Math.min(until, ruleEnd), day, (units) => {
+                // counting the periods is work like any walk: charged to the same budget
+                if ((budget.remaining -= units) < 0) {
+                  throw new SeriesTooSparse('the rule is too sparse to expand within the work limit');
+                }
+              }) !== false) {
+            // ical.js gave up its search inside the range, and the rule may
+            // have an instance after the last it gave, up to the range's end:
+            // a rule with none left (holdsInstance) has simply ended
             cut = true;
           }
         } catch (error) {
@@ -906,13 +934,28 @@ export function expandWalls(master: ICAL.Component, until: number, budget: Recur
             throw error;
           }
         }
+        const missed = (iterator as unknown as { missed?: MissedCheck } | null)?.missed;
+        // with COUNT an instance passed before `from` shifts the count of every later one
+        const firstMissed = missed ? missed(recur.count ? -Infinity : from, checkedTo) : null;
+        if (firstMissed !== null) {
+          // ical.js passed an instance of the range without yielding it
+          cut = true;
+          if (recur.count) {
+            // what the walk added after it is counted wrong: none of it is known to be the rule's
+            for (const wall of added) {
+              if (wall > firstMissed) walls.delete(wall);
+            }
+          }
+        }
       };
+      const added: number[] = [];
       let first = iterationStart(recur, start.wall, ruleFrom, day);
       if (first !== start.wall) {
         const fromStart = yieldsFromStart(recur, timeOf(start.wall), budget, day ? until + DAY - 1 : until);
         if (fromStart === 'none') {
-          // the walk from DTSTART yields nothing: nor does it with `from`
-          continue;
+          // ical.js' walk from DTSTART yields nothing: walked from there, it
+          // ends at once and tells whether RFC 5545 has instances it missed
+          first = start.wall;
         }
         if (fromStart === 'cut') {
           // ical.js gives up before its first instance: the walk from DTSTART
