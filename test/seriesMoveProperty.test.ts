@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import ICAL from 'ical.js';
 import { updateFields } from '../src/updateFields';
-import { expansionWork } from '../src/series';
+import { WORK_BUDGET, expansionWork } from '../src/series';
 import { createRecurrenceBudget, expandOccurrences } from '../src/expand';
 
 // Size and seed of the property tests. CI runs a small sample by default;
@@ -503,24 +503,27 @@ describe('the orphan check is bounded', () => {
   const calendar = (...lines: string[]) => ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//EN', ...lines,
     'END:VCALENDAR', ''].join('\r\n');
   const vevent = (...lines: string[]) => ['BEGIN:VEVENT', 'UID:s', 'DTSTAMP:20260101T000000Z', ...lines, 'END:VEVENT'];
+  // Bounded is counted in the metered rule steps (expansionWork), not in
+  // milliseconds: a clock bound fails at random on a loaded machine.
   const timed = (f: () => void) => {
-    const t0 = performance.now();
+    const before = expansionWork.steps;
     let error: Error | null = null;
     try {
       f();
     } catch (e) {
       error = e as Error;
     }
-    return { ms: performance.now() - t0, error };
+    return { steps: expansionWork.steps - before, error };
   };
 
-  it('a sparse rule given in the call fails closed, well under a second', () => {
+  it('a sparse rule given in the call fails closed within the work budget', () => {
     const input = calendar(...vevent('DTSTART:20260101T235959Z', 'RRULE:FREQ=DAILY'),
       ...vevent('RECURRENCE-ID:20261231T235959Z', 'DTSTART:20261231T235959Z'));
-    const { ms, error } = timed(() => updateFields(input,
+    const { steps, error } = timed(() => updateFields(input,
       { RRULE: 'FREQ=SECONDLY;BYMONTH=12;BYMONTHDAY=31;BYHOUR=23;BYMINUTE=59;BYSECOND=59' }));
     expect(error?.message).toMatch(/^Cannot check that the overrides and EXDATEs still name occurrences of the series: .*Rewrite the whole iCalendar object instead$/);
-    expect(ms).toBeLessThan(1000);
+    // stopped by the work budget (each step costs at least one unit)
+    expect(steps).toBeLessThanOrEqual(WORK_BUDGET);
   });
 
   it.each([
@@ -530,8 +533,9 @@ describe('the orphan check is bounded', () => {
   ])('%s with an override, and an RDATE written: bounded', (rule, dtstart, rid) => {
     const input = calendar(...vevent(dtstart, `RRULE:FREQ=${rule}`),
       ...vevent(rid, dtstart.replace('DTSTART', 'DTSTART')));
-    const { ms } = timed(() => updateFields(input, { RDATE: '2030-01-01T09:00:00Z' }));
-    expect(ms).toBeLessThan(1000);
+    const { steps } = timed(() => updateFields(input, { RDATE: '2030-01-01T09:00:00Z' }));
+    // a few steps today: the rule's next instance is decided without a long walk
+    expect(steps).toBeLessThan(100);
   });
 
   it('the expansion is metered: the step counter in ical.js\' iterator is hooked', () => {
@@ -545,10 +549,10 @@ describe('the orphan check is bounded', () => {
 
   it('a move is decided without expanding anything', () => {
     const before = expansionWork.steps;
-    const { ms, error } = timed(() => updateFields(calendar(...vevent('DTSTART:20261231T230000Z',
+    const { steps, error } = timed(() => updateFields(calendar(...vevent('DTSTART:20261231T230000Z',
       'RRULE:FREQ=MINUTELY;BYMONTH=12;BYMONTHDAY=31;BYHOUR=23')), { DTSTART: '2026-12-31T23:01:00Z' }));
     expect(error?.message).toMatch(/does not move the whole series/);
     expect(expansionWork.steps).toBe(before);
-    expect(ms).toBeLessThan(100);
+    expect(steps).toBe(0);
   });
 });

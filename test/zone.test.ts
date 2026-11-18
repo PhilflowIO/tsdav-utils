@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import ICAL from 'ical.js';
 import { zoneOf } from '../src/zone';
 
@@ -144,10 +144,16 @@ describe('a VTIMEZONE with an observance no time zone has is refused, quickly', 
       `RRULE:FREQ=${freq};BYMONTH=2;BYMONTHDAY=30`, 'END:DAYLIGHT',
       'BEGIN:STANDARD', 'TZOFFSETFROM:+0200', 'TZOFFSETTO:+0100', 'DTSTART:19700101T000000',
       `RRULE:FREQ=${freq}`, 'END:STANDARD', 'END:VTIMEZONE'], 'Hostile/Zone');
-    const t0 = performance.now();
-    expect(() => zone.fromUtc(Date.UTC(2026, 5, 1) / 1000))
-      .toThrow(`the VTIMEZONE "Hostile/Zone" has an observance repeating ${freq}, which no time zone does, so it is not read`);
-    expect(performance.now() - t0).toBeLessThan(100);
+    // refused before any rule step, counted rather than timed (a clock bound
+    // fails at random on a loaded machine)
+    const steps = vi.spyOn(ICAL.RecurIterator.prototype, 'next');
+    try {
+      expect(() => zone.fromUtc(Date.UTC(2026, 5, 1) / 1000))
+        .toThrow(`the VTIMEZONE "Hostile/Zone" has an observance repeating ${freq}, which no time zone does, so it is not read`);
+      expect(steps).not.toHaveBeenCalled();
+    } finally {
+      steps.mockRestore();
+    }
   });
 
   it('a YEARLY or MONTHLY rule that matches nothing ends by itself', () => {
@@ -156,8 +162,14 @@ describe('a VTIMEZONE with an observance no time zone has is refused, quickly', 
       'RRULE:FREQ=MONTHLY;BYMONTH=2;BYMONTHDAY=30', 'END:DAYLIGHT',
       'BEGIN:STANDARD', 'TZOFFSETFROM:+0200', 'TZOFFSETTO:+0100', 'DTSTART:19701025T030000',
       'RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30', 'END:STANDARD', 'END:VTIMEZONE'], 'Odd/Zone');
-    const t0 = performance.now();
-    zone.fromUtc(Date.UTC(2026, 5, 1) / 1000);
-    expect(performance.now() - t0).toBeLessThan(1000);
+    // ends after a bounded number of rule steps (about 400 today), counted
+    // rather than timed
+    const steps = vi.spyOn(ICAL.RecurIterator.prototype, 'next');
+    try {
+      zone.fromUtc(Date.UTC(2026, 5, 1) / 1000);
+      expect(steps.mock.calls.length).toBeLessThan(5000);
+    } finally {
+      steps.mockRestore();
+    }
   });
 });
