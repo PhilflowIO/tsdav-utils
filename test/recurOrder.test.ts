@@ -372,8 +372,9 @@ describe('expansion matches a brute-force reading of the rule, in any listed ord
       }
       rfc.sort((a, b) => a - b);
       expect(ordered.filter((w) => !rfc.includes(w)).map(basic), rule).toEqual([]);
-      const missed = (iterator as unknown as { missed: (lower: number, end: number) => boolean }).missed;
-      expect(missed(-Infinity, horizon), rule).toBe(rfc.some((w) => !ordered.includes(w)));
+      const missed = (iterator as unknown as { missed: (lower: number, end: number) => number | null }).missed;
+      const skipped = rfc.filter((w) => !ordered.includes(w));
+      expect(missed(-Infinity, horizon), rule).toBe(skipped.length > 0 ? skipped[0] : null);
     }
   });
 });

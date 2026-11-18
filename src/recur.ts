@@ -865,8 +865,8 @@ function wallOfTime(time: ICAL.Time): number {
   return wallAt(time.year, time.month, time.day, time.isDate ? 0 : time.hour * 3600 + time.minute * 60 + time.second);
 }
 
-/** What keepInstances leaves on an iterator: whether ical.js passed an instance in [lower, end] (wall clocks) without yielding it */
-export type MissedCheck = (lower: number, end: number) => boolean;
+/** What keepInstances leaves on an iterator: the first instance in [lower, end] (wall clocks) ical.js passed without yielding it, or null */
+export type MissedCheck = (lower: number, end: number) => number | null;
 
 /**
  * Checks a MONTHLY or YEARLY iteration against RFC 5545 (periodModel), where
@@ -877,15 +877,15 @@ export type MissedCheck = (lower: number, end: number) => boolean;
  *   rule steps every listed month whatever INTERVAL says; BYSETPOS goes
  *   unread under a MONTHLY BYMONTHDAY and a YEARLY fifth weekday; a YEARLY
  *   BYMONTHDAY a month lacks becomes a day of the next month
- *   (BYMONTH=2;BYMONTHDAY=30 gives 2 March). A dropped candidate does not
- *   count toward COUNT: ical.js counts what it yields, so its own copy of
- *   the rule (chronologicalRecur) counts one more;
+ *   (BYMONTH=2;BYMONTHDAY=30 gives 2 March). COUNT counts the kept
+ *   instances (the iterator's `countReached` says it ended so);
  * - every period the iteration passes is compared with the rule's instances
  *   in it from `start` on: one ical.js never yielded (a YEARLY BYMONTHDAY
  *   without BYMONTH it reads in DTSTART's month only, a MONTHLY BYDAY with
  *   BYMONTHDAY it steps month by month whatever INTERVAL says) is recorded,
- *   and the MissedCheck left on the iterator (`missed`) reports it for the
- *   range the caller walked: the result is then not complete.
+ *   and the MissedCheck left on the iterator (`missed`) gives the first in
+ *   the range the caller walked: the result is then not complete, and with
+ *   COUNT, whose count it shifts, nothing after it is one of the rule's.
  * So what passes is exactly RFC 5545's instances, or the caller learns it is
  * not. Where no instance comes in a whole cycle of periods (cyclePeriods),
  * none comes at all: the iteration ends there rather than dropping ical.js'
@@ -901,11 +901,17 @@ function keepInstances(iterator: ICAL.RecurIterator, rule: ICAL.Recur, start: IC
     return;
   }
   const it = iterator as unknown as { next: (again?: boolean) => ICAL.Time | null; rule: ICAL.Recur;
-    completed: boolean; missed?: MissedCheck };
+    completed: boolean; missed?: MissedCheck; countReached?: boolean };
   const own = it.next;
   if (typeof own !== 'function') {
     throw new BoundUnavailable('ical.js no longer iterates by next');
   }
+  // COUNT counts the instances kept here: ical.js' own count (which counts
+  // what it yields, and twice where it retries a candidate inside next) is
+  // switched off on its copy of the rule (chronologicalRecur)
+  const count = it.rule.count || 0;
+  it.rule.count = null as unknown as number;
+  let counted = 0;
   const periodOf = (year: number, month: number) => year * 12 + (model.monthly ? month - 1 : 0);
   /** The instances of the period at month index `at`, as wall clocks in order; none off the grid */
   let cachedAt = Number.NaN;
@@ -964,7 +970,8 @@ function keepInstances(iterator: ICAL.RecurIterator, rule: ICAL.Recur, start: IC
     // a range past a whole cycle without a check: the periods repeat, so one cycle tells
     passTo(Math.min(at, pointer + cyclePeriods(model.step) * model.step));
     const open = pointer === at ? instancesOf(at).filter((wall) => wall >= startWall && !yielded.has(wall)) : [];
-    return [...missed, ...open].some((wall) => wall >= lower && wall <= end);
+    const inRange = [...missed, ...open].filter((wall) => wall >= lower && wall <= end);
+    return inRange.length > 0 ? Math.min(...inRange) : null;
   };
   const span = cyclePeriods(model.step) * model.step;
   let kept = model.origin;
@@ -973,6 +980,11 @@ function keepInstances(iterator: ICAL.RecurIterator, rule: ICAL.Recur, start: IC
     if (again) {
       // ical.js' own retry inside next(): not a candidate of ours
       return own.call(this, again);
+    }
+    if (count && counted >= count) {
+      this.completed = true;
+      this.countReached = true;
+      return null;
     }
     for (;;) {
       const time = own.call(this);
@@ -992,10 +1004,8 @@ function keepInstances(iterator: ICAL.RecurIterator, rule: ICAL.Recur, start: IC
       if (cached.has(wall)) {
         yielded.add(wall);
         kept = at;
+        counted++;
         return time;
-      }
-      if (this.rule.count) {
-        this.rule.count++;
       }
       if (at - kept > span) {
         this.completed = true;

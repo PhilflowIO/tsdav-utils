@@ -341,6 +341,24 @@ describe('a rule with nothing left to give is complete, one ical.js gives up on 
     expect(expand(monthly, '2020-01-01', '2019-01-02')).toMatchObject({ complete: false, stoppedBy: 'library' });
   });
 
+  it('a COUNT ical.js counts past a missed instance is cut there, and `from` sees a miss as the full walk does', () => {
+    // ical.js reads -2 in November by the month before and skips an instance:
+    // the count shifts, so the result stops at the first one it missed
+    const rule = 'FREQ=YEARLY;INTERVAL=2;BYMONTH=12,11;BYMONTHDAY=30,-1,-2;COUNT=5';
+    const counted = expand(series('DTSTART;VALUE=DATE:20220422', rule), '2032-01-01');
+    const want = rfcDates(rule.replace(/;COUNT=5/, ''), '2022-04-22', '2032-01-01').slice(0, 5);
+    if (counted.complete) expect(values(counted)).toEqual(['2022-04-22', ...want]);
+    else {
+      expect(counted.stoppedBy).toBe('library');
+      expect(values(counted).slice(1).every((v, i) => v === want[i])).toBe(true);
+    }
+    // the second Sunday of February, April and December, BYSETPOS=-2 of the year:
+    // ical.js reads BYSETPOS per month and yields none; with `from` as without, not complete
+    const sundays = series('DTSTART;VALUE=DATE:19921003', 'FREQ=YEARLY;BYMONTH=4,12,2;BYDAY=2SU;BYSETPOS=-2');
+    expect(expand(sundays, '2010-01-01')).toMatchObject({ complete: false, stoppedBy: 'library' });
+    expect(expand(sundays, '2010-01-01', '2006-12-23')).toMatchObject({ complete: false, stoppedBy: 'library' });
+  });
+
   it('charges counting the periods to the budget', () => {
     // INTERVAL=2: 2,400 periods of one month to prove the fifth Monday never comes
     const ics = series('DTSTART;VALUE=DATE:20010101', 'FREQ=MONTHLY;INTERVAL=2;BYDAY=5MO;BYSETPOS=5');
